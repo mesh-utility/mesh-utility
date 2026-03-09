@@ -95,7 +95,7 @@ class AppState extends ChangeNotifier {
             if (!_manualBleDisconnectRequested) {
               unawaited(_attemptAutoReconnect(reason: reason));
             }
-      };
+          };
     }
     if (kIsWeb) {
       bleStatus = 'BLE ready (web)';
@@ -190,6 +190,7 @@ class AppState extends ChangeNotifier {
       return false;
     }
   }
+
   bool _autoReconnectInProgress = false;
   bool _resumeAutoScanAfterReconnect = false;
   bool _discoverLocationRefreshInFlight = false;
@@ -210,6 +211,7 @@ class AppState extends ChangeNotifier {
   DateTime? _lastPeriodicSyncInternetUtc;
   bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
+  Future<bool> Function()? onLocationPermissionPrompt;
 
   List<RawScan> rawScans = const [];
   List<CoverageZone> coverageZones = const [];
@@ -1834,6 +1836,17 @@ class AppState extends ChangeNotifier {
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          final proceed =
+              await (onLocationPermissionPrompt?.call() ??
+                  Future<bool>.value(true));
+          if (!proceed) {
+            deviceLocationStatus = 'Location permission not requested';
+            _debugLog.warn('location', deviceLocationStatus);
+            notifyListeners();
+            return;
+          }
+        }
         permission = await Geolocator.requestPermission();
       }
       if (permission == LocationPermission.denied) {
@@ -2018,7 +2031,10 @@ class AppState extends ChangeNotifier {
     _periodicSyncTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       unawaited(_maybeRunPeriodicSync(intervalMinutes));
     });
-    _debugLog.info('sync', 'Periodic sync scheduled interval=${intervalMinutes}m');
+    _debugLog.info(
+      'sync',
+      'Periodic sync scheduled interval=${intervalMinutes}m',
+    );
   }
 
   Future<void> _maybeRunPeriodicSync(int intervalMinutes) async {
@@ -2030,10 +2046,7 @@ class AppState extends ChangeNotifier {
       internetNow = _estimatedInternetNowUtc();
     }
     if (internetNow == null) {
-      _debugLog.warn(
-        'sync',
-        'Periodic sync waiting for internet time anchor',
-      );
+      _debugLog.warn('sync', 'Periodic sync waiting for internet time anchor');
       return;
     }
 
@@ -2101,7 +2114,9 @@ class AppState extends ChangeNotifier {
   Future<int> downloadOfflineMapTiles() async {
     final observer = currentObserverPosition;
     if (observer == null) {
-      throw StateError('No current observer location available for tile download');
+      throw StateError(
+        'No current observer location available for tile download',
+      );
     }
     final count = await TileCacheService.prefetchAround(
       centerLat: observer.$1,
@@ -2190,8 +2205,7 @@ class AppState extends ChangeNotifier {
 
       final next = rawScans
           .where(
-            (scan) =>
-                (_safePublicRadioId(scan.radioId ?? '') ?? '') != radioId,
+            (scan) => (_safePublicRadioId(scan.radioId ?? '') ?? '') != radioId,
           )
           .toList(growable: false);
       final removedLocal = rawScans.length - next.length;
@@ -2237,7 +2251,8 @@ class AppState extends ChangeNotifier {
     if (signStartFrame.length < 6) {
       throw StateError('Invalid sign_start response length');
     }
-    final maxSignDataLen = signStartFrame[2] |
+    final maxSignDataLen =
+        signStartFrame[2] |
         (signStartFrame[3] << 8) |
         (signStartFrame[4] << 16) |
         (signStartFrame[5] << 24);
@@ -2263,7 +2278,10 @@ class AppState extends ChangeNotifier {
         'delete',
         'sign_data[$chunkIndex] -> send bytes=${chunk.length} range=$offset..${end - 1}',
       );
-      final okFuture = _awaitSignFrame(expectCode: respCodeOk, stage: 'sign_data');
+      final okFuture = _awaitSignFrame(
+        expectCode: respCodeOk,
+        stage: 'sign_data',
+      );
       await _bleProtocol.run(_protocol.signData(chunk));
       await okFuture;
       _debugLog.debug('delete', 'sign_data[$chunkIndex] <- ok');

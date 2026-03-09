@@ -122,6 +122,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     )..initialize();
     _appState.addListener(_onAppStateChanged);
     _appState.onBlePinRequest = _showBlePinDialog;
+    _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
     unawaited(_initNotifications());
   }
 
@@ -137,8 +138,38 @@ class _MeshHomePageState extends State<MeshHomePage>
     WidgetsBinding.instance.removeObserver(this);
     _appState.removeListener(_onAppStateChanged);
     _appState.onBlePinRequest = null;
+    _appState.onLocationPermissionPrompt = null;
     _appState.dispose();
     super.dispose();
+  }
+
+  Future<bool> _showLocationPermissionDialog() async {
+    if (!_isAndroidNative || !mounted) return true;
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return false;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Allow Location Access'),
+        content: const Text(
+          'Mesh Utility needs location access to place scans on the map and '
+          'calculate coverage zones. Android will now show the system '
+          'permission prompt.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   void _onAppStateChanged() {
