@@ -212,6 +212,7 @@ class AppState extends ChangeNotifier {
   DateTime? _lastPeriodicSyncInternetUtc;
   bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
+  Future<bool> Function({required bool background})? onLocationPermissionPrompt;
 
   List<RawScan> rawScans = const [];
   List<CoverageZone> coverageZones = const [];
@@ -521,6 +522,17 @@ class AppState extends ChangeNotifier {
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          final proceed =
+              await (onLocationPermissionPrompt?.call(background: false) ??
+                  Future<bool>.value(true));
+          if (!proceed) {
+            deviceLocationStatus = 'Location permission not requested';
+            _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
+            notifyListeners();
+            return false;
+          }
+        }
         permission = await Geolocator.requestPermission();
       }
       if (permission == LocationPermission.denied) {
@@ -540,13 +552,19 @@ class AppState extends ChangeNotifier {
       // Android background permission requires a separate permission flow.
       final alwaysStatus = await ph.Permission.locationAlways.status;
       if (!alwaysStatus.isGranted) {
+        final proceed =
+            await (onLocationPermissionPrompt?.call(background: true) ??
+                Future<bool>.value(true));
+        if (!proceed) {
+          deviceLocationStatus = 'Background location not requested';
+          _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
+          notifyListeners();
+          return false;
+        }
         final requestStatus = await ph.Permission.locationAlways.request();
         if (!requestStatus.isGranted) {
           deviceLocationStatus = 'Background location not granted';
-          _debugLog.warn(
-            'location',
-            '$deviceLocationStatus (BLE precheck)',
-          );
+          _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
           notifyListeners();
           if (requestStatus.isPermanentlyDenied) {
             await Geolocator.openAppSettings();
@@ -1895,6 +1913,17 @@ class AppState extends ChangeNotifier {
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          final proceed =
+              await (onLocationPermissionPrompt?.call(background: false) ??
+                  Future<bool>.value(true));
+          if (!proceed) {
+            deviceLocationStatus = 'Location permission not requested';
+            _debugLog.warn('location', deviceLocationStatus);
+            notifyListeners();
+            return;
+          }
+        }
         permission = await Geolocator.requestPermission();
       }
       if (permission == LocationPermission.denied) {

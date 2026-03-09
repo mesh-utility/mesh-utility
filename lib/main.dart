@@ -122,6 +122,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     )..initialize();
     _appState.addListener(_onAppStateChanged);
     _appState.onBlePinRequest = _showBlePinDialog;
+    _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
     unawaited(_initNotifications());
   }
 
@@ -137,8 +138,43 @@ class _MeshHomePageState extends State<MeshHomePage>
     WidgetsBinding.instance.removeObserver(this);
     _appState.removeListener(_onAppStateChanged);
     _appState.onBlePinRequest = null;
+    _appState.onLocationPermissionPrompt = null;
     _appState.dispose();
     super.dispose();
+  }
+
+  Future<bool> _showLocationPermissionDialog({required bool background}) async {
+    if (!_isAndroidNative || !mounted) return true;
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return false;
+    final title = background
+        ? 'Allow Background Location'
+        : 'Allow Location Access';
+    final content = background
+        ? 'Mesh Utility needs background location so scans and radio features '
+              'continue reliably when the app is not in the foreground. '
+              'Android will now show the system background-location prompt.'
+        : 'Mesh Utility needs location access to map coverage and support BLE '
+              'scanning. Android will now show the system location prompt.';
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   void _onAppStateChanged() {
