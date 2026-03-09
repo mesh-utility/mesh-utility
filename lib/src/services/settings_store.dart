@@ -162,11 +162,10 @@ class AppSettings {
       statsRadiusMiles:
           (json['statsRadiusMiles'] as num?)?.toInt() ??
           defaults.statsRadiusMiles,
-      uploadBatchIntervalMinutes:
-          _clampUploadBatchIntervalMinutes(
-            (json['uploadBatchIntervalMinutes'] as num?)?.toInt() ??
-                defaults.uploadBatchIntervalMinutes,
-          ),
+      uploadBatchIntervalMinutes: _clampUploadBatchIntervalMinutes(
+        (json['uploadBatchIntervalMinutes'] as num?)?.toInt() ??
+            defaults.uploadBatchIntervalMinutes,
+      ),
       bleAutoConnect:
           (json['bleAutoConnect'] as bool?) ?? defaults.bleAutoConnect,
       knownBleDeviceIds: ((json['knownBleDeviceIds'] as List?) ?? const [])
@@ -190,16 +189,42 @@ class AppSettings {
 
 class SettingsStore {
   static const _settingsKey = 'settings:app';
+  static const _legacyWorkerHosts = {
+    'mesh-utility-worker.aaffiliate796.workers.dev',
+  };
+
+  String _normalizeWorkerUrl(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return AppConfig.deployedWorkerUrl;
+    final uri = Uri.tryParse(trimmed);
+    final host = uri?.host.toLowerCase() ?? '';
+    if (_legacyWorkerHosts.contains(host)) {
+      return AppConfig.deployedWorkerUrl;
+    }
+    return trimmed;
+  }
+
+  Future<AppSettings> _migrateIfNeeded(AppSettings settings) async {
+    final normalizedWorkerUrl = _normalizeWorkerUrl(settings.workerUrl);
+    if (normalizedWorkerUrl == settings.workerUrl) {
+      return settings;
+    }
+    final migrated = settings.copyWith(workerUrl: normalizedWorkerUrl);
+    await save(migrated);
+    return migrated;
+  }
 
   Future<AppSettings> load() async {
     final db = await ReaxDatabase.instance();
     final raw = await db.get(_settingsKey);
     if (raw is Map<String, dynamic>) {
-      return AppSettings.fromJson(raw);
+      return _migrateIfNeeded(AppSettings.fromJson(raw));
     }
 
     if (raw is Map) {
-      return AppSettings.fromJson(raw.cast<String, dynamic>());
+      return _migrateIfNeeded(
+        AppSettings.fromJson(raw.cast<String, dynamic>()),
+      );
     }
 
     return AppSettings.defaults;
