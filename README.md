@@ -4,6 +4,10 @@
 
 Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and Cloudflare Worker sync.
 
+## Live Web App
+
+- https://mesh-utility.org/
+
 ## Supported Targets
 
 - [x] Android
