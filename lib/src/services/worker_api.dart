@@ -75,7 +75,13 @@ class WorkerApi {
         lastError = e;
       }
     }
-    if (lastResponse != null) return lastResponse;
+    if (lastResponse != null) {
+      throw Exception(
+        'Failed request $path: unacceptable response '
+        'status=${lastResponse.statusCode} '
+        'contentType=${lastResponse.headers['content-type'] ?? 'unknown'}',
+      );
+    }
     throw Exception('Failed request $path: $lastError');
   }
 
@@ -102,7 +108,13 @@ class WorkerApi {
         lastError = e;
       }
     }
-    if (lastResponse != null) return lastResponse;
+    if (lastResponse != null) {
+      throw Exception(
+        'Failed request $path: unacceptable response '
+        'status=${lastResponse.statusCode} '
+        'contentType=${lastResponse.headers['content-type'] ?? 'unknown'}',
+      );
+    }
     throw Exception('Failed request $path: $lastError');
   }
 
