@@ -211,7 +211,6 @@ class AppState extends ChangeNotifier {
   DateTime? _lastPeriodicSyncInternetUtc;
   bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
-  Future<bool> Function()? onLocationPermissionPrompt;
 
   List<RawScan> rawScans = const [];
   List<CoverageZone> coverageZones = const [];
@@ -1836,17 +1835,6 @@ class AppState extends ChangeNotifier {
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-          final proceed =
-              await (onLocationPermissionPrompt?.call() ??
-                  Future<bool>.value(true));
-          if (!proceed) {
-            deviceLocationStatus = 'Location permission not requested';
-            _debugLog.warn('location', deviceLocationStatus);
-            notifyListeners();
-            return;
-          }
-        }
         permission = await Geolocator.requestPermission();
       }
       if (permission == LocationPermission.denied) {
