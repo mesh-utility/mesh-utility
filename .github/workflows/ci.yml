@@ -58,3 +58,44 @@ jobs:
 
       - name: Type check
         run: npm run check
+
+  flutter-build-smoke:
+    name: Build Smoke (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: android
+            command: flutter build apk --debug
+          - os: ubuntu-latest
+            target: web
+            command: flutter build web --release --dart-define=WORKER_URL=https://mesh-utility-worker.aaffiliate796.workers.dev
+          - os: ubuntu-latest
+            target: linux
+            command: flutter build linux --debug
+          - os: windows-latest
+            target: windows
+            command: flutter build windows --debug
+          - os: macos-latest
+            target: macos
+            command: flutter build macos --debug
+          - os: macos-latest
+            target: ios
+            command: flutter build ios --debug --no-codesign
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Build
+        run: ${{ matrix.command }}
