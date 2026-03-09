@@ -20,6 +20,7 @@ import 'package:mesh_utility/src/services/worker_api.dart';
 import 'package:mesh_utility/transport/ble_transport.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 import 'package:mesh_utility/transport/transport.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:universal_ble/universal_ble.dart';
 
 class AppState extends ChangeNotifier {
@@ -534,6 +535,24 @@ class AppState extends ChangeNotifier {
         notifyListeners();
         await Geolocator.openAppSettings();
         return false;
+      }
+
+      // Android background permission requires a separate permission flow.
+      final alwaysStatus = await ph.Permission.locationAlways.status;
+      if (!alwaysStatus.isGranted) {
+        final requestStatus = await ph.Permission.locationAlways.request();
+        if (!requestStatus.isGranted) {
+          deviceLocationStatus = 'Background location not granted';
+          _debugLog.warn(
+            'location',
+            '$deviceLocationStatus (BLE precheck)',
+          );
+          notifyListeners();
+          if (requestStatus.isPermanentlyDenied) {
+            await Geolocator.openAppSettings();
+          }
+          return false;
+        }
       }
       return true;
     } catch (e) {
