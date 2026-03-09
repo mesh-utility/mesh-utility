@@ -1,11 +1,11 @@
 {
-    "name": "mesh_utility",
-    "short_name": "mesh_utility",
+    "name": "Mesh Utility",
+    "short_name": "Mesh Utility",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0F766E",
     "theme_color": "#0F766E",
-    "description": "A new Flutter project.",
+    "description": "Mesh Utility coverage mapping and scan tools.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

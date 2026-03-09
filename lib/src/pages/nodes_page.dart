@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/models/mesh_node.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
+import 'package:mesh_utility/src/services/signal_class.dart';
 
 class NodesPage extends StatefulWidget {
   const NodesPage({
@@ -27,8 +28,10 @@ class _NodesPageState extends State<NodesPage> {
   @override
   Widget build(BuildContext context) {
     final latestByNode = <String, ScanResult>{};
+    final scansByNode = <String, List<ScanResult>>{};
     for (final scan in widget.scanResults) {
       latestByNode.putIfAbsent(scan.nodeId, () => scan);
+      scansByNode.putIfAbsent(scan.nodeId, () => <ScanResult>[]).add(scan);
     }
 
     final filtered = widget.nodes.where((n) {
@@ -47,26 +50,33 @@ class _NodesPageState extends State<NodesPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Mesh Nodes',
-                              style: Theme.of(context).textTheme.headlineSmall,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'All discovered repeaters and nodes',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
-                        ),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: Theme.of(context).dividerColor.withValues(alpha: 0.5),
                       ),
-                      Chip(label: Text('${widget.nodes.length} Nodes')),
-                    ],
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Click on a node to zoom and filter its coverage on the map.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -95,7 +105,7 @@ class _NodesPageState extends State<NodesPage> {
                       gridDelegate:
                           const SliverGridDelegateWithMaxCrossAxisExtent(
                             maxCrossAxisExtent: 420,
-                            childAspectRatio: 2.8,
+                            mainAxisExtent: 176,
                             crossAxisSpacing: 12,
                             mainAxisSpacing: 12,
                           ),
@@ -103,6 +113,33 @@ class _NodesPageState extends State<NodesPage> {
                       itemBuilder: (context, index) {
                         final node = filtered[index];
                         final latest = latestByNode[node.nodeId];
+                        final valueTextStyle =
+                            Theme.of(context).textTheme.bodyMedium;
+                        final nodeScans = scansByNode[node.nodeId] ?? const [];
+                        final avgRssi = nodeScans.isEmpty
+                            ? null
+                            : nodeScans
+                                      .map((s) => s.rssi)
+                                      .reduce((a, b) => a + b) /
+                                  nodeScans.length;
+                        final snrValues = nodeScans
+                            .map((s) => s.snr)
+                            .whereType<double>()
+                            .toList(growable: false);
+                        final avgSnr = snrValues.isEmpty
+                            ? null
+                            : snrValues.reduce((a, b) => a + b) /
+                                  snrValues.length;
+                        final displayRssi = avgRssi ?? latest?.rssi;
+                        final displaySnr = avgSnr ?? latest?.snr;
+                        final signalClass =
+                            displayRssi == null && displaySnr == null
+                            ? null
+                            : signalClassForValues(
+                                rssi: displayRssi,
+                                snr: displaySnr,
+                                includeDeadZone: false,
+                              );
                         return Card(
                           child: InkWell(
                             borderRadius: BorderRadius.circular(12),
@@ -120,6 +157,11 @@ class _NodesPageState extends State<NodesPage> {
                                 children: [
                                   Row(
                                     children: [
+                                      const Icon(
+                                        Icons.settings_input_antenna,
+                                        size: 16,
+                                      ),
+                                      const SizedBox(width: 6),
                                       Expanded(
                                         child: Text(
                                           node.name?.isNotEmpty == true
@@ -149,17 +191,56 @@ class _NodesPageState extends State<NodesPage> {
                                     ).textTheme.bodySmall,
                                   ),
                                   const Spacer(),
-                                  if (latest != null)
+                                  if (displayRssi != null || displaySnr != null)
                                     Wrap(
                                       spacing: 8,
                                       runSpacing: 4,
                                       children: [
+                                        if (signalClass != null)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                              gradient: const LinearGradient(
+                                                begin: Alignment.topCenter,
+                                                end: Alignment.bottomCenter,
+                                                colors: [
+                                                  Color(0xFF1B2329),
+                                                  Color(0xFF0A0E12),
+                                                ],
+                                              ),
+                                              border: Border.all(
+                                                color: Colors.white24,
+                                                width: 0.6,
+                                              ),
+                                              boxShadow: const [
+                                                BoxShadow(
+                                                  color: Colors.black54,
+                                                  blurRadius: 5,
+                                                  offset: Offset(0, 1),
+                                                ),
+                                              ],
+                                            ),
+                                            child: Text(
+                                              signalClass.label,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: valueTextStyle?.copyWith(
+                                                color: signalClass.color,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
                                         Chip(
                                           materialTapTargetSize:
                                               MaterialTapTargetSize.shrinkWrap,
                                           visualDensity: VisualDensity.compact,
                                           label: Text(
-                                            '${latest.rssi.toStringAsFixed(0)} dBm',
+                                            '${displayRssi?.toStringAsFixed(0) ?? '--'} dBm',
                                           ),
                                         ),
                                         Chip(
@@ -167,7 +248,7 @@ class _NodesPageState extends State<NodesPage> {
                                               MaterialTapTargetSize.shrinkWrap,
                                           visualDensity: VisualDensity.compact,
                                           label: Text(
-                                            '${latest.snr?.toStringAsFixed(1) ?? '--'} SNR',
+                                            '${displaySnr?.toStringAsFixed(1) ?? '--'} SNR',
                                           ),
                                         ),
                                       ],

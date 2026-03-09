@@ -11,6 +11,10 @@ import 'package:mesh_utility/transport/linux_ble_pairing_service_stub.dart'
     as linux_pair;
 
 class BleTransport extends Transport {
+  static const String _nusServiceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  static const String _nusWriteUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+  static const String _nusNotifyUuid = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
   BleTransport({
     this.preferredDeviceId,
     this.namePrefixes = const [],
@@ -52,6 +56,10 @@ class BleTransport extends Transport {
   String? get deviceId => _deviceId;
   String? get boundServiceUuid => _serviceUuid;
 
+  Future<AvailabilityState> getAvailabilityState() {
+    return UniversalBle.getBluetoothAvailabilityState();
+  }
+
   @override
   bool get isConnected => _connected;
 
@@ -61,7 +69,9 @@ class BleTransport extends Transport {
   @override
   Future<void> connect() async {
     _debugLog.info('ble_transport', 'Requesting BLE permissions');
-    await UniversalBle.requestPermissions(withAndroidFineLocation: true);
+    await UniversalBle.requestPermissions(
+      withAndroidFineLocation: !kIsWeb,
+    );
 
     final state = await UniversalBle.getBluetoothAvailabilityState();
     if (state != AvailabilityState.poweredOn) {
@@ -76,7 +86,7 @@ class BleTransport extends Transport {
     _debugLog.info('ble_transport', 'Target device selected: $targetDeviceId');
     await _ensureLinuxPairing(targetDeviceId);
     try {
-      await _connectAndBind(targetDeviceId);
+      await _connectAndBindWithSoftRetry(targetDeviceId);
     } catch (e) {
       if (!_isLinuxDesktop) rethrow;
       _debugLog.warn(
@@ -88,12 +98,37 @@ class BleTransport extends Transport {
         onLog: (message) => _debugLog.info('linux_ble_pairing', message),
       );
       await _ensureLinuxPairing(targetDeviceId);
-      await _connectAndBind(targetDeviceId);
+      await _connectAndBindWithSoftRetry(targetDeviceId);
     }
   }
 
   bool get _isLinuxDesktop =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
+  Duration get _effectiveConnectTimeout {
+    if (!_isLinuxDesktop) return connectionTimeout;
+    // BlueZ may need extra time immediately after trust/pairing operations.
+    const linuxMin = Duration(seconds: 35);
+    return connectionTimeout > linuxMin ? connectionTimeout : linuxMin;
+  }
+
+  Future<void> _connectAndBindWithSoftRetry(String targetDeviceId) async {
+    try {
+      await _connectAndBind(targetDeviceId);
+      return;
+    } catch (e) {
+      if (!_isLinuxDesktop) rethrow;
+      _debugLog.warn(
+        'ble_transport',
+        'Initial Linux connect attempt failed for $targetDeviceId: $e; retrying once',
+      );
+      try {
+        await UniversalBle.disconnect(targetDeviceId);
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      await _connectAndBind(targetDeviceId);
+    }
+  }
 
   Future<void> _ensureLinuxPairing(String deviceId) async {
     if (!_isLinuxDesktop) return;
@@ -133,7 +168,12 @@ class BleTransport extends Transport {
     try {
       await UniversalBle.stopScan();
     } catch (_) {}
-    await UniversalBle.connect(targetDeviceId, timeout: connectionTimeout);
+    final timeout = _effectiveConnectTimeout;
+    _debugLog.info(
+      'ble_transport',
+      'Connecting to $targetDeviceId timeout=${timeout.inSeconds}s',
+    );
+    await UniversalBle.connect(targetDeviceId, timeout: timeout);
     _debugLog.info('ble_transport', 'Connected to device $targetDeviceId');
     _deviceId = targetDeviceId;
     await _connectionSubscription?.cancel();
@@ -156,8 +196,21 @@ class BleTransport extends Transport {
       }
     }
 
-    final services = await UniversalBle.discoverServices(targetDeviceId);
-    _bindCharacteristics(services);
+    try {
+      final services = await UniversalBle.discoverServices(targetDeviceId);
+      _bindCharacteristics(services);
+    } catch (e) {
+      final message = e.toString().toLowerCase();
+      if (kIsWeb && message.contains('blocklisted uuid')) {
+        _debugLog.warn(
+          'ble_transport',
+          'Web service discovery blocked by browser UUID policy; using known NUS characteristics',
+        );
+        _bindKnownNusCharacteristics();
+      } else {
+        rethrow;
+      }
+    }
     await _subscribeInbound();
     _connected = true;
     onConnectionStateChanged?.call(
@@ -259,7 +312,13 @@ class BleTransport extends Transport {
         'Seen device id=${device.deviceId} name=$seenName',
       );
     });
-    await UniversalBle.startScan(scanFilter: null);
+    final scanFilter = kIsWeb
+        ? ScanFilter(
+            withServices: const [_nusServiceUuid],
+            withNamePrefix: namePrefixes,
+          )
+        : null;
+    await UniversalBle.startScan(scanFilter: scanFilter);
     try {
       await Future<void>.delayed(scanFor);
     } finally {
@@ -344,6 +403,18 @@ class BleTransport extends Transport {
     _debugLog.info(
       'ble_transport',
       'Characteristics bound service=$_serviceUuid write=$_writeCharacteristicUuid notify=$_notifyCharacteristicUuid withoutResponse=$_writeWithoutResponse',
+    );
+  }
+
+  void _bindKnownNusCharacteristics() {
+    _serviceUuid = _nusServiceUuid;
+    _writeCharacteristicUuid = _nusWriteUuid;
+    _notifyCharacteristicUuid = _nusNotifyUuid;
+    // Web Bluetooth paths are more reliable with response writes.
+    _writeWithoutResponse = false;
+    _debugLog.info(
+      'ble_transport',
+      'Characteristics bound by fallback service=$_serviceUuid write=$_writeCharacteristicUuid notify=$_notifyCharacteristicUuid withoutResponse=$_writeWithoutResponse',
     );
   }
 

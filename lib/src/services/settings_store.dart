@@ -57,7 +57,7 @@ class AppSettings {
     unitSystem: 'imperial',
     language: 'en',
     statsRadiusMiles: 0,
-    uploadBatchIntervalMinutes: 15,
+    uploadBatchIntervalMinutes: 30,
     bleAutoConnect: false,
     knownBleDeviceIds: <String>[],
   );
@@ -98,8 +98,9 @@ class AppSettings {
       unitSystem: unitSystem ?? this.unitSystem,
       language: language ?? this.language,
       statsRadiusMiles: statsRadiusMiles ?? this.statsRadiusMiles,
-      uploadBatchIntervalMinutes:
-          uploadBatchIntervalMinutes ?? this.uploadBatchIntervalMinutes,
+      uploadBatchIntervalMinutes: _clampUploadBatchIntervalMinutes(
+        uploadBatchIntervalMinutes ?? this.uploadBatchIntervalMinutes,
+      ),
       bleAutoConnect: bleAutoConnect ?? this.bleAutoConnect,
       knownBleDeviceIds: knownBleDeviceIds ?? this.knownBleDeviceIds,
     );
@@ -161,8 +162,10 @@ class AppSettings {
           (json['statsRadiusMiles'] as num?)?.toInt() ??
           defaults.statsRadiusMiles,
       uploadBatchIntervalMinutes:
-          (json['uploadBatchIntervalMinutes'] as num?)?.toInt() ??
-          defaults.uploadBatchIntervalMinutes,
+          _clampUploadBatchIntervalMinutes(
+            (json['uploadBatchIntervalMinutes'] as num?)?.toInt() ??
+                defaults.uploadBatchIntervalMinutes,
+          ),
       bleAutoConnect:
           (json['bleAutoConnect'] as bool?) ?? defaults.bleAutoConnect,
       knownBleDeviceIds: ((json['knownBleDeviceIds'] as List?) ?? const [])
@@ -174,6 +177,12 @@ class AppSettings {
   static int _clampDiscoverWaitSeconds(int value) {
     if (value < 5) return 5;
     if (value > 120) return 120;
+    return value;
+  }
+
+  static int _clampUploadBatchIntervalMinutes(int value) {
+    if (value < 30) return 30;
+    if (value > 1440) return 1440;
     return value;
   }
 }

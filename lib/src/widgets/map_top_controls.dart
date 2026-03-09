@@ -8,6 +8,7 @@ class MapTopControls extends StatelessWidget {
     required this.bleConnected,
     required this.bleBusy,
     required this.bleScanning,
+    required this.bleUiEnabled,
     required this.onToggleScan,
     required this.onForceScan,
     required this.syncing,
@@ -20,6 +21,7 @@ class MapTopControls extends StatelessWidget {
   final bool bleConnected;
   final bool bleBusy;
   final bool bleScanning;
+  final bool bleUiEnabled;
   final VoidCallback onToggleScan;
   final VoidCallback onForceScan;
   final bool syncing;
@@ -44,23 +46,25 @@ class MapTopControls extends StatelessWidget {
               ),
               tooltip: autoCenter ? 'Auto-center on' : 'Auto-center off',
             ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              onPressed: (!bleConnected || bleBusy) ? null : onToggleScan,
-              icon: Icon(
-                bleScanning ? Icons.pause : Icons.play_arrow,
-                size: 18,
+            if (bleUiEnabled)
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed: (!bleConnected || bleBusy) ? null : onToggleScan,
+                icon: Icon(
+                  bleScanning ? Icons.pause : Icons.play_arrow,
+                  size: 18,
+                ),
+                tooltip: bleScanning ? 'Pause scan loop' : 'Start scan loop',
               ),
-              tooltip: bleScanning ? 'Pause scan loop' : 'Start scan loop',
-            ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              onPressed: (!bleConnected || bleBusy || !bleScanning)
-                  ? null
-                  : onForceScan,
-              icon: const Icon(Icons.flash_on, size: 18),
-              tooltip: 'Force scan now',
-            ),
+            if (bleUiEnabled)
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed: (!bleConnected || bleBusy || !bleScanning)
+                    ? null
+                    : onForceScan,
+                icon: const Icon(Icons.flash_on, size: 18),
+                tooltip: 'Force scan now',
+              ),
             if (syncing)
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 8),

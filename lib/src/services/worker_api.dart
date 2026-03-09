@@ -8,6 +8,8 @@ class WorkerApi {
   WorkerApi(this.baseUrl);
 
   final String baseUrl;
+  DateTime? _lastServerDateUtc;
+  DateTime? get lastServerDateUtc => _lastServerDateUtc;
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final normalized = baseUrl.endsWith('/')
@@ -20,8 +22,17 @@ class WorkerApi {
     return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
 
+  void _captureServerDate(http.Response response) {
+    final raw = response.headers['date'];
+    if (raw == null || raw.trim().isEmpty) return;
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return;
+    _lastServerDateUtc = parsed.toUtc();
+  }
+
   Future<List<String>> fetchHistoryDays() async {
     final response = await http.get(_uri('/history'));
+    _captureServerDate(response);
     if (response.statusCode != 200) {
       throw Exception('Failed to fetch history days');
     }
@@ -57,6 +68,7 @@ class WorkerApi {
           query['viewerRadioId'] = viewerRadioId;
         }
         final response = await http.get(_uri('/history/$day.ndjson', query));
+        _captureServerDate(response);
         if (response.statusCode != 200) continue;
 
         final lines = const LineSplitter().convert(_decodeUtf8(response));
@@ -97,6 +109,7 @@ class WorkerApi {
       query['viewerRadioId'] = viewerRadioId;
     }
     final response = await http.get(_uri('/coverage', query));
+    _captureServerDate(response);
 
     if (response.statusCode != 200) {
       throw Exception('Failed to fetch coverage zones');
@@ -135,11 +148,89 @@ class WorkerApi {
       headers: const {'Content-Type': 'application/json'},
       body: jsonEncode(scans),
     );
+    _captureServerDate(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'Failed to upload scans (${response.statusCode}): ${_decodeUtf8(response)}',
       );
     }
     return scans.length;
+  }
+
+  Future<({String challenge, int expiresAt})> requestDeleteChallenge({
+    required String radioId,
+    required String publicKeyHex,
+  }) async {
+    final response = await http.post(
+      _uri('/delete/challenge'),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({'radioId': radioId, 'publicKey': publicKeyHex}),
+    );
+    _captureServerDate(response);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'Failed to request delete challenge (${response.statusCode}): ${_decodeUtf8(response)}',
+      );
+    }
+    final decoded = jsonDecode(_decodeUtf8(response));
+    if (decoded is! Map) {
+      throw Exception('Invalid delete challenge response');
+    }
+    final challenge = decoded['challenge']?.toString() ?? '';
+    final expiresAtRaw = decoded['expiresAt'];
+    final expiresAt = expiresAtRaw is num
+        ? expiresAtRaw.toInt()
+        : int.tryParse(expiresAtRaw?.toString() ?? '') ?? 0;
+    if (challenge.isEmpty || expiresAt <= 0) {
+      throw Exception('Delete challenge response missing required fields');
+    }
+    return (challenge: challenge, expiresAt: expiresAt);
+  }
+
+  Future<({int d1Deleted, int pendingRemoved, int csvRowsRemoved})>
+  submitDeleteRequest({
+    required String radioId,
+    required String publicKeyHex,
+    required String challenge,
+    required String signatureHex,
+  }) async {
+    final response = await http.post(
+      _uri('/delete/$radioId'),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'publicKey': publicKeyHex,
+        'challenge': challenge,
+        'signature': signatureHex,
+      }),
+    );
+    _captureServerDate(response);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'Delete request failed (${response.statusCode}): ${_decodeUtf8(response)}',
+      );
+    }
+    final decoded = jsonDecode(_decodeUtf8(response));
+    if (decoded is! Map) {
+      throw Exception('Invalid delete response');
+    }
+    int toInt(dynamic value) {
+      if (value is num) return value.toInt();
+      return int.tryParse(value?.toString() ?? '') ?? 0;
+    }
+
+    return (
+      d1Deleted: toInt(decoded['d1Deleted']),
+      pendingRemoved: toInt(decoded['pendingRemoved']),
+      csvRowsRemoved: toInt(decoded['csvRowsRemoved']),
+    );
+  }
+
+  Future<DateTime?> fetchServerUtcNow() async {
+    final response = await http.get(_uri('/health'));
+    _captureServerDate(response);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+    return _lastServerDateUtc;
   }
 }

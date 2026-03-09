@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
+import 'package:mesh_utility/src/services/tile_cache_service.dart';
+import 'package:mesh_utility/src/services/tile_cache_stats.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -24,9 +26,15 @@ class SettingsPage extends StatefulWidget {
     required this.onBleConnect,
     required this.onBleDisconnect,
     required this.onBleNodeDiscover,
+    required this.bleUiEnabled,
     required this.debugLogs,
     required this.onClearDebugLogs,
     required this.onClearScanCache,
+    required this.onDownloadOfflineTiles,
+    required this.onClearOfflineTiles,
+    required this.onDeleteRadioData,
+    required this.deleteInProgress,
+    required this.connectedRadioId,
   });
 
   final AppSettings settings;
@@ -48,9 +56,15 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function() onBleConnect;
   final Future<void> Function() onBleDisconnect;
   final Future<void> Function() onBleNodeDiscover;
+  final bool bleUiEnabled;
   final List<AppDebugLogEntry> debugLogs;
   final VoidCallback onClearDebugLogs;
   final Future<void> Function() onClearScanCache;
+  final Future<int> Function() onDownloadOfflineTiles;
+  final Future<void> Function() onClearOfflineTiles;
+  final Future<void> Function() onDeleteRadioData;
+  final bool deleteInProgress;
+  final String? connectedRadioId;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -62,11 +76,130 @@ class _SettingsPageState extends State<SettingsPage>
     length: 2,
     vsync: this,
   );
+  bool _tileOpInProgress = false;
+  bool _tileStatsLoading = false;
+  TileCacheStats? _tileCacheStats;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTileCacheStats();
+  }
 
   @override
   void dispose() {
     _mainController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadTileCacheStats() async {
+    if (_tileStatsLoading) return;
+    setState(() => _tileStatsLoading = true);
+    try {
+      final stats = await TileCacheService.getCacheStats();
+      if (!mounted) return;
+      setState(() => _tileCacheStats = stats);
+    } finally {
+      if (mounted) {
+        setState(() => _tileStatsLoading = false);
+      }
+    }
+  }
+
+  Future<void> _handleDeleteRadioData() async {
+    final id = (widget.connectedRadioId ?? '').trim();
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: Text(
+          id.isEmpty
+              ? 'Delete all data recorded by this connected radio? This cannot be undone.'
+              : 'Delete all data recorded by radio $id? This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) return;
+
+    try {
+      await widget.onDeleteRadioData();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Delete request completed.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _handleDownloadTiles() async {
+    if (_tileOpInProgress) return;
+    setState(() => _tileOpInProgress = true);
+    try {
+      final count = await widget.onDownloadOfflineTiles();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Downloaded $count tile(s) for offline use.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Tile download failed: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _tileOpInProgress = false);
+      }
+      await _loadTileCacheStats();
+    }
+  }
+
+  Future<void> _handleClearTiles() async {
+    if (_tileOpInProgress) return;
+    setState(() => _tileOpInProgress = true);
+    try {
+      await widget.onClearOfflineTiles();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Offline tile cache cleared.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Clear tile cache failed: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _tileOpInProgress = false);
+      }
+      await _loadTileCacheStats();
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    if (bytes <= 0) return '0 B';
+    var value = bytes.toDouble();
+    var unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    final decimals = value >= 10 || unit == 0 ? 0 : 1;
+    return '${value.toStringAsFixed(decimals)} ${units[unit]}';
   }
 
   @override
@@ -167,15 +300,6 @@ class _SettingsPageState extends State<SettingsPage>
                               'Dead zones always scan at the configured interval, regardless of smart scanning.',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
-                            const SizedBox(height: 10),
-                            FilledButton.tonalIcon(
-                              onPressed:
-                                  (!widget.bleConnected || widget.bleBusy)
-                                  ? null
-                                  : widget.onBleNodeDiscover,
-                              icon: const Icon(Icons.radar),
-                              label: const Text('Node Discover'),
-                            ),
                             _SectionDivider(),
                             _AdaptiveSwitchRow(
                               icon: Icons.radio_outlined,
@@ -187,8 +311,12 @@ class _SettingsPageState extends State<SettingsPage>
                             ),
                             Text(
                               s.updateRadioPosition
-                                  ? 'Radio advert location updates are enabled during scanning.'
-                                  : 'Radio advert location updates are disabled.',
+                                  ? 'Radio coordinate updates are enabled.'
+                                  : 'Radio coordinate updates are disabled.',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            Text(
+                              'For radios without GPS, this sets the observer radio coordinates to your current OS location so mesh peers can see your position. It only updates the radio coordinates.',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                             _SectionDivider(),
@@ -202,18 +330,33 @@ class _SettingsPageState extends State<SettingsPage>
                             ),
                             Text(
                               s.tileCachingEnabled
-                                  ? 'Tile caching is enabled.'
+                                  ? 'Viewed tiles are cached and offline tile actions are enabled.'
                                   : 'Tile caching is disabled.',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
+                            const SizedBox(height: 4),
+                            if (_tileStatsLoading && _tileCacheStats == null)
+                              const Text('Tile cache usage: loading...')
+                            else if ((_tileCacheStats?.supported ?? false))
+                              Text(
+                                'Cached tiles: ${_tileCacheStats?.tileCount ?? 0}  •  Size: ${_formatBytes(_tileCacheStats?.totalBytes ?? 0)}',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              )
+                            else
+                              Text(
+                                'Tile cache usage is unavailable on this platform.',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
                             const SizedBox(height: 8),
                             Row(
                               children: [
                                 Expanded(
                                   child: OutlinedButton.icon(
-                                    onPressed: s.tileCachingEnabled
-                                        ? () {}
-                                        : null,
+                                    onPressed:
+                                        (!s.tileCachingEnabled ||
+                                            _tileOpInProgress)
+                                        ? null
+                                        : _handleDownloadTiles,
                                     icon: const Icon(
                                       Icons.map_outlined,
                                       size: 16,
@@ -228,9 +371,9 @@ class _SettingsPageState extends State<SettingsPage>
                               children: [
                                 Expanded(
                                   child: OutlinedButton.icon(
-                                    onPressed: s.tileCachingEnabled
-                                        ? () {}
-                                        : null,
+                                    onPressed: _tileOpInProgress
+                                        ? null
+                                        : _handleClearTiles,
                                     icon: const Icon(
                                       Icons.delete_outline,
                                       size: 16,
@@ -239,6 +382,10 @@ class _SettingsPageState extends State<SettingsPage>
                                   ),
                                 ),
                               ],
+                            ),
+                            Text(
+                              'Download area tiles prefetches map tiles around your current OS location.',
+                              style: Theme.of(context).textTheme.bodySmall,
                             ),
                             _SectionDivider(),
                             LayoutBuilder(
@@ -494,12 +641,13 @@ class _SettingsPageState extends State<SettingsPage>
                             ),
                             Slider(
                               value: s.uploadBatchIntervalMinutes.toDouble(),
-                              min: 5,
-                              max: 60,
-                              divisions: 11,
+                              min: 30,
+                              max: 1440,
+                              divisions: 47,
                               onChanged: (v) => widget.onChanged(
                                 s.copyWith(
-                                  uploadBatchIntervalMinutes: v.round(),
+                                  uploadBatchIntervalMinutes:
+                                      ((v / 30).round() * 30).clamp(30, 1440),
                                 ),
                               ),
                             ),
@@ -530,25 +678,6 @@ class _SettingsPageState extends State<SettingsPage>
                             Text(
                               'Downloaded scans are marked read-only and excluded from upload queue.',
                               style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            const Text(
-                              'Dead Zones',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Mark current observer location as a dead zone.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 8),
-                            OutlinedButton.icon(
-                              onPressed: null,
-                              icon: const Icon(
-                                Icons.warning_amber_rounded,
-                                size: 16,
-                              ),
-                              label: const Text('Mark dead zone'),
                             ),
                             _SectionDivider(),
                             _AdaptiveSwitchRow(
@@ -595,11 +724,25 @@ class _SettingsPageState extends State<SettingsPage>
                               'Connect to a radio to enable signed delete request.',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
+                            if ((widget.connectedRadioId ?? '').trim().isNotEmpty)
+                              Text(
+                                'Connected radio ID: ${widget.connectedRadioId}',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
                             const SizedBox(height: 6),
                             OutlinedButton.icon(
-                              onPressed: null,
+                              onPressed:
+                                  (!widget.bleConnected ||
+                                      widget.bleBusy ||
+                                      widget.deleteInProgress)
+                                  ? null
+                                  : _handleDeleteRadioData,
                               icon: const Icon(Icons.delete_forever, size: 16),
-                              label: const Text('Delete radio data'),
+                              label: Text(
+                                widget.deleteInProgress
+                                    ? 'Deleting...'
+                                    : 'Delete radio data',
+                              ),
                             ),
                           ],
                         ),
@@ -612,24 +755,41 @@ class _SettingsPageState extends State<SettingsPage>
                     Expanded(
                       // TODO(chris): Reintroduce USB/TCP connection panes when
                       // transport UIs are fully wired and tested.
-                      child: _ScanResultsConnectionPane(
-                        title: 'Bluetooth LE',
-                        status: widget.bleStatus,
-                        connected: widget.bleConnected,
-                        busy: widget.bleBusy,
-                        selectedDeviceId: widget.bleSelectedDeviceId,
-                        autoConnectEnabled: widget.settings.bleAutoConnect,
-                        results: [
-                          ...widget.bleScanDevices.map((d) => 'BLE $d'),
-                        ],
-                        onSelectBleDevice: widget.onSelectBleDevice,
-                        onScanDevices: widget.onScanBleDevices,
-                        onToggleAutoConnect: (v) => widget.onChanged(
-                          widget.settings.copyWith(bleAutoConnect: v),
-                        ),
-                        onConnect: widget.onBleConnect,
-                        onDisconnect: widget.onBleDisconnect,
-                      ),
+                      child: widget.bleUiEnabled
+                          ? _ScanResultsConnectionPane(
+                              title: 'Bluetooth LE',
+                              status: widget.bleStatus,
+                              connected: widget.bleConnected,
+                              busy: widget.bleBusy,
+                              selectedDeviceId: widget.bleSelectedDeviceId,
+                              autoConnectEnabled: widget.settings.bleAutoConnect,
+                              results: [
+                                ...widget.bleScanDevices.map((d) => 'BLE $d'),
+                              ],
+                              onSelectBleDevice: widget.onSelectBleDevice,
+                              onScanDevices: widget.onScanBleDevices,
+                              onToggleAutoConnect: (v) => widget.onChanged(
+                                widget.settings.copyWith(bleAutoConnect: v),
+                              ),
+                              onConnect: widget.onBleConnect,
+                              onDisconnect: widget.onBleDisconnect,
+                            )
+                          : ListView(
+                              padding: const EdgeInsets.all(12),
+                              children: const [
+                                Text(
+                                  'Bluetooth LE',
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                SizedBox(height: 10),
+                                Text(
+                                  'Web BLE is unavailable in this browser. Use Android Chrome/Edge (HTTPS or localhost), or Bluefy on iOS.',
+                                ),
+                              ],
+                            ),
                     ),
                   ],
                 ),

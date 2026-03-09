@@ -15,12 +15,24 @@ import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/scan_aggregator.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
+import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/services/worker_api.dart';
 import 'package:mesh_utility/transport/ble_transport.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 import 'package:mesh_utility/transport/transport.dart';
+import 'package:universal_ble/universal_ble.dart';
 
 class AppState extends ChangeNotifier {
+  static const int _otherParamsAllowTelemetryFlags = 0;
+  static const int _otherParamsMultiAcks = 0;
+  static const int _advertLocationPolicyDisabled = 0;
+  static const int _advertLocationPolicyCompanion = 1;
+  static const List<String> _offlineTileTemplates = [
+    'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  ];
+
   AppState({
     required SettingsStore settingsStore,
     required LocalStore localStore,
@@ -69,6 +81,7 @@ class AppState extends ChangeNotifier {
             _smartScanPausedForRecentCoverage = false;
             _smartScanPausedZoneId = null;
             _connectedRadioMeshIdPrefix = null;
+            _connectedRadioPublicKeyHex = null;
             _connectedRadioDisplayName = null;
             _lastSelfInfoHex = null;
             _lastSelfInfoText = null;
@@ -82,7 +95,10 @@ class AppState extends ChangeNotifier {
             if (!_manualBleDisconnectRequested) {
               unawaited(_attemptAutoReconnect(reason: reason));
             }
-          };
+      };
+    }
+    if (kIsWeb) {
+      bleStatus = 'BLE ready (web)';
     }
   }
 
@@ -122,12 +138,58 @@ class AppState extends ChangeNotifier {
   String deviceLocationStatus = 'Location unavailable';
   Timer? _bleCountdownTimer;
   Timer? _bleAutoScanTimer;
+  Timer? _periodicSyncTimer;
   StreamSubscription<Position>? _locationSubscription;
   Timer? _locationPollTimer;
   DateTime? _lastIpFallbackAt;
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _bleDeviceNamesById = {};
   bool _manualBleDisconnectRequested = false;
+
+  void _setBleUnavailableStatus({String context = 'ble'}) {
+    bleConnected = false;
+    bleConnecting = false;
+    bleBusy = false;
+    bleScanning = false;
+    bleDeviceScanInProgress = false;
+    bleScanStatus = 'idle';
+    bleStatus = _bleUnavailableStatusMessage();
+    _debugLog.info(context, bleStatus);
+    notifyListeners();
+  }
+
+  String _bleUnavailableStatusMessage() {
+    if (!kIsWeb) return 'BLE unavailable on this platform';
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return 'BLE unavailable in iOS Safari. Use Bluefy or the native app.';
+    }
+    final scheme = Uri.base.scheme.toLowerCase();
+    final host = Uri.base.host.toLowerCase();
+    final isLocalhost =
+        host == 'localhost' || host == '127.0.0.1' || host == '::1';
+    final isSecureContext = scheme == 'https' || isLocalhost;
+    if (!isSecureContext) {
+      return 'Web BLE requires HTTPS on Android Chrome (localhost allowed for dev).';
+    }
+    return 'BLE unavailable in this browser. Use Android Chrome/Edge with Web Bluetooth enabled.';
+  }
+
+  Future<bool> _ensureBleAvailable({String context = 'ble'}) async {
+    if (_transport is! BleTransport) return false;
+    try {
+      final state = await _transport.getAvailabilityState();
+      if (state == AvailabilityState.unsupported) {
+        _setBleUnavailableStatus(context: context);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      bleStatus = 'BLE availability check failed: $e';
+      _debugLog.warn(context, bleStatus);
+      notifyListeners();
+      return false;
+    }
+  }
   bool _autoReconnectInProgress = false;
   bool _resumeAutoScanAfterReconnect = false;
   bool _discoverLocationRefreshInFlight = false;
@@ -137,9 +199,16 @@ class AppState extends ChangeNotifier {
   String? _smartScanPausedZoneId;
   int _autoScanRemainingSeconds = 0;
   String? _connectedRadioMeshIdPrefix;
+  String? _connectedRadioPublicKeyHex;
   String? _connectedRadioDisplayName;
   String? _lastSelfInfoHex;
   String? _lastSelfInfoText;
+  bool _deleteInProgress = false;
+  final Stopwatch _monotonicClock = Stopwatch()..start();
+  DateTime? _internetTimeAnchorUtc;
+  Duration? _internetTimeAnchorElapsed;
+  DateTime? _lastPeriodicSyncInternetUtc;
+  bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
 
   List<RawScan> rawScans = const [];
@@ -158,6 +227,8 @@ class AppState extends ChangeNotifier {
 
   String? get connectedRadioDisplayName => _connectedRadioDisplayName;
   String? get connectedRadioMeshId8 => _connectedRadioMeshId8();
+  String? get connectedRadioPublicKeyHex => _connectedRadioPublicKeyHex;
+  bool get deleteInProgress => _deleteInProgress;
   Map<String, String> get knownContactNames =>
       Map<String, String>.unmodifiable(_radioContactsByPrefix);
   int get localScanCount => rawScans.length;
@@ -203,6 +274,7 @@ class AppState extends ChangeNotifier {
 
     unawaited(_startDeviceLocationTracking());
     await syncFromWorker();
+    _configurePeriodicSyncTimer();
   }
 
   Future<void> updateSettings(AppSettings next) async {
@@ -231,6 +303,15 @@ class AppState extends ChangeNotifier {
         );
         unawaited(_runAutoScanCycle());
       }
+    }
+    if (previous.uploadBatchIntervalMinutes !=
+            settings.uploadBatchIntervalMinutes ||
+        previous.forceOffline != settings.forceOffline) {
+      _configurePeriodicSyncTimer();
+    }
+    if (previous.updateRadioPosition != settings.updateRadioPosition &&
+        bleConnected) {
+      unawaited(_applyCompanionLocationPolicyFromSettings());
     }
   }
 
@@ -339,6 +420,11 @@ class AppState extends ChangeNotifier {
       }
 
       _rebuildDerivedData(skipZones: true);
+      _captureInternetTimeAnchor(api.lastServerDateUtc);
+      final internetNow = _estimatedInternetNowUtc();
+      if (internetNow != null) {
+        _lastPeriodicSyncInternetUtc = internetNow;
+      }
     } catch (e) {
       error = e.toString();
       _debugLog.error('sync', 'Worker sync failed: $e');
@@ -351,6 +437,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> connectBle() async {
+    if (!await _ensureBleAvailable(context: 'ble')) {
+      return;
+    }
     if (bleConnecting || bleConnected) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) {
       bleStatus = 'Select a BLE device first';
@@ -397,6 +486,7 @@ class AppState extends ChangeNotifier {
       }
       await _requestSelfInfo();
       await _syncContactsAndBackfillNames();
+      await _applyCompanionLocationPolicyFromSettings();
     } catch (e) {
       bleConnected = false;
       _debugLog.error('ble', 'Connect failed: $e');
@@ -428,6 +518,7 @@ class AppState extends ChangeNotifier {
     bleConnected = false;
     bleStatus = 'BLE disconnected';
     _connectedRadioMeshIdPrefix = null;
+    _connectedRadioPublicKeyHex = null;
     _connectedRadioDisplayName = null;
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
@@ -445,6 +536,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> scanBleDevices() async {
+    if (!await _ensureBleAvailable(context: 'ble_scan')) {
+      return;
+    }
     if (_transport is! BleTransport ||
         bleBusy ||
         bleConnecting ||
@@ -481,6 +575,9 @@ class AppState extends ChangeNotifier {
     Duration? waitForResponses,
     bool retryOnDisconnect = true,
   }) async {
+    if (!await _ensureBleAvailable(context: 'ble_discover')) {
+      return;
+    }
     final discoverWait =
         waitForResponses ?? Duration(seconds: settings.discoverWaitSeconds);
     _debugLog.info('ble_discover', 'node_discover requested');
@@ -808,6 +905,13 @@ class AppState extends ChangeNotifier {
       final code = frame[0];
       // Self-info layout (meshcore): [code][type][tx][maxTx][pubKey:32]...
       // Use public key prefix, not bytes 1..8, to identify connected radio.
+      final publicKeyHex = frame.length >= 36
+          ? frame
+                .sublist(4, 36)
+                .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                .join()
+                .toUpperCase()
+          : '';
       final prefix = frame.length >= 36
           ? frame
                 .sublist(4, 12)
@@ -828,6 +932,9 @@ class AppState extends ChangeNotifier {
       _lastSelfInfoText = _extractPrintableAscii(frame);
       if (prefix.isNotEmpty) {
         _connectedRadioMeshIdPrefix = prefix;
+      }
+      if (publicKeyHex.length == 64) {
+        _connectedRadioPublicKeyHex = publicKeyHex;
       }
       final selfInfoName = _extractSelfInfoDisplayName(_lastSelfInfoText ?? '');
       if (selfInfoName != null && selfInfoName.isNotEmpty) {
@@ -880,7 +987,6 @@ class AppState extends ChangeNotifier {
         .take(12)
         .toList(growable: false);
     final connectedMesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
-    final connectedIds = <String>[if (connectedMesh.isNotEmpty) connectedMesh];
     var candidateScans = 0;
     var localCandidateScans = 0;
     var workerCandidateScans = 0;
@@ -893,8 +999,6 @@ class AppState extends ChangeNotifier {
         .where((v) => v.isNotEmpty)
         .toList(growable: false);
     for (final scan in rawScans) {
-      final observerNorm = _normalizeHexId(scan.observerId ?? '');
-      final radioNorm = _normalizeHexId(scan.radioId ?? '');
       final senderId = (scan.nodeId ?? '').trim().toUpperCase();
       final observerId = (scan.observerId ?? '').trim().toUpperCase();
       final senderCurrent = (scan.senderName ?? '').trim();
@@ -916,11 +1020,6 @@ class AppState extends ChangeNotifier {
           '${_normalizeHexId(senderId)}=>$senderMatchGlobal',
         );
       }
-      final fromConnectedRadio = connectedIds.any(
-        (id) =>
-            _idsLikelySameDevice(observerNorm, id) ||
-            _idsLikelySameDevice(radioNorm, id),
-      );
       final nodeNorm = _normalizeHexId(scan.nodeId ?? '');
       if (nodeNorm.isNotEmpty) {
         for (final contactId in contactIdCache) {
@@ -929,10 +1028,6 @@ class AppState extends ChangeNotifier {
             break;
           }
         }
-      }
-      if (!fromConnectedRadio) {
-        next.add(scan);
-        continue;
       }
       candidateScans += 1;
       if (scan.downloadedFromWorker) {
@@ -1510,6 +1605,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> toggleBleScan() async {
+    if (!await _ensureBleAvailable(context: 'ble_scan')) {
+      return;
+    }
     if (bleScanning) {
       _debugLog.info('ble_scan', 'Auto scan paused');
       bleScanning = false;
@@ -1544,6 +1642,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> forceBleScan() async {
+    if (!await _ensureBleAvailable(context: 'ble_discover')) {
+      return;
+    }
     await runNodeDiscover();
   }
 
@@ -1895,8 +1996,86 @@ class AppState extends ChangeNotifier {
     _locationPollTimer?.cancel();
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
+    _periodicSyncTimer?.cancel();
     unawaited(_transport.dispose());
     super.dispose();
+  }
+
+  void _configurePeriodicSyncTimer() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
+    if (settings.forceOffline) {
+      _debugLog.info('sync', 'Periodic sync disabled (offline mode enabled)');
+      return;
+    }
+    final configured = settings.uploadBatchIntervalMinutes;
+    final intervalMinutes = configured < 30
+        ? 30
+        : (configured > 1440 ? 1440 : configured);
+    _periodicSyncTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      unawaited(_maybeRunPeriodicSync(intervalMinutes));
+    });
+    _debugLog.info('sync', 'Periodic sync scheduled interval=${intervalMinutes}m');
+  }
+
+  Future<void> _maybeRunPeriodicSync(int intervalMinutes) async {
+    if (loading || syncing || settings.forceOffline) return;
+    final interval = Duration(minutes: intervalMinutes);
+    var internetNow = _estimatedInternetNowUtc();
+    if (internetNow == null) {
+      await _refreshInternetTimeAnchor();
+      internetNow = _estimatedInternetNowUtc();
+    }
+    if (internetNow == null) {
+      _debugLog.warn(
+        'sync',
+        'Periodic sync waiting for internet time anchor',
+      );
+      return;
+    }
+
+    final last = _lastPeriodicSyncInternetUtc;
+    if (last != null && internetNow.difference(last) < interval) {
+      return;
+    }
+
+    _debugLog.info(
+      'sync',
+      'Periodic sync trigger (internet time) interval=${intervalMinutes}m',
+    );
+    await syncFromWorker();
+  }
+
+  void _captureInternetTimeAnchor(DateTime? serverUtc) {
+    if (serverUtc == null) return;
+    _internetTimeAnchorUtc = serverUtc.toUtc();
+    _internetTimeAnchorElapsed = _monotonicClock.elapsed;
+    _debugLog.debug(
+      'sync',
+      'Internet time anchor updated: ${_internetTimeAnchorUtc!.toIso8601String()}',
+    );
+  }
+
+  DateTime? _estimatedInternetNowUtc() {
+    final anchorUtc = _internetTimeAnchorUtc;
+    final anchorElapsed = _internetTimeAnchorElapsed;
+    if (anchorUtc == null || anchorElapsed == null) return null;
+    final delta = _monotonicClock.elapsed - anchorElapsed;
+    return anchorUtc.add(delta);
+  }
+
+  Future<void> _refreshInternetTimeAnchor() async {
+    if (_internetTimeRefreshInFlight || settings.forceOffline) return;
+    _internetTimeRefreshInFlight = true;
+    try {
+      final api = WorkerApi(AppConfig.deployedWorkerUrl);
+      final serverNow = await api.fetchServerUtcNow();
+      _captureInternetTimeAnchor(serverNow);
+    } catch (e) {
+      _debugLog.debug('sync', 'Internet time refresh failed: $e');
+    } finally {
+      _internetTimeRefreshInFlight = false;
+    }
   }
 
   void clearDebugLogs() {
@@ -1911,6 +2090,229 @@ class AppState extends ChangeNotifier {
     nodes = const [];
     scanResults = const [];
     notifyListeners();
+  }
+
+  Future<int> downloadOfflineMapTiles() async {
+    final observer = currentObserverPosition;
+    if (observer == null) {
+      throw StateError('No current observer location available for tile download');
+    }
+    final count = await TileCacheService.prefetchAround(
+      centerLat: observer.$1,
+      centerLng: observer.$2,
+      urlTemplates: _offlineTileTemplates,
+      radiusMiles: 5,
+      minZoom: 11,
+      maxZoom: 15,
+      maxTiles: 900,
+    );
+    _debugLog.info(
+      'tile_cache',
+      'Prefetched $count tile(s) around '
+          'lat=${observer.$1.toStringAsFixed(6)} '
+          'lng=${observer.$2.toStringAsFixed(6)}',
+    );
+    return count;
+  }
+
+  Future<void> clearOfflineMapTiles() async {
+    await TileCacheService.clearCache();
+    _debugLog.info('tile_cache', 'Offline map tile cache cleared');
+  }
+
+  Future<void> _applyCompanionLocationPolicyFromSettings() async {
+    if (!bleConnected || !_transport.isConnected) return;
+    final policy = settings.updateRadioPosition
+        ? _advertLocationPolicyCompanion
+        : _advertLocationPolicyDisabled;
+    try {
+      await _bleProtocol.run(
+        _protocol.setOtherParams(
+          allowTelemetryFlags: _otherParamsAllowTelemetryFlags,
+          advertLocationPolicy: policy,
+          multiAcks: _otherParamsMultiAcks,
+        ),
+      );
+      _debugLog.info(
+        'radio_position',
+        'Applied companion coordinate policy=${settings.updateRadioPosition ? 'on' : 'off'}',
+      );
+    } catch (e) {
+      _debugLog.warn(
+        'radio_position',
+        'Failed to apply companion coordinate policy: $e',
+      );
+    }
+  }
+
+  Future<void> deleteConnectedRadioData() async {
+    if (_deleteInProgress) return;
+
+    final radioId = _connectedRadioMeshId8();
+    final publicKey = _connectedRadioPublicKeyHex;
+    if (radioId == null || radioId.isEmpty || publicKey == null) {
+      throw StateError('Connected radio identity is unavailable');
+    }
+    if (settings.forceOffline) {
+      throw StateError('Delete requires online mode');
+    }
+    if (!bleConnected) {
+      throw StateError('Connect to your radio first');
+    }
+
+    _deleteInProgress = true;
+    notifyListeners();
+    try {
+      final api = WorkerApi(AppConfig.deployedWorkerUrl);
+      final challengeRes = await api.requestDeleteChallenge(
+        radioId: radioId,
+        publicKeyHex: publicKey,
+      );
+      final signatureHex = await _signDeleteChallenge(
+        challengeRes.challenge,
+        publicKeyHex: publicKey,
+      );
+      final deleteRes = await api.submitDeleteRequest(
+        radioId: radioId,
+        publicKeyHex: publicKey,
+        challenge: challengeRes.challenge,
+        signatureHex: signatureHex,
+      );
+
+      final next = rawScans
+          .where(
+            (scan) =>
+                (_safePublicRadioId(scan.radioId ?? '') ?? '') != radioId,
+          )
+          .toList(growable: false);
+      final removedLocal = rawScans.length - next.length;
+      rawScans = next;
+      _rebuildDerivedData();
+      await _localStore.saveRawScans(rawScans);
+
+      _debugLog.info(
+        'delete',
+        'Delete completed for radio=$radioId '
+            'd1Deleted=${deleteRes.d1Deleted} '
+            'pendingRemoved=${deleteRes.pendingRemoved} '
+            'csvRowsRemoved=${deleteRes.csvRowsRemoved} '
+            'localRemoved=$removedLocal',
+      );
+    } finally {
+      _deleteInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  Future<String> _signDeleteChallenge(
+    String challenge, {
+    required String publicKeyHex,
+  }) async {
+    if (!_transport.isConnected || !bleConnected) {
+      throw StateError('BLE is not connected');
+    }
+    final payload = Uint8List.fromList(utf8.encode(challenge));
+    const chunkSize = 128;
+    _debugLog.info(
+      'delete',
+      'Starting radio-sign challenge flow bytes=${payload.length} keyPrefix=${publicKeyHex.substring(0, 8)}',
+    );
+
+    final signStartFuture = _awaitSignFrame(
+      expectCode: respCodeSignStart,
+      stage: 'sign_start',
+    );
+    _debugLog.debug('delete', 'sign_start -> send');
+    await _bleProtocol.run(_protocol.signStart());
+    final signStartFrame = await signStartFuture;
+    if (signStartFrame.length < 6) {
+      throw StateError('Invalid sign_start response length');
+    }
+    final maxSignDataLen = signStartFrame[2] |
+        (signStartFrame[3] << 8) |
+        (signStartFrame[4] << 16) |
+        (signStartFrame[5] << 24);
+    if (payload.length > maxSignDataLen) {
+      throw StateError(
+        'Delete challenge too long for radio signer (${payload.length} > $maxSignDataLen)',
+      );
+    }
+    _debugLog.debug(
+      'delete',
+      'sign_start <- ok maxSignDataLen=$maxSignDataLen payloadLen=${payload.length}',
+    );
+
+    var offset = 0;
+    var chunkIndex = 0;
+    while (offset < payload.length) {
+      final end = (offset + chunkSize) < payload.length
+          ? offset + chunkSize
+          : payload.length;
+      final chunk = Uint8List.fromList(payload.sublist(offset, end));
+      chunkIndex += 1;
+      _debugLog.debug(
+        'delete',
+        'sign_data[$chunkIndex] -> send bytes=${chunk.length} range=$offset..${end - 1}',
+      );
+      final okFuture = _awaitSignFrame(expectCode: respCodeOk, stage: 'sign_data');
+      await _bleProtocol.run(_protocol.signData(chunk));
+      await okFuture;
+      _debugLog.debug('delete', 'sign_data[$chunkIndex] <- ok');
+      offset = end;
+    }
+
+    final signatureFuture = _awaitSignFrame(
+      expectCode: respCodeSignature,
+      stage: 'sign_finish',
+    );
+    _debugLog.debug('delete', 'sign_finish -> send');
+    await _bleProtocol.run(_protocol.signFinish());
+    final signatureFrame = await signatureFuture;
+    if (signatureFrame.length < 65) {
+      throw StateError('Invalid signature response length');
+    }
+    final signature = Uint8List.fromList(signatureFrame.sublist(1, 65));
+    final signatureHex = _bytesToHex(signature);
+    _debugLog.info('delete', 'Radio challenge signature received');
+    return signatureHex;
+  }
+
+  Future<Uint8List> _awaitSignFrame({
+    required int expectCode,
+    required String stage,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final frame = await _transport.inbound
+        .firstWhere((data) {
+          if (data.isEmpty) return false;
+          final code = data[0];
+          if (code == expectCode || code == respCodeErr) {
+            return true;
+          }
+          _debugLog.debug(
+            'delete',
+            '$stage waiting: saw unrelated frame code=0x${code.toRadixString(16)} len=${data.length}',
+          );
+          return false;
+        })
+        .timeout(timeout);
+    if (frame[0] == respCodeErr) {
+      final errCode = frame.length > 1 ? frame[1] : -1;
+      _debugLog.error('delete', '$stage <- err code=$errCode');
+      throw StateError('Radio signing failed at $stage (err=$errCode)');
+    }
+    _debugLog.debug(
+      'delete',
+      '$stage <- frame code=0x${frame[0].toRadixString(16)} len=${frame.length}',
+    );
+    return frame;
+  }
+
+  String _bytesToHex(Uint8List bytes) {
+    return bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join()
+        .toUpperCase();
   }
 }
 

@@ -1,33 +1,22 @@
-import 'dart:io';
-
-import 'package:path_provider/path_provider.dart';
-import 'package:reaxdb_dart/reaxdb_dart.dart';
+import 'package:mesh_utility/src/services/reax_database_backend_base.dart';
+import 'package:mesh_utility/src/services/reax_database_backend_stub.dart'
+    if (dart.library.io) 'package:mesh_utility/src/services/reax_database_backend_io.dart'
+    if (dart.library.js_interop) 'package:mesh_utility/src/services/reax_database_backend_web.dart'
+    as backend;
 
 class ReaxDatabase {
-  static SimpleReaxDB? _db;
-  static Future<SimpleReaxDB>? _opening;
+  static AppKvDatabase? _db;
+  static Future<AppKvDatabase>? _opening;
 
-  static Future<SimpleReaxDB> instance() {
+  static Future<AppKvDatabase> instance() {
     if (_db != null) return Future.value(_db);
-
-    if (_opening != null) {
-      return _opening!;
-    }
+    if (_opening != null) return _opening!;
 
     _opening = () async {
-      try {
-        final baseDir = await getApplicationSupportDirectory();
-        final dbPath = '${baseDir.path}${Platform.pathSeparator}mesh_utility';
-        final value = await ReaxDB.simple(dbPath);
-        _db = value;
-        return value;
-      } catch (_) {
-        final value = await ReaxDB.simple('mesh_utility');
-        _db = value;
-        return value;
-      }
+      final value = await backend.openAppKvDatabase();
+      _db = value;
+      return value;
     }();
-
     return _opening!;
   }
 }

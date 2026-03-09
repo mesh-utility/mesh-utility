@@ -599,7 +599,7 @@ export class ScanBatcher {
 
     for (const scan of scans) {
       for (const node of scan.nodes) {
-        const nodeId = typeof node.nodeId === 'string' ? node.nodeId.trim() : '';
+        const nodeId = this.normalizeHexId(node.nodeId);
         const name = typeof node.name === 'string' ? node.name.trim() : '';
         if (!nodeId || !name) {
           continue;
@@ -616,7 +616,8 @@ export class ScanBatcher {
     }
 
     for (const [nodeId, latestName] of nameUpdates.entries()) {
-      const likeNodeId = this.escapeLikePattern(nodeId);
+      const prefix8 = nodeId.length >= 8 ? nodeId.slice(0, 8) : nodeId;
+      const likeNodeId = this.escapeLikePattern(prefix8);
       const rows = await db.prepare(
         `
           SELECT id, nodes
@@ -624,7 +625,7 @@ export class ScanBatcher {
           WHERE nodes LIKE ? ESCAPE '\\'
         `
       )
-        .bind(`%"nodeId":"${likeNodeId}"%`)
+        .bind(`%"nodeId":"${likeNodeId}%`)
         .all();
 
       for (const row of rows.results as Array<{ id: number; nodes: string }>) {
@@ -641,12 +642,18 @@ export class ScanBatcher {
 
         let changed = false;
         for (const parsedNode of parsedNodes) {
-          if (!parsedNode || parsedNode.nodeId !== nodeId) {
+          if (!parsedNode) {
+            continue;
+          }
+          const parsedNodeId = this.normalizeHexId(parsedNode.nodeId);
+          if (!this.idsLikelySameDevice(parsedNodeId, nodeId)) {
             continue;
           }
           const existingName =
             typeof parsedNode.name === 'string' ? parsedNode.name.trim() : '';
-          if (existingName === latestName) {
+          const existingIsUnknown = this.isUnknownLike(existingName);
+          // Always upgrade unknown/empty names when ID matches a known node.
+          if (!existingIsUnknown && existingName === latestName) {
             continue;
           }
           parsedNode.name = latestName;
@@ -771,6 +778,27 @@ export class ScanBatcher {
 
   private escapeLikePattern(value: string): string {
     return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  }
+
+  private normalizeHexId(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    return value.trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+  }
+
+  private isUnknownLike(value: string): boolean {
+    const v = value.trim();
+    if (!v) return true;
+    const lower = v.toLowerCase();
+    return lower === 'unknown' || lower.startsWith('unknown (');
+  }
+
+  private idsLikelySameDevice(a: string, b: string): boolean {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.startsWith(b) || b.startsWith(a)) return true;
+    const a8 = a.length >= 8 ? a.slice(0, 8) : a;
+    const b8 = b.length >= 8 ? b.slice(0, 8) : b;
+    return a8 === b8;
   }
 
   private normalizeRadioId(value: unknown): string {

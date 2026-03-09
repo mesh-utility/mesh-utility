@@ -107,11 +107,14 @@ class _MeshHomePageState extends State<MeshHomePage>
   bool _resumeScanAfterResume = false;
   bool _notificationsReady = false;
   String _lastStatusNotificationKey = '';
+  bool? _portraitLockActive;
+  static const double _tabletShortestSideDp = 600.0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_updateOrientationLock());
     _appState = AppState(
       settingsStore: SettingsStore(),
       localStore: LocalStore(),
@@ -124,6 +127,13 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   @override
   void dispose() {
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      unawaited(
+        SystemChrome.setPreferredOrientations(DeviceOrientation.values),
+      );
+    }
     WidgetsBinding.instance.removeObserver(this);
     _appState.removeListener(_onAppStateChanged);
     _appState.onBlePinRequest = null;
@@ -137,6 +147,38 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   bool get _isAndroidNative =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<void> _updateOrientationLock() async {
+    if (kIsWeb) return;
+    final target = defaultTargetPlatform;
+    final isMobile =
+        target == TargetPlatform.android || target == TargetPlatform.iOS;
+    if (!isMobile) {
+      if (_portraitLockActive != false) {
+        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+        _portraitLockActive = false;
+      }
+      return;
+    }
+
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) return;
+    final view = views.first;
+    final dpr = view.devicePixelRatio;
+    final size = view.physicalSize;
+    if (dpr <= 0 || size.isEmpty) return;
+
+    final shortestDp = size.shortestSide / dpr;
+    final lockPortrait = shortestDp < _tabletShortestSideDp;
+    if (_portraitLockActive == lockPortrait) return;
+
+    await SystemChrome.setPreferredOrientations(
+      lockPortrait
+          ? const [DeviceOrientation.portraitUp]
+          : DeviceOrientation.values,
+    );
+    _portraitLockActive = lockPortrait;
+  }
 
   Future<void> _initNotifications() async {
     if (!_isAndroidNative) return;
@@ -253,6 +295,12 @@ class _MeshHomePageState extends State<MeshHomePage>
     }
   }
 
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    unawaited(_updateOrientationLock());
+  }
+
   Future<void> _recoverBleAfterResume() async {
     if (_appState.bleSelectedDeviceId == null ||
         _appState.bleSelectedDeviceId!.isEmpty) {
@@ -304,6 +352,9 @@ class _MeshHomePageState extends State<MeshHomePage>
               TextField(
                 autofocus: true,
                 keyboardType: TextInputType.number,
+                obscureText: true,
+                enableSuggestions: false,
+                autocorrect: false,
                 decoration: const InputDecoration(
                   labelText: 'PIN / Passkey',
                   border: OutlineInputBorder(),
@@ -776,6 +827,32 @@ class _MeshHomePageState extends State<MeshHomePage>
                                         ),
                                       ),
                                     )
+                                  else if (_index == 1)
+                                    Expanded(
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              'Mesh Nodes',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .titleMedium
+                                                  ?.copyWith(
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Chip(
+                                            label: Text(
+                                              '${_appState.nodes.length} Nodes',
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    )
                                   else
                                     const Spacer(),
                                 ],
@@ -847,6 +924,8 @@ class _MeshHomePageState extends State<MeshHomePage>
         resolvedNodeNames.putIfAbsent(id, () => name);
       }
     }
+    final webBleUiUnsupported =
+        kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 
     switch (index) {
       case 0:
@@ -890,10 +969,12 @@ class _MeshHomePageState extends State<MeshHomePage>
           nodesCount: _appState.nodes.length,
           statsRadiusMiles: _appState.settings.statsRadiusMiles,
           unitSystem: _appState.settings.unitSystem,
+          tileCachingEnabled: _appState.settings.tileCachingEnabled,
           observerLat: observer?.$1,
           observerLng: observer?.$2,
           connectedRadioName: _appState.connectedRadioDisplayName,
           connectedRadioMeshId: _appState.connectedRadioMeshId8,
+          bleUiEnabled: !webBleUiUnsupported,
         );
       case 1:
         return NodesPage(
@@ -903,6 +984,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             _debugLog.info('ui_click', 'Nodes -> Map for node=$nodeId');
             setState(() {
               _mapFocusNodeId = nodeId;
+              _mapFocusHexId = null;
               _index = 0;
             });
           },
@@ -919,6 +1001,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             _debugLog.info('ui_click', 'History -> Map for hex=$hexId');
             setState(() {
               _mapFocusHexId = hexId;
+              _mapFocusNodeId = null;
               _index = 0;
             });
           },
@@ -943,6 +1026,11 @@ class _MeshHomePageState extends State<MeshHomePage>
           debugLogs: _appState.debugLogs,
           onClearDebugLogs: _appState.clearDebugLogs,
           onClearScanCache: _appState.clearScanCache,
+          onDownloadOfflineTiles: _appState.downloadOfflineMapTiles,
+          onClearOfflineTiles: _appState.clearOfflineMapTiles,
+          onDeleteRadioData: _appState.deleteConnectedRadioData,
+          deleteInProgress: _appState.deleteInProgress,
+          connectedRadioId: _appState.connectedRadioMeshId8,
           onChanged: (value) async {
             final wantsOnline =
                 _appState.settings.forceOffline && !value.forceOffline;
@@ -976,6 +1064,7 @@ class _MeshHomePageState extends State<MeshHomePage>
           onBleConnect: _appState.connectBle,
           onBleDisconnect: _appState.disconnectBle,
           onBleNodeDiscover: _appState.runNodeDiscover,
+          bleUiEnabled: !webBleUiUnsupported,
         );
       case 5:
         return const PrivacyPage();

@@ -8,6 +8,8 @@ import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/signal_class.dart';
+import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 import 'package:mesh_utility/src/widgets/map_top_controls.dart';
 import 'dart:math';
@@ -46,6 +48,8 @@ class MapPage extends StatefulWidget {
     required this.nodesCount,
     required this.statsRadiusMiles,
     required this.unitSystem,
+    required this.tileCachingEnabled,
+    required this.bleUiEnabled,
     this.observerLat,
     this.observerLng,
     this.connectedRadioName,
@@ -84,6 +88,8 @@ class MapPage extends StatefulWidget {
   final int nodesCount;
   final int statsRadiusMiles;
   final String unitSystem;
+  final bool tileCachingEnabled;
+  final bool bleUiEnabled;
   final double? observerLat;
   final double? observerLng;
   final String? connectedRadioName;
@@ -107,10 +113,14 @@ class _MapPageState extends State<MapPage> {
   LatLng? _lastAutoCenterTarget;
   DateTime? _lastAutoCenterDisableAt;
   Set<String> _selectedNodeFilters = <String>{};
+  late TileProvider _tileProvider;
 
   @override
   void initState() {
     super.initState();
+    _tileProvider = TileCacheService.createTileProvider(
+      enabled: widget.tileCachingEnabled,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusHexIfRequested();
       _maybeAutoCenterOnObserver();
@@ -120,6 +130,11 @@ class _MapPageState extends State<MapPage> {
   @override
   void didUpdateWidget(covariant MapPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.tileCachingEnabled != oldWidget.tileCachingEnabled) {
+      _tileProvider = TileCacheService.createTileProvider(
+        enabled: widget.tileCachingEnabled,
+      );
+    }
     if (widget.autoCenter) {
       final observerMoved =
           widget.observerLat != oldWidget.observerLat ||
@@ -142,6 +157,7 @@ class _MapPageState extends State<MapPage> {
 
   @override
   void dispose() {
+    _tileProvider.dispose();
     _polygonHitNotifier.dispose();
     super.dispose();
   }
@@ -327,6 +343,40 @@ class _MapPageState extends State<MapPage> {
     return true;
   }
 
+  void _focusCoverageForNodeFilters(Set<String> nodeFilters) {
+    if (nodeFilters.isEmpty) return;
+    final nodeHexes = <String>{};
+    for (final scan in widget.scans) {
+      final key = _nodeFilterKey(scan.nodeId);
+      if (key.isNotEmpty && nodeFilters.contains(key)) {
+        nodeHexes.add(hexKey(scan.latitude, scan.longitude));
+      }
+    }
+    if (nodeHexes.isEmpty) return;
+    final nodeZones = widget.zones
+        .where((z) => nodeHexes.contains(z.id))
+        .toList(growable: false);
+    if (nodeZones.isEmpty) return;
+
+    final coordinates = <LatLng>[];
+    for (final zone in nodeZones) {
+      if (zone.polygon.isNotEmpty) {
+        coordinates.addAll(zone.polygon);
+      } else {
+        coordinates.add(LatLng(zone.centerLat, zone.centerLng));
+      }
+    }
+    if (coordinates.isEmpty) return;
+    _mapController.fitCamera(
+      CameraFit.coordinates(
+        coordinates: coordinates,
+        padding: const EdgeInsets.fromLTRB(24, 120, 56, 130),
+        maxZoom: 16.2,
+        minZoom: 8,
+      ),
+    );
+  }
+
   Set<String> _effectiveNodeFilters({
     required String? focusNodeId,
     required Set<String> selectedNodeFilters,
@@ -379,6 +429,10 @@ class _MapPageState extends State<MapPage> {
         _lastPopupDebugSignature = null;
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focusCoverageForNodeFilters(result);
+    });
   }
 
   @override
@@ -407,12 +461,19 @@ class _MapPageState extends State<MapPage> {
                 .toList(growable: false);
           }();
 
-    final filteredZones = _filterZonesByRadius(
-      zones: baseZones,
-      observerLat: widget.observerLat,
-      observerLng: widget.observerLng,
-      radiusMiles: widget.statsRadiusMiles,
-    );
+    final bypassRadiusForNodeFocus =
+        focusNodeId != null &&
+        focusNodeId.isNotEmpty &&
+        _selectedNodeFilters.isEmpty &&
+        effectiveNodeFilters.isNotEmpty;
+    final filteredZones = bypassRadiusForNodeFocus
+        ? baseZones
+        : _filterZonesByRadius(
+            zones: baseZones,
+            observerLat: widget.observerLat,
+            observerLng: widget.observerLng,
+            radiusMiles: widget.statsRadiusMiles,
+          );
     final filteredZoneIds = filteredZones.map((z) => z.id).toSet();
     final scopedNodeIds = <String>{};
     for (final scan in widget.scans) {
@@ -433,16 +494,17 @@ class _MapPageState extends State<MapPage> {
           ? 'custom(${effectiveNodeFilters.length})'
           : focusNodeId!;
       final signature =
-          '$filterLabel|zones:${widget.zones.length}|base:${baseZones.length}|filtered:${filteredZones.length}';
+          '$filterLabel|zones:${widget.zones.length}|base:${baseZones.length}|filtered:${filteredZones.length}|radiusBypass:$bypassRadiusForNodeFocus';
       if (signature != _lastNodeFilterDebugSignature) {
         _lastNodeFilterDebugSignature = signature;
         debugPrint(
           '[map_filter] Render filter active for $filterLabel: '
-          'base=${baseZones.length}, afterRadius=${filteredZones.length}',
+          'base=${baseZones.length}, afterRadius=${filteredZones.length}, '
+          'radiusBypass=$bypassRadiusForNodeFocus',
         );
         _debugLog.debug(
           'map_filter',
-          'Render filter active for $filterLabel: base=${baseZones.length}, afterRadius=${filteredZones.length}',
+          'Render filter active for $filterLabel: base=${baseZones.length}, afterRadius=${filteredZones.length}, radiusBypass=$bypassRadiusForNodeFocus',
         );
       }
     } else {
@@ -475,10 +537,13 @@ class _MapPageState extends State<MapPage> {
         final legendBottom = statsBottom + statsEstimatedHeight + 18;
         final legendExpandedWidth = min(viewWidth - 24, 154.0);
         final legendReservedWidth = 56.0;
-        final popupWidth = narrowOverlay ? min(viewWidth - 24, 300.0) : 280.0;
+        final maxPopupWidth = max(120.0, viewWidth - 24);
+        final popupWidth = narrowOverlay ? min(maxPopupWidth, 300.0) : 280.0;
+        final popupMinTop = 116.0;
+        final popupMaxTop = max(popupMinTop, viewHeight - 320.0);
         final popupTop = narrowOverlay
             ? 138.0
-            : (viewHeight * 0.26).clamp(116.0, viewHeight - 320.0);
+            : (viewHeight * 0.26).clamp(popupMinTop, popupMaxTop);
         final centeredPopupLeft = (viewWidth - popupWidth) / 2;
         final maxPopupLeftBeforeLegend =
             viewWidth - popupWidth - legendReservedWidth - 8;
@@ -528,6 +593,7 @@ class _MapPageState extends State<MapPage> {
                   TileLayer(
                     urlTemplate: _layerTemplate(_baseLayer),
                     userAgentPackageName: 'mesh_utility',
+                    tileProvider: _tileProvider,
                     maxZoom: 19,
                   ),
                   if (widget.observerLat != null && widget.observerLng != null)
@@ -842,6 +908,7 @@ class _MapPageState extends State<MapPage> {
                 bleConnected: widget.bleConnected,
                 bleBusy: widget.bleBusy,
                 bleScanning: widget.bleScanning,
+                bleUiEnabled: widget.bleUiEnabled,
                 onToggleScan: () {
                   _debugLog.info('ui_click', 'Map controls scan toggle click');
                   widget.onBleToggleScan();
@@ -930,11 +997,13 @@ class _MapPageState extends State<MapPage> {
                       final effectiveDead =
                           _selectedZone!.isDeadZone && !hasSuccessfulData;
                       final showCoverageTitle = !effectiveDead;
-                      final signalClass = _selectedZone!.avgRssi == null
+                      final signalClass =
+                          _selectedZone!.avgRssi == null &&
+                              _selectedZone!.avgSnr == null
                           ? null
-                          : _signalClassForValues(
-                              _selectedZone!.avgRssi!,
-                              _selectedZone!.avgSnr,
+                          : signalClassForValues(
+                              rssi: _selectedZone!.avgRssi,
+                              snr: _selectedZone!.avgSnr,
                             );
                       final popupSig = latest != null
                           ? 'zone=${_selectedZone!.id}|ts=${latest.timestamp.toIso8601String()}|node=${latest.nodeId}|obs=${_observerDisplayName(latest, connectedRadioName: widget.connectedRadioName, connectedRadioMeshId: widget.connectedRadioMeshId, resolvedNodeNames: widget.resolvedNodeNames)}|rssi=${latest.rssi.toStringAsFixed(1)}|snrOut=${latest.snr?.toStringAsFixed(1) ?? 'N/A'}|snrIn=${latest.snrIn?.toStringAsFixed(1) ?? 'N/A'}|alt=${latest.altitude?.toStringAsFixed(1) ?? 'N/A'}|scans=${_selectedZone!.scanCount}|dead=$effectiveDead'
@@ -1934,49 +2003,6 @@ String _stripPopupEntityLabel(String value) {
   return trimmed;
 }
 
-class _SignalLegendClass {
-  const _SignalLegendClass(this.label, this.color);
-
-  final String label;
-  final Color color;
-}
-
-_SignalLegendClass _signalClassForValues(double rssi, double? snr) {
-  int rssiLevel() {
-    if (rssi > -90) return 5;
-    if (rssi > -100) return 4;
-    if (rssi > -110) return 3;
-    if (rssi > -115) return 2;
-    if (rssi > -120) return 1;
-    return 0;
-  }
-
-  int snrLevel() {
-    if (snr == null) return 3;
-    if (snr > 10) return 5;
-    if (snr > 0) return 4;
-    if (snr > -7) return 3;
-    if (snr > -13) return 2;
-    return 0;
-  }
-
-  final level = rssiLevel() < snrLevel() ? rssiLevel() : snrLevel();
-  switch (level) {
-    case 5:
-      return const _SignalLegendClass('Excellent', Color(0xFF22C55E));
-    case 4:
-      return const _SignalLegendClass('Good', Color(0xFF4ADE80));
-    case 3:
-      return const _SignalLegendClass('Fair', Color(0xFFFACC15));
-    case 2:
-      return const _SignalLegendClass('Marginal', Color(0xFFF97316));
-    case 1:
-      return const _SignalLegendClass('Poor', Color(0xFFEF4444));
-    default:
-      return const _SignalLegendClass('Dead Zone', Color(0xFF991B1B));
-  }
-}
-
 String _layerTemplate(BaseLayer layer) {
   switch (layer) {
     case BaseLayer.dark:
@@ -1989,45 +2015,7 @@ String _layerTemplate(BaseLayer layer) {
 }
 
 Color _zoneColor(CoverageZone zone) {
-  final rssi = zone.avgRssi;
-  final snr = zone.avgSnr;
-
-  if (rssi == null && snr == null) return const Color(0xFF991B1B);
-
-  int rssiLevel() {
-    if (rssi == null) return 3;
-    if (rssi > -90) return 5;
-    if (rssi > -100) return 4;
-    if (rssi > -110) return 3;
-    if (rssi > -115) return 2;
-    if (rssi > -120) return 1;
-    return 0;
-  }
-
-  int snrLevel() {
-    if (snr == null) return 3;
-    if (snr > 10) return 5;
-    if (snr > 0) return 4;
-    if (snr > -7) return 3;
-    if (snr > -13) return 2;
-    return 0;
-  }
-
-  final level = rssiLevel() < snrLevel() ? rssiLevel() : snrLevel();
-  switch (level) {
-    case 5:
-      return const Color(0xFF22C55E);
-    case 4:
-      return const Color(0xFF4ADE80);
-    case 3:
-      return const Color(0xFFFACC15);
-    case 2:
-      return const Color(0xFFF97316);
-    case 1:
-      return const Color(0xFFEF4444);
-    default:
-      return const Color(0xFF991B1B);
-  }
+  return signalColorForValues(rssi: zone.avgRssi, snr: zone.avgSnr);
 }
 
 List<CoverageZone> _filterZonesByRadius({

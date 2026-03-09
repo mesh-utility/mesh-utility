@@ -83,15 +83,41 @@ function parseNodeEntries(raw: string): NodeEntry[] {
   }
 }
 
+function originMatchesPattern(origin: string, pattern: string): boolean {
+  const normalizedOrigin = origin.trim().toLowerCase();
+  const normalizedPattern = pattern.trim().toLowerCase();
+  if (!normalizedOrigin || !normalizedPattern) return false;
+  if (!normalizedPattern.includes('*')) {
+    return normalizedOrigin === normalizedPattern;
+  }
+  // Supports simple wildcard patterns such as:
+  // - https://*.mesh-utility-tracker.pages.dev
+  const escaped = normalizedPattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  const regexSource = `^${escaped.replace(/\*/g, '.*')}$`;
+  return new RegExp(regexSource).test(normalizedOrigin);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || '';
     
     // CORS handling
-    const allowedOrigins = env.ALLOWED_ORIGINS.split(',');
+    const allowedOrigins = env.ALLOWED_ORIGINS
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter((origin) => origin.length > 0);
+    const matchedOrigin = origin
+      ? allowedOrigins.find((allowed) => originMatchesPattern(origin, allowed))
+      : null;
+    const resolvedOrigin =
+      matchedOrigin
+        ? origin
+        : allowedOrigins.length > 0
+            ? allowedOrigins[0]
+            : '*';
     const corsHeaders = {
-      'Access-Control-Allow-Origin': allowedOrigins.includes(origin) ? origin : allowedOrigins[0],
+      'Access-Control-Allow-Origin': resolvedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Allow-Credentials': 'true',

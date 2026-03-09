@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/signal_class.dart';
 
 class HistoryPage extends StatefulWidget {
   const HistoryPage({
@@ -328,7 +329,10 @@ class _HistoryPageState extends State<HistoryPage> {
                           scan.latitude,
                           scan.longitude,
                         );
-                        final signalClass = _signalClassForScan(scan);
+                        final signalClass = signalClassForValues(
+                          rssi: scan.rssi,
+                          snr: scan.snr,
+                        );
                         return Card(
                           margin: const EdgeInsets.only(bottom: 10),
                           child: InkWell(
@@ -752,50 +756,4 @@ String _formatAltitude(double? altitudeMeters, String unitSystem) {
   }
   final feet = altitudeMeters * 3.28084;
   return '${feet.toStringAsFixed(0)} ft';
-}
-
-class _SignalLegendClass {
-  const _SignalLegendClass(this.label, this.color);
-
-  final String label;
-  final Color color;
-}
-
-_SignalLegendClass _signalClassForScan(ScanResult scan) {
-  final rssi = scan.rssi;
-  final snr = scan.snr;
-
-  int rssiLevel() {
-    if (rssi > -90) return 5;
-    if (rssi > -100) return 4;
-    if (rssi > -110) return 3;
-    if (rssi > -115) return 2;
-    if (rssi > -120) return 1;
-    return 0;
-  }
-
-  int snrLevel() {
-    if (snr == null) return 3;
-    if (snr > 10) return 5;
-    if (snr > 0) return 4;
-    if (snr > -7) return 3;
-    if (snr > -13) return 2;
-    return 0;
-  }
-
-  final level = rssiLevel() < snrLevel() ? rssiLevel() : snrLevel();
-  switch (level) {
-    case 5:
-      return const _SignalLegendClass('Excellent', Color(0xFF22C55E));
-    case 4:
-      return const _SignalLegendClass('Good', Color(0xFF4ADE80));
-    case 3:
-      return const _SignalLegendClass('Fair', Color(0xFFFACC15));
-    case 2:
-      return const _SignalLegendClass('Marginal', Color(0xFFF97316));
-    case 1:
-      return const _SignalLegendClass('Poor', Color(0xFFEF4444));
-    default:
-      return const _SignalLegendClass('Dead Zone', Color(0xFF991B1B));
-  }
 }

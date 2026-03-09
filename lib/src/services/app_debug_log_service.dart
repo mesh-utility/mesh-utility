@@ -25,6 +25,7 @@ class AppDebugLogService extends ChangeNotifier {
   static final AppDebugLogService instance = AppDebugLogService._();
 
   static const int _maxEntries = 1000;
+  static const int _maxEntriesRelease = 300;
   final List<AppDebugLogEntry> _entries = <AppDebugLogEntry>[];
 
   UnmodifiableListView<AppDebugLogEntry> get entries =>
@@ -52,6 +53,11 @@ class AppDebugLogService extends ChangeNotifier {
   }
 
   void _add(AppDebugLogLevel level, String scope, String message) {
+    // In release builds, suppress verbose log traffic to reduce overhead.
+    if (kReleaseMode &&
+        (level == AppDebugLogLevel.debug || level == AppDebugLogLevel.info)) {
+      return;
+    }
     debugPrint('[${level.name}] [$scope] $message');
     _entries.add(
       AppDebugLogEntry(
@@ -61,8 +67,9 @@ class AppDebugLogService extends ChangeNotifier {
         message: message,
       ),
     );
-    if (_entries.length > _maxEntries) {
-      _entries.removeRange(0, _entries.length - _maxEntries);
+    final maxEntries = kReleaseMode ? _maxEntriesRelease : _maxEntries;
+    if (_entries.length > maxEntries) {
+      _entries.removeRange(0, _entries.length - maxEntries);
     }
     notifyListeners();
   }

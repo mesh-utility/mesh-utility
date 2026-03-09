@@ -197,6 +197,9 @@ const int cmdSendStatusReq = 27;
 const int cmdGetContactByKey = 30;
 const int cmdGetChannel = 31;
 const int cmdSetChannel = 32;
+const int cmdSignStart = 33;
+const int cmdSignData = 34;
+const int cmdSignFinish = 35;
 const int cmdSendTracePath = 36;
 const int cmdGetTelemetryReq = 39;
 const int cmdGetCustomVar = 40;
@@ -240,6 +243,8 @@ const int respCodeDeviceInfo = 13;
 const int respCodeContactMsgRecvV3 = 16;
 const int respCodeChannelMsgRecvV3 = 17;
 const int respCodeChannelInfo = 18;
+const int respCodeSignStart = 19;
+const int respCodeSignature = 20;
 const int respCodeCustomVars = 21;
 const int respCodeAutoAddConfig = 25;
 
@@ -485,11 +490,6 @@ int _contactNameScore(String value) {
   final letters = RegExp(r'[A-Za-z]').allMatches(value).length;
   if (letters < 2) return 0;
   score += lettersDigits;
-  if (value.contains('MeshCore') ||
-      value.contains('CCLRN') ||
-      value.contains('Repeater')) {
-    score += 4;
-  }
   return score;
 }
 
@@ -687,6 +687,21 @@ Uint8List buildSetChannelFrame(int channelIndex, String name, Uint8List psk) {
   }
   writer.writeBytes(pskPadded);
   return writer.toBytes();
+}
+
+Uint8List buildSignStartFrame() {
+  return Uint8List.fromList([cmdSignStart]);
+}
+
+Uint8List buildSignDataFrame(Uint8List chunk) {
+  final writer = BufferWriter();
+  writer.writeByte(cmdSignData);
+  writer.writeBytes(chunk);
+  return writer.toBytes();
+}
+
+Uint8List buildSignFinishFrame() {
+  return Uint8List.fromList([cmdSignFinish]);
 }
 
 Uint8List buildSetRadioParamsFrame(
@@ -1025,6 +1040,28 @@ class ProtocolCommandRegistry {
 
   ProtocolCommand custom(String name, Uint8List payload) =>
       RawFrameCommand(name, payload);
+
+  ProtocolCommand signStart() =>
+      RawFrameCommand('sign_start', buildSignStartFrame());
+
+  ProtocolCommand signData(Uint8List chunk) =>
+      RawFrameCommand('sign_data', buildSignDataFrame(chunk));
+
+  ProtocolCommand signFinish() =>
+      RawFrameCommand('sign_finish', buildSignFinishFrame());
+
+  ProtocolCommand setOtherParams({
+    required int allowTelemetryFlags,
+    required int advertLocationPolicy,
+    required int multiAcks,
+  }) => RawFrameCommand(
+    'set_other_params',
+    buildSetOtherParamsFrame(
+      allowTelemetryFlags,
+      advertLocationPolicy,
+      multiAcks,
+    ),
+  );
 }
 
 class NodeDiscoverResponse {
