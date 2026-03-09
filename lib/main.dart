@@ -182,19 +182,24 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   Future<void> _initNotifications() async {
     if (!_isAndroidNative) return;
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-    final initSettings = InitializationSettings(android: androidInit);
-    await _notifications.initialize(
-      initSettings,
-      onDidReceiveNotificationResponse: _onNotificationResponse,
-    );
-    final androidPlugin = _notifications
-        .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >();
-    await androidPlugin?.requestNotificationsPermission();
-    _notificationsReady = true;
-    await _syncStatusNotification();
+    try {
+      const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+      final initSettings = InitializationSettings(android: androidInit);
+      await _notifications.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _onNotificationResponse,
+      );
+      final androidPlugin = _notifications
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      await androidPlugin?.requestNotificationsPermission();
+      _notificationsReady = true;
+      await _syncStatusNotification();
+    } catch (e) {
+      _notificationsReady = false;
+      _debugLog.warn('notifications', 'Notification init skipped: $e');
+    }
   }
 
   Future<void> _onNotificationResponse(NotificationResponse response) async {
