@@ -1,0 +1,38 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "mesh-utility-worker"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "mesh-utility-db"
+database_id = "4d4cfea8-16b2-491f-af62-e5beb56f324d"
+
+# Durable Object binding for batch processing
+[[durable_objects.bindings]]
+name = "SCAN_BATCH"
+class_name = "ScanBatcher"
+script_name = "mesh-utility-worker"
+
+# Migration for Durable Objects (required for free plan)
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ScanBatcher"]
+
+# Environment variables
+[vars]
+ALLOWED_ORIGINS = "https://mesh-utility-tracker.pages.dev,https://production.mesh-utility-tracker.pages.dev,https://mesh-utility.org"
+GITHUB_REPO = "just-stuff-tm/mesh-data"
+GITHUB_BRANCH = "main"
+
+# Secrets (set with: wrangler secret put GITHUB_TOKEN)
+# GITHUB_TOKEN = "ghp_xxxx"
+
+# For local development
+[env.dev]
+[env.dev.vars]
+ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:4173"
+GITHUB_REPO = "just-stuff-tm/mesh-data"
+GITHUB_BRANCH = "main"

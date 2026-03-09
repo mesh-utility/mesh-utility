@@ -1,0 +1,23 @@
+{
+  "name": "mesh-utility-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for Mesh Utility data ingestion and GitHub commits",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create mesh-utility-db",
+    "db:init": "wrangler d1 execute mesh-utility-db --file=./schema.sql",
+    "db:query": "wrangler d1 execute mesh-utility-db --command",
+    "secret:github": "wrangler secret put GITHUB_TOKEN"
+  },
+  "keywords": ["cloudflare", "worker", "meshcore", "github"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^3.93.0"
+  }
+}
