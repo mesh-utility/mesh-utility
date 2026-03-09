@@ -94,7 +94,7 @@ jobs:
             command: flutter build macos --debug
           - os: macos-latest
             target: ios
-            command: flutter build ios --debug --no-codesign
+            command: flutter build ios --simulator
     steps:
       - name: Checkout
         uses: actions/checkout@v4
