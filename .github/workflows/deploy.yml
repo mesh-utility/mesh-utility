@@ -57,16 +57,6 @@ jobs:
           flutter pub get
           WORKER_URL="$WORKER_URL" ./tool/build_web_cloudflare.sh
 
-      - name: Cloudflare preflight (auth and project lookup)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          echo "Using account id prefix: ${CLOUDFLARE_ACCOUNT_ID:0:8}..."
-          npx wrangler@4 whoami
-          npx wrangler@4 pages project list
-
       - name: Deploy Cloudflare Pages (production branch)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
