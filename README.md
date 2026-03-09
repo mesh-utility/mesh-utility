@@ -6,12 +6,12 @@ Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and
 
 ## Supported Targets
 
-- [ ] Android
+- [x] Android
 - [ ] iOS
-- [ ] Linux
+- [x] Linux
 - [ ] macOS
 - [ ] Windows
-- [ ] Web
+- [x] Web
 
 ## How The App Works
 
