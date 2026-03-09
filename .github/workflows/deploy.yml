@@ -3,6 +3,7 @@ name: Deploy
 on:
   push:
     branches:
+      - master
       - mesh-utility
   workflow_dispatch:
 
