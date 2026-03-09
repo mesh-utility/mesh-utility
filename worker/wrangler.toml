@@ -23,7 +23,7 @@ new_sqlite_classes = ["ScanBatcher"]
 
 # Environment variables
 [vars]
-ALLOWED_ORIGINS = "https://mesh-utility-tracker.pages.dev,https://production.mesh-utility-tracker.pages.dev,https://*.mesh-utility-tracker.pages.dev,https://mesh-utility.org"
+ALLOWED_ORIGINS = "https://mesh-utility.org,https://www.mesh-utility.org,https://mesh-utility-tracker.pages.dev,https://*.mesh-utility-tracker.pages.dev,http://localhost:8080,http://localhost:5173,http://localhost:4173"
 GITHUB_REPO = "just-stuff-tm/mesh-data"
 GITHUB_BRANCH = "main"
 

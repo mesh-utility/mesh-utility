@@ -97,6 +97,28 @@ function originMatchesPattern(origin: string, pattern: string): boolean {
   return new RegExp(regexSource).test(normalizedOrigin);
 }
 
+function buildCorsHeaders(origin: string, allowedOrigins: string[]): Record<string, string> {
+  const matchedOrigin = origin
+    ? allowedOrigins.find((allowed) => originMatchesPattern(origin, allowed))
+    : null;
+
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    Vary: 'Origin',
+  };
+
+  if (matchedOrigin && origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    headers['Access-Control-Allow-Credentials'] = 'true';
+    return headers;
+  }
+
+  // Non-browser/native callers usually have no Origin header.
+  headers['Access-Control-Allow-Origin'] = '*';
+  return headers;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -107,21 +129,7 @@ export default {
       .split(',')
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0);
-    const matchedOrigin = origin
-      ? allowedOrigins.find((allowed) => originMatchesPattern(origin, allowed))
-      : null;
-    const resolvedOrigin =
-      matchedOrigin
-        ? origin
-        : allowedOrigins.length > 0
-            ? allowedOrigins[0]
-            : '*';
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': resolvedOrigin,
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Credentials': 'true',
-    };
+    const corsHeaders = buildCorsHeaders(origin, allowedOrigins);
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
