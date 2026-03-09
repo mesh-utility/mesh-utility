@@ -1,4 +1,5 @@
 import 'package:mesh_utility/src/services/reax_database.dart';
+import 'package:mesh_utility/src/config/app_config.dart';
 
 class AppSettings {
   const AppSettings({
@@ -42,7 +43,7 @@ class AppSettings {
   final List<String> knownBleDeviceIds;
 
   static const defaults = AppSettings(
-    workerUrl: 'http://127.0.0.1:8787',
+    workerUrl: AppConfig.deployedWorkerUrl,
     historyDays: 7,
     deadzoneDays: 7,
     privacyAccepted: false,

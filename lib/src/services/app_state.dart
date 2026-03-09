@@ -337,7 +337,10 @@ class AppState extends ChangeNotifier {
         return;
       }
 
-      final api = WorkerApi(AppConfig.deployedWorkerUrl);
+      final api = WorkerApi(
+        AppConfig.deployedWorkerUrl,
+        fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+      );
       final connectedRadioId = _connectedRadioMeshId8();
       final localOnlyBeforeSync = rawScans
           .where((scan) => !scan.downloadedFromWorker)
@@ -2068,7 +2071,10 @@ class AppState extends ChangeNotifier {
     if (_internetTimeRefreshInFlight || settings.forceOffline) return;
     _internetTimeRefreshInFlight = true;
     try {
-      final api = WorkerApi(AppConfig.deployedWorkerUrl);
+      final api = WorkerApi(
+        AppConfig.deployedWorkerUrl,
+        fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+      );
       final serverNow = await api.fetchServerUtcNow();
       _captureInternetTimeAnchor(serverNow);
     } catch (e) {
@@ -2163,7 +2169,10 @@ class AppState extends ChangeNotifier {
     _deleteInProgress = true;
     notifyListeners();
     try {
-      final api = WorkerApi(AppConfig.deployedWorkerUrl);
+      final api = WorkerApi(
+        AppConfig.deployedWorkerUrl,
+        fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+      );
       final challengeRes = await api.requestDeleteChallenge(
         radioId: radioId,
         publicKeyHex: publicKey,

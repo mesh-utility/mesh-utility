@@ -5,16 +5,31 @@ import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 
 class WorkerApi {
-  WorkerApi(this.baseUrl);
+  WorkerApi(this.baseUrl, {String? fallbackBaseUrl})
+    : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl);
 
   final String baseUrl;
+  final List<String> _baseUrls;
   DateTime? _lastServerDateUtc;
   DateTime? get lastServerDateUtc => _lastServerDateUtc;
 
-  Uri _uri(String path, [Map<String, String>? query]) {
-    final normalized = baseUrl.endsWith('/')
-        ? baseUrl.substring(0, baseUrl.length - 1)
-        : baseUrl;
+  static List<String> _buildBaseUrls(String primary, String? fallback) {
+    final values = <String>{};
+    void add(String? value) {
+      final v = (value ?? '').trim();
+      if (v.isEmpty) return;
+      values.add(v);
+    }
+
+    add(primary);
+    add(fallback);
+    return values.toList(growable: false);
+  }
+
+  Uri _uri(String base, String path, [Map<String, String>? query]) {
+    final normalized = base.endsWith('/')
+        ? base.substring(0, base.length - 1)
+        : base;
     return Uri.parse('$normalized$path').replace(queryParameters: query);
   }
 
@@ -30,9 +45,73 @@ class WorkerApi {
     _lastServerDateUtc = parsed.toUtc();
   }
 
+  bool _looksLikeJsonResponse(http.Response response) {
+    final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+    return contentType.contains('application/json');
+  }
+
+  bool _looksLikeNdjsonOrJson(http.Response response) {
+    final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+    if (contentType.contains('text/html')) return false;
+    return contentType.contains('application/json') ||
+        contentType.contains('application/x-ndjson') ||
+        contentType.contains('text/plain');
+  }
+
+  Future<http.Response> _getWithFallback(
+    String path, {
+    Map<String, String>? query,
+    required bool Function(http.Response response) accept,
+  }) async {
+    Object? lastError;
+    http.Response? lastResponse;
+    for (final base in _baseUrls) {
+      try {
+        final response = await http.get(_uri(base, path, query));
+        _captureServerDate(response);
+        if (accept(response)) return response;
+        lastResponse = response;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    if (lastResponse != null) return lastResponse;
+    throw Exception('Failed request $path: $lastError');
+  }
+
+  Future<http.Response> _postWithFallback(
+    String path, {
+    Map<String, String>? query,
+    required Map<String, String> headers,
+    required Object body,
+    required bool Function(http.Response response) accept,
+  }) async {
+    Object? lastError;
+    http.Response? lastResponse;
+    for (final base in _baseUrls) {
+      try {
+        final response = await http.post(
+          _uri(base, path, query),
+          headers: headers,
+          body: body,
+        );
+        _captureServerDate(response);
+        if (accept(response)) return response;
+        lastResponse = response;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    if (lastResponse != null) return lastResponse;
+    throw Exception('Failed request $path: $lastError');
+  }
+
   Future<List<String>> fetchHistoryDays() async {
-    final response = await http.get(_uri('/history'));
-    _captureServerDate(response);
+    final response = await _getWithFallback(
+      '/history',
+      accept: (response) =>
+          response.statusCode == 200 && _looksLikeJsonResponse(response),
+    );
     if (response.statusCode != 200) {
       throw Exception('Failed to fetch history days');
     }
@@ -67,8 +146,12 @@ class WorkerApi {
         if (viewerRadioId != null) {
           query['viewerRadioId'] = viewerRadioId;
         }
-        final response = await http.get(_uri('/history/$day.ndjson', query));
-        _captureServerDate(response);
+        final response = await _getWithFallback(
+          '/history/$day.ndjson',
+          query: query,
+          accept: (response) =>
+              response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
+        );
         if (response.statusCode != 200) continue;
 
         final lines = const LineSplitter().convert(_decodeUtf8(response));
@@ -108,8 +191,12 @@ class WorkerApi {
     if (viewerRadioId != null) {
       query['viewerRadioId'] = viewerRadioId;
     }
-    final response = await http.get(_uri('/coverage', query));
-    _captureServerDate(response);
+    final response = await _getWithFallback(
+      '/coverage',
+      query: query,
+      accept: (response) =>
+          response.statusCode == 200 && _looksLikeJsonResponse(response),
+    );
 
     if (response.statusCode != 200) {
       throw Exception('Failed to fetch coverage zones');
@@ -143,12 +230,15 @@ class WorkerApi {
 
   Future<int> uploadScans(List<Map<String, dynamic>> scans) async {
     if (scans.isEmpty) return 0;
-    final response = await http.post(
-      _uri('/scans'),
+    final response = await _postWithFallback(
+      '/scans',
       headers: const {'Content-Type': 'application/json'},
       body: jsonEncode(scans),
+      accept: (response) =>
+          response.statusCode >= 200 &&
+          response.statusCode < 300 &&
+          _looksLikeJsonResponse(response),
     );
-    _captureServerDate(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'Failed to upload scans (${response.statusCode}): ${_decodeUtf8(response)}',
@@ -161,12 +251,15 @@ class WorkerApi {
     required String radioId,
     required String publicKeyHex,
   }) async {
-    final response = await http.post(
-      _uri('/delete/challenge'),
+    final response = await _postWithFallback(
+      '/delete/challenge',
       headers: const {'Content-Type': 'application/json'},
       body: jsonEncode({'radioId': radioId, 'publicKey': publicKeyHex}),
+      accept: (response) =>
+          response.statusCode >= 200 &&
+          response.statusCode < 300 &&
+          _looksLikeJsonResponse(response),
     );
-    _captureServerDate(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'Failed to request delete challenge (${response.statusCode}): ${_decodeUtf8(response)}',
@@ -194,16 +287,19 @@ class WorkerApi {
     required String challenge,
     required String signatureHex,
   }) async {
-    final response = await http.post(
-      _uri('/delete/$radioId'),
+    final response = await _postWithFallback(
+      '/delete/$radioId',
       headers: const {'Content-Type': 'application/json'},
       body: jsonEncode({
         'publicKey': publicKeyHex,
         'challenge': challenge,
         'signature': signatureHex,
       }),
+      accept: (response) =>
+          response.statusCode >= 200 &&
+          response.statusCode < 300 &&
+          _looksLikeJsonResponse(response),
     );
-    _captureServerDate(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'Delete request failed (${response.statusCode}): ${_decodeUtf8(response)}',
@@ -226,8 +322,13 @@ class WorkerApi {
   }
 
   Future<DateTime?> fetchServerUtcNow() async {
-    final response = await http.get(_uri('/health'));
-    _captureServerDate(response);
+    final response = await _getWithFallback(
+      '/health',
+      accept: (response) =>
+          response.statusCode >= 200 &&
+          response.statusCode < 300 &&
+          _looksLikeJsonResponse(response),
+    );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return null;
     }
