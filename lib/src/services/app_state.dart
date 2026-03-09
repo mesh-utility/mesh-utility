@@ -444,6 +444,9 @@ class AppState extends ChangeNotifier {
     if (!await _ensureBleAvailable(context: 'ble')) {
       return;
     }
+    if (!await _ensureAndroidLocationReadyForBle()) {
+      return;
+    }
     if (bleConnecting || bleConnected) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) {
       bleStatus = 'Select a BLE device first';
@@ -498,6 +501,44 @@ class AppState extends ChangeNotifier {
     } finally {
       bleConnecting = false;
       notifyListeners();
+    }
+  }
+
+  Future<bool> _ensureAndroidLocationReadyForBle() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      final enabled = await Geolocator.isLocationServiceEnabled();
+      if (!enabled) {
+        deviceLocationStatus = 'Location services disabled';
+        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
+        notifyListeners();
+        await Geolocator.openLocationSettings();
+        return false;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied) {
+        deviceLocationStatus = 'Location permission denied';
+        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
+        notifyListeners();
+        return false;
+      }
+      if (permission == LocationPermission.deniedForever) {
+        deviceLocationStatus = 'Location permission denied forever';
+        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
+        notifyListeners();
+        await Geolocator.openAppSettings();
+        return false;
+      }
+      return true;
+    } catch (e) {
+      _debugLog.warn('location', 'BLE location precheck failed: $e');
+      return true;
     }
   }
 
