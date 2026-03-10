@@ -48,6 +48,20 @@ flutter pub get
 flutter run
 ```
 
+## Linux Installer (Direct)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mesh-utility/mesh-utility/main/tool/install_linux.sh -o install_mesh_utility.sh
+chmod +x install_mesh_utility.sh
+./install_mesh_utility.sh
+```
+
+Optional: install a different tag:
+
+```bash
+./install_mesh_utility.sh Alpha-3
+```
+
 ## Worker (Cloudflare)
 
 ```bash
