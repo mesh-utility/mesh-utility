@@ -162,7 +162,9 @@ class AppState extends ChangeNotifier {
   String _bleUnavailableStatusMessage() {
     if (!kIsWeb) return 'BLE unavailable on this platform';
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return 'BLE unavailable in iOS Safari. Use Bluefy or the native app.';
+      return 'Web BLE unavailable on this iPhone browser/runtime. '
+          'If you are already in Bluefy, update Bluefy and allow Bluetooth '
+          'permission for this site, then retry scan/connect.';
     }
     final scheme = Uri.base.scheme.toLowerCase();
     final host = Uri.base.host.toLowerCase();
@@ -479,9 +481,12 @@ class AppState extends ChangeNotifier {
         'ble',
         'Connected via ${selectedName.isNotEmpty ? selectedName : _transport.name}',
       );
+      final selectedId = (bleSelectedDeviceId ?? '').trim();
       bleStatus = selectedName.isNotEmpty
-          ? 'Connected ($selectedName)'
-          : 'Connected';
+          ? (selectedId.isNotEmpty
+                ? 'Connected ($selectedName [$selectedId])'
+                : 'Connected ($selectedName)')
+          : (selectedId.isNotEmpty ? 'Connected [$selectedId]' : 'Connected');
       if (bleSelectedDeviceId != null &&
           bleSelectedDeviceId!.isNotEmpty &&
           !settings.knownBleDeviceIds.contains(bleSelectedDeviceId)) {

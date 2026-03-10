@@ -18,15 +18,6 @@ class SettingsPage extends StatefulWidget {
     required this.lastSyncScanCount,
     required this.bleConnected,
     required this.bleBusy,
-    required this.bleStatus,
-    required this.bleScanDevices,
-    required this.bleSelectedDeviceId,
-    required this.onSelectBleDevice,
-    required this.onScanBleDevices,
-    required this.onBleConnect,
-    required this.onBleDisconnect,
-    required this.onBleNodeDiscover,
-    required this.bleUiEnabled,
     required this.debugLogs,
     required this.onClearDebugLogs,
     required this.onClearScanCache,
@@ -35,6 +26,8 @@ class SettingsPage extends StatefulWidget {
     required this.onDeleteRadioData,
     required this.deleteInProgress,
     required this.connectedRadioId,
+    required this.darkMode,
+    required this.onToggleTheme,
   });
 
   final AppSettings settings;
@@ -48,15 +41,6 @@ class SettingsPage extends StatefulWidget {
 
   final bool bleConnected;
   final bool bleBusy;
-  final String bleStatus;
-  final List<String> bleScanDevices;
-  final String? bleSelectedDeviceId;
-  final ValueChanged<String> onSelectBleDevice;
-  final Future<void> Function() onScanBleDevices;
-  final Future<void> Function() onBleConnect;
-  final Future<void> Function() onBleDisconnect;
-  final Future<void> Function() onBleNodeDiscover;
-  final bool bleUiEnabled;
   final List<AppDebugLogEntry> debugLogs;
   final VoidCallback onClearDebugLogs;
   final Future<void> Function() onClearScanCache;
@@ -65,17 +49,14 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function() onDeleteRadioData;
   final bool deleteInProgress;
   final String? connectedRadioId;
+  final bool darkMode;
+  final VoidCallback onToggleTheme;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage>
-    with TickerProviderStateMixin {
-  late final TabController _mainController = TabController(
-    length: 2,
-    vsync: this,
-  );
+class _SettingsPageState extends State<SettingsPage> {
   bool _tileOpInProgress = false;
   bool _tileStatsLoading = false;
   TileCacheStats? _tileCacheStats;
@@ -84,12 +65,6 @@ class _SettingsPageState extends State<SettingsPage>
   void initState() {
     super.initState();
     _loadTileCacheStats();
-  }
-
-  @override
-  void dispose() {
-    _mainController.dispose();
-    super.dispose();
   }
 
   Future<void> _loadTileCacheStats() async {
@@ -139,9 +114,9 @@ class _SettingsPageState extends State<SettingsPage>
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Delete failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
     }
   }
 
@@ -156,9 +131,9 @@ class _SettingsPageState extends State<SettingsPage>
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Tile download failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Tile download failed: $e')));
     } finally {
       if (mounted) {
         setState(() => _tileOpInProgress = false);
@@ -178,9 +153,9 @@ class _SettingsPageState extends State<SettingsPage>
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Clear tile cache failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Clear tile cache failed: $e')));
     } finally {
       if (mounted) {
         setState(() => _tileOpInProgress = false);
@@ -206,6 +181,15 @@ class _SettingsPageState extends State<SettingsPage>
   Widget build(BuildContext context) {
     final s = widget.settings;
     final unitLabel = s.unitSystem == 'metric' ? 'km' : 'miles';
+    final pickerLabelStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
+      fontWeight: FontWeight.w600,
+      color: Theme.of(context).colorScheme.onSurface,
+    );
+    final pickerFloatingLabelStyle = Theme.of(context).textTheme.bodySmall
+        ?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: Theme.of(context).colorScheme.primary,
+        );
     final radiusDisplay = _radiusDisplayValue(s.statsRadiusMiles, s.unitSystem);
     final syncMeta = _syncMeta(
       count: widget.lastSyncScanCount,
@@ -214,748 +198,631 @@ class _SettingsPageState extends State<SettingsPage>
     return SafeArea(
       top: false,
       bottom: true,
-      child: Column(
+      child: ListView(
+        padding: const EdgeInsets.all(12),
         children: [
-          Material(
-            color: Theme.of(context).colorScheme.surface,
-            child: TabBar(
-              controller: _mainController,
-              tabs: const [
-                Tab(text: 'General'),
-                Tab(text: 'Connections'),
-              ],
+          Text(
+            'General Settings',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Backend endpoint is managed internally for production and is not user-configurable.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          Card(
+            elevation: 3,
+            shadowColor: Theme.of(
+              context,
+            ).colorScheme.shadow.withValues(alpha: 0.28),
+            surfaceTintColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _CardSectionHeader(
+                    title: 'Scanning',
+                    icon: Icons.radar_outlined,
+                  ),
+                  const SizedBox(height: 12),
+                  _SectionTitle(
+                    icon: Icons.timer_outlined,
+                    label: 'Scan Interval: ${s.scanIntervalSeconds}s',
+                  ),
+                  Slider(
+                    value: s.scanIntervalSeconds.toDouble(),
+                    min: 20,
+                    max: 300,
+                    divisions: 28,
+                    label: '${s.scanIntervalSeconds}',
+                    onChanged: (v) => widget.onChanged(
+                      s.copyWith(scanIntervalSeconds: v.round()),
+                    ),
+                  ),
+                  Text(
+                    'Minimum delay between automatic scan cycles.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  _SectionDivider(),
+                  Row(
+                    children: [
+                      const Expanded(child: Text('Smart scan')),
+                      Switch(
+                        value: s.smartScanEnabled,
+                        onChanged: (v) =>
+                            widget.onChanged(s.copyWith(smartScanEnabled: v)),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    'Skip zones covered recently to reduce redundant scans.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  Text('Smart scan freshness days: ${s.smartScanDays}'),
+                  Slider(
+                    value: s.smartScanDays.toDouble(),
+                    min: 1,
+                    max: 14,
+                    divisions: 13,
+                    label: '${s.smartScanDays}',
+                    onChanged: (v) =>
+                        widget.onChanged(s.copyWith(smartScanDays: v.round())),
+                  ),
+                  Text(
+                    'Dead zones always scan at the configured interval, regardless of smart scanning.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
             ),
           ),
-          Expanded(
-            child: TabBarView(
-              controller: _mainController,
-              children: [
-                ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
+          const SizedBox(height: 10),
+          Card(
+            elevation: 3,
+            shadowColor: Theme.of(
+              context,
+            ).colorScheme.shadow.withValues(alpha: 0.28),
+            surfaceTintColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _CardSectionHeader(
+                    title: 'Map & Radio',
+                    icon: Icons.map_outlined,
+                  ),
+                  const SizedBox(height: 12),
+                  _AdaptiveSwitchRow(
+                    icon: Icons.radio_outlined,
+                    label: 'Update radio position',
+                    value: s.updateRadioPosition,
+                    onChanged: (v) =>
+                        widget.onChanged(s.copyWith(updateRadioPosition: v)),
+                  ),
+                  Text(
+                    s.updateRadioPosition
+                        ? 'Radio coordinate updates are enabled.'
+                        : 'Radio coordinate updates are disabled.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  Text(
+                    'For radios without GPS, this sets the observer radio coordinates to your current OS location so mesh peers can see your position. It only updates the radio coordinates.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  _SectionDivider(),
+                  _AdaptiveSwitchRow(
+                    icon: Icons.download_outlined,
+                    label: 'Offline map tiles',
+                    value: s.tileCachingEnabled,
+                    onChanged: (v) =>
+                        widget.onChanged(s.copyWith(tileCachingEnabled: v)),
+                  ),
+                  Text(
+                    s.tileCachingEnabled
+                        ? 'Viewed tiles are cached and offline tile actions are enabled.'
+                        : 'Tile caching is disabled.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 4),
+                  if (_tileStatsLoading && _tileCacheStats == null)
+                    const Text('Tile cache usage: loading...')
+                  else if ((_tileCacheStats?.supported ?? false))
                     Text(
-                      'General Settings',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 12),
+                      'Cached tiles: ${_tileCacheStats?.tileCount ?? 0}  •  Size: ${_formatBytes(_tileCacheStats?.totalBytes ?? 0)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    )
+                  else
                     Text(
-                      'Backend endpoint is managed internally for production and is not user-configurable.',
+                      'Tile cache usage is unavailable on this platform.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                    const SizedBox(height: 12),
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _SectionTitle(
-                              icon: Icons.timer_outlined,
-                              label: 'Scan Interval: ${s.scanIntervalSeconds}s',
-                            ),
-                            Slider(
-                              value: s.scanIntervalSeconds.toDouble(),
-                              min: 20,
-                              max: 300,
-                              divisions: 28,
-                              label: '${s.scanIntervalSeconds}',
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(scanIntervalSeconds: v.round()),
-                              ),
-                            ),
-                            Text(
-                              'Minimum delay between automatic scan cycles.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            Row(
-                              children: [
-                                const Expanded(child: Text('Smart scan')),
-                                Switch(
-                                  value: s.smartScanEnabled,
-                                  onChanged: (v) => widget.onChanged(
-                                    s.copyWith(smartScanEnabled: v),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Text(
-                              'Skip zones covered recently to reduce redundant scans.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            Text(
-                              'Smart scan freshness days: ${s.smartScanDays}',
-                            ),
-                            Slider(
-                              value: s.smartScanDays.toDouble(),
-                              min: 1,
-                              max: 14,
-                              divisions: 13,
-                              label: '${s.smartScanDays}',
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(smartScanDays: v.round()),
-                              ),
-                            ),
-                            Text(
-                              'Dead zones always scan at the configured interval, regardless of smart scanning.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            _AdaptiveSwitchRow(
-                              icon: Icons.radio_outlined,
-                              label: 'Update radio position',
-                              value: s.updateRadioPosition,
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(updateRadioPosition: v),
-                              ),
-                            ),
-                            Text(
-                              s.updateRadioPosition
-                                  ? 'Radio coordinate updates are enabled.'
-                                  : 'Radio coordinate updates are disabled.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            Text(
-                              'For radios without GPS, this sets the observer radio coordinates to your current OS location so mesh peers can see your position. It only updates the radio coordinates.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            _AdaptiveSwitchRow(
-                              icon: Icons.download_outlined,
-                              label: 'Offline map tiles',
-                              value: s.tileCachingEnabled,
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(tileCachingEnabled: v),
-                              ),
-                            ),
-                            Text(
-                              s.tileCachingEnabled
-                                  ? 'Viewed tiles are cached and offline tile actions are enabled.'
-                                  : 'Tile caching is disabled.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 4),
-                            if (_tileStatsLoading && _tileCacheStats == null)
-                              const Text('Tile cache usage: loading...')
-                            else if ((_tileCacheStats?.supported ?? false))
-                              Text(
-                                'Cached tiles: ${_tileCacheStats?.tileCount ?? 0}  •  Size: ${_formatBytes(_tileCacheStats?.totalBytes ?? 0)}',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              )
-                            else
-                              Text(
-                                'Tile cache usage is unavailable on this platform.',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed:
-                                        (!s.tileCachingEnabled ||
-                                            _tileOpInProgress)
-                                        ? null
-                                        : _handleDownloadTiles,
-                                    icon: const Icon(
-                                      Icons.map_outlined,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Download area tiles'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: _tileOpInProgress
-                                        ? null
-                                        : _handleClearTiles,
-                                    icon: const Icon(
-                                      Icons.delete_outline,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Clear tile cache'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Text(
-                              'Download area tiles prefetches map tiles around your current OS location.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                final narrow = constraints.maxWidth < 280;
-                                final selector = SegmentedButton<String>(
-                                  style: const ButtonStyle(
-                                    visualDensity: VisualDensity.compact,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  segments: const [
-                                    ButtonSegment(
-                                      value: 'imperial',
-                                      label: Text('Imperial'),
-                                    ),
-                                    ButtonSegment(
-                                      value: 'metric',
-                                      label: Text('Metric'),
-                                    ),
-                                  ],
-                                  selected: {s.unitSystem},
-                                  showSelectedIcon: false,
-                                  onSelectionChanged: (value) {
-                                    widget.onChanged(
-                                      s.copyWith(unitSystem: value.first),
-                                    );
-                                  },
-                                );
-                                if (narrow) {
-                                  return Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const Row(
-                                        children: [
-                                          Icon(Icons.straighten, size: 14),
-                                          SizedBox(width: 8),
-                                          Text('Units'),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      selector,
-                                    ],
-                                  );
-                                }
-                                return Row(
-                                  children: [
-                                    const Icon(Icons.straighten, size: 14),
-                                    const SizedBox(width: 8),
-                                    const Text('Units'),
-                                    const Spacer(),
-                                    selector,
-                                  ],
-                                );
-                              },
-                            ),
-                            _SectionDivider(),
-                            DropdownButtonFormField<String>(
-                              isExpanded: true,
-                              initialValue: s.language,
-                              decoration: const InputDecoration(
-                                labelText: 'Language',
-                                border: OutlineInputBorder(),
-                              ),
-                              items: const [
-                                DropdownMenuItem(
-                                  value: 'en',
-                                  child: Text('English'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'es',
-                                  child: Text('Español'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'fr',
-                                  child: Text('Français'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'de',
-                                  child: Text('Deutsch'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'pt',
-                                  child: Text('Português'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'zh',
-                                  child: Text('中文'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'ja',
-                                  child: Text('日本語'),
-                                ),
-                                DropdownMenuItem(
-                                  value: 'ko',
-                                  child: Text('한국어'),
-                                ),
-                              ],
-                              onChanged: (value) {
-                                if (value == null) return;
-                                widget.onChanged(s.copyWith(language: value));
-                              },
-                            ),
-                            _SectionDivider(),
-                            _SectionTitle(
-                              icon: Icons.radar_outlined,
-                              label:
-                                  'Stats Radius: ${radiusDisplay == 0 ? 'All map' : '$radiusDisplay $unitLabel'}',
-                            ),
-                            Slider(
-                              value: radiusDisplay.toDouble(),
-                              min: 0,
-                              max: 1000,
-                              divisions: 200,
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(
-                                  statsRadiusMiles: _toMilesRadius(
-                                    v.round(),
-                                    s.unitSystem,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Text(
-                              radiusDisplay == 0
-                                  ? 'Include all scans in visible map bounds.'
-                                  : 'Limit map stats to $radiusDisplay $unitLabel radius.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String>(
-                              isExpanded: true,
-                              initialValue: _historyDaysValue(s.historyDays),
-                              decoration: const InputDecoration(
-                                labelText: 'Cloud History',
-                                border: OutlineInputBorder(),
-                              ),
-                              items: const [
-                                DropdownMenuItem(
-                                  value: '7',
-                                  child: Text('Last 7 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '14',
-                                  child: Text('Last 14 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '30',
-                                  child: Text('Last 30 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '60',
-                                  child: Text('Last 60 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '90',
-                                  child: Text('Last 90 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '180',
-                                  child: Text('Last 180 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '270',
-                                  child: Text('Last 270 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '365',
-                                  child: Text('Last 365 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '0',
-                                  child: Text('All days'),
-                                ),
-                              ],
-                              onChanged: (value) {
-                                if (value == null) return;
-                                widget.onChanged(
-                                  s.copyWith(historyDays: int.parse(value)),
-                                );
-                              },
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Controls how many online history days are loaded on the map.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 10),
-                            DropdownButtonFormField<String>(
-                              isExpanded: true,
-                              initialValue: _historyDaysValue(s.deadzoneDays),
-                              decoration: const InputDecoration(
-                                labelText: 'Deadzone Retrieval',
-                                border: OutlineInputBorder(),
-                              ),
-                              items: const [
-                                DropdownMenuItem(
-                                  value: '7',
-                                  child: Text('Last 7 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '14',
-                                  child: Text('Last 14 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '30',
-                                  child: Text('Last 30 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '60',
-                                  child: Text('Last 60 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '90',
-                                  child: Text('Last 90 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '180',
-                                  child: Text('Last 180 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '270',
-                                  child: Text('Last 270 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '365',
-                                  child: Text('Last 365 days'),
-                                ),
-                                DropdownMenuItem(
-                                  value: '0',
-                                  child: Text('All days'),
-                                ),
-                              ],
-                              onChanged: (value) {
-                                if (value == null) return;
-                                widget.onChanged(
-                                  s.copyWith(deadzoneDays: int.parse(value)),
-                                );
-                              },
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Controls deadzone fetch window without changing successful scan history range.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            _SectionTitle(
-                              icon: Icons.sync,
-                              label:
-                                  'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
-                            ),
-                            Slider(
-                              value: s.uploadBatchIntervalMinutes.toDouble(),
-                              min: 30,
-                              max: 1440,
-                              divisions: 47,
-                              onChanged: (v) => widget.onChanged(
-                                s.copyWith(
-                                  uploadBatchIntervalMinutes:
-                                      ((v / 30).round() * 30).clamp(30, 1440),
-                                ),
-                              ),
-                            ),
-                            Text(
-                              '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} cached locally',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              syncMeta,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 8),
-                            OutlinedButton.icon(
-                              onPressed: (widget.syncing || s.forceOffline)
-                                  ? null
-                                  : widget.onSync,
-                              icon: const Icon(Icons.sync, size: 16),
-                              label: Text(
-                                s.forceOffline
-                                    ? 'Sync disabled (Offline Mode)'
-                                    : widget.syncing
-                                    ? 'Syncing...'
-                                    : 'Sync now (${widget.uploadQueueCount})',
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Downloaded scans are marked read-only and excluded from upload queue.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            _AdaptiveSwitchRow(
-                              icon: s.forceOffline
-                                  ? Icons.wifi_off
-                                  : Icons.wifi,
-                              iconColor: s.forceOffline
-                                  ? Colors.orange
-                                  : Colors.green,
-                              label: s.forceOffline
-                                  ? 'Offline Mode'
-                                  : 'Online Mode',
-                              value: !s.forceOffline,
-                              onChanged: (checked) {
-                                widget.onChanged(
-                                  s.copyWith(forceOffline: !checked),
-                                );
-                              },
-                            ),
-                            Text(
-                              s.forceOffline
-                                  ? 'Forces app to remain offline until disabled.'
-                                  : 'Online mode enabled when network is available.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            _SectionDivider(),
-                            const Text(
-                              'Clear Local Data',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            const SizedBox(height: 8),
-                            FilledButton.tonalIcon(
-                              onPressed: widget.onClearScanCache,
-                              icon: const Icon(Icons.delete_outline, size: 16),
-                              label: const Text('Clear Scan Cache'),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Delete My Data',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Connect to a radio to enable signed delete request.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            if ((widget.connectedRadioId ?? '').trim().isNotEmpty)
-                              Text(
-                                'Connected radio ID: ${widget.connectedRadioId}',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            const SizedBox(height: 6),
-                            OutlinedButton.icon(
-                              onPressed:
-                                  (!widget.bleConnected ||
-                                      widget.bleBusy ||
-                                      widget.deleteInProgress)
-                                  ? null
-                                  : _handleDeleteRadioData,
-                              icon: const Icon(Icons.delete_forever, size: 16),
-                              label: Text(
-                                widget.deleteInProgress
-                                    ? 'Deleting...'
-                                    : 'Delete radio data',
-                              ),
-                            ),
-                          ],
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              (!s.tileCachingEnabled || _tileOpInProgress)
+                              ? null
+                              : _handleDownloadTiles,
+                          icon: const Icon(Icons.map_outlined, size: 16),
+                          label: const Text('Download area tiles'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _tileOpInProgress
+                              ? null
+                              : _handleClearTiles,
+                          icon: const Icon(Icons.delete_outline, size: 16),
+                          label: const Text('Clear tile cache'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    'Download area tiles prefetches map tiles around your current OS location.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  _SectionDivider(),
+                  _SectionTitle(
+                    icon: Icons.radar_outlined,
+                    label:
+                        'Stats Radius: ${radiusDisplay == 0 ? 'All map' : '$radiusDisplay $unitLabel'}',
+                  ),
+                  Slider(
+                    value: radiusDisplay.toDouble(),
+                    min: 0,
+                    max: 1000,
+                    divisions: 200,
+                    onChanged: (v) => widget.onChanged(
+                      s.copyWith(
+                        statsRadiusMiles: _toMilesRadius(
+                          v.round(),
+                          s.unitSystem,
                         ),
                       ),
                     ),
-                  ],
-                ),
-                Column(
-                  children: [
-                    Expanded(
-                      // TODO(chris): Reintroduce USB/TCP connection panes when
-                      // transport UIs are fully wired and tested.
-                      child: widget.bleUiEnabled
-                          ? _ScanResultsConnectionPane(
-                              title: 'Bluetooth LE',
-                              status: widget.bleStatus,
-                              connected: widget.bleConnected,
-                              busy: widget.bleBusy,
-                              selectedDeviceId: widget.bleSelectedDeviceId,
-                              autoConnectEnabled: widget.settings.bleAutoConnect,
-                              results: [
-                                ...widget.bleScanDevices.map((d) => 'BLE $d'),
-                              ],
-                              onSelectBleDevice: widget.onSelectBleDevice,
-                              onScanDevices: widget.onScanBleDevices,
-                              onToggleAutoConnect: (v) => widget.onChanged(
-                                widget.settings.copyWith(bleAutoConnect: v),
-                              ),
-                              onConnect: widget.onBleConnect,
-                              onDisconnect: widget.onBleDisconnect,
-                            )
-                          : ListView(
-                              padding: const EdgeInsets.all(12),
-                              children: const [
-                                Text(
-                                  'Bluetooth LE',
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                SizedBox(height: 10),
-                                Text(
-                                  'Web BLE is unavailable in this browser. Use Android Chrome/Edge (HTTPS or localhost), or Bluefy on iOS.',
-                                ),
+                  ),
+                  Text(
+                    radiusDisplay == 0
+                        ? 'Include all scans in visible map bounds.'
+                        : 'Limit map stats to $radiusDisplay $unitLabel radius.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            elevation: 3,
+            shadowColor: Theme.of(
+              context,
+            ).colorScheme.shadow.withValues(alpha: 0.28),
+            surfaceTintColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _CardSectionHeader(title: 'Display', icon: Icons.tune),
+                  const SizedBox(height: 12),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final narrow = constraints.maxWidth < 280;
+                      final selector = SegmentedButton<String>(
+                        style: const ButtonStyle(
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        segments: const [
+                          ButtonSegment(
+                            value: 'imperial',
+                            label: Text('Imperial'),
+                          ),
+                          ButtonSegment(value: 'metric', label: Text('Metric')),
+                        ],
+                        selected: {s.unitSystem},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (value) {
+                          widget.onChanged(s.copyWith(unitSystem: value.first));
+                        },
+                      );
+                      if (narrow) {
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.straighten, size: 14),
+                                SizedBox(width: 8),
+                                Text('Units'),
                               ],
                             ),
+                            const SizedBox(height: 8),
+                            selector,
+                          ],
+                        );
+                      }
+                      return Row(
+                        children: [
+                          const Icon(Icons.straighten, size: 14),
+                          const SizedBox(width: 8),
+                          const Text('Units'),
+                          const Spacer(),
+                          selector,
+                        ],
+                      );
+                    },
+                  ),
+                  _SectionDivider(),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: s.language,
+                    decoration: const InputDecoration(
+                      labelText: 'Language',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'en', child: Text('English')),
+                      DropdownMenuItem(value: 'es', child: Text('Español')),
+                      DropdownMenuItem(value: 'fr', child: Text('Français')),
+                      DropdownMenuItem(value: 'de', child: Text('Deutsch')),
+                      DropdownMenuItem(value: 'pt', child: Text('Português')),
+                      DropdownMenuItem(value: 'zh', child: Text('中文')),
+                      DropdownMenuItem(value: 'ja', child: Text('日本語')),
+                      DropdownMenuItem(value: 'ko', child: Text('한국어')),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      widget.onChanged(s.copyWith(language: value));
+                    },
+                  ),
+                  _SectionDivider(),
+                  OutlinedButton.icon(
+                    onPressed: widget.onToggleTheme,
+                    icon: Icon(
+                      widget.darkMode
+                          ? Icons.dark_mode_outlined
+                          : Icons.light_mode_outlined,
+                      size: 16,
+                    ),
+                    label: Text(
+                      widget.darkMode
+                          ? 'Theme: Dark (tap for Light)'
+                          : 'Theme: Light (tap for Dark)',
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Map default follows app theme: Light = Standard, Dark = Carto. '
+                    'You can still change map layer manually.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            elevation: 3,
+            shadowColor: Theme.of(
+              context,
+            ).colorScheme.shadow.withValues(alpha: 0.28),
+            surfaceTintColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _CardSectionHeader(
+                    title: 'History & Sync',
+                    icon: Icons.sync,
+                  ),
+                  const SizedBox(height: 12),
+                  _AdaptiveSwitchRow(
+                    icon: s.forceOffline ? Icons.cloud_off : Icons.cloud,
+                    iconColor: s.forceOffline ? Colors.orange : Colors.green,
+                    label: s.forceOffline ? 'Offline Mode' : 'Online Mode',
+                    value: !s.forceOffline,
+                    onChanged: (checked) {
+                      widget.onChanged(s.copyWith(forceOffline: !checked));
+                    },
+                  ),
+                  Text(
+                    s.forceOffline
+                        ? 'Offline mode is ON. Sync with the online database is paused. '
+                              'Turn Offline Mode off to see worldwide scan data and contribute.'
+                        : 'Online mode is enabled. You can sync and contribute scan data worldwide. '
+                              'Turn Offline Mode on to pause cloud sync.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  if (s.forceOffline) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Online mode requires accepted Privacy Policy.',
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
-                ),
-              ],
+                  _SectionDivider(),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: _historyDaysValue(s.historyDays),
+                    decoration: InputDecoration(
+                      labelText: 'Cloud History',
+                      labelStyle: pickerLabelStyle,
+                      floatingLabelStyle: pickerFloatingLabelStyle,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: '7', child: Text('Last 7 days')),
+                      DropdownMenuItem(
+                        value: '14',
+                        child: Text('Last 14 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '30',
+                        child: Text('Last 30 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '60',
+                        child: Text('Last 60 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '90',
+                        child: Text('Last 90 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '180',
+                        child: Text('Last 180 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '270',
+                        child: Text('Last 270 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '365',
+                        child: Text('Last 365 days'),
+                      ),
+                      DropdownMenuItem(value: '0', child: Text('All days')),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      widget.onChanged(
+                        s.copyWith(historyDays: int.parse(value)),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Controls how many online history days are loaded on the map.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: _historyDaysValue(s.deadzoneDays),
+                    decoration: InputDecoration(
+                      labelText: 'Deadzone Retrieval',
+                      labelStyle: pickerLabelStyle,
+                      floatingLabelStyle: pickerFloatingLabelStyle,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: '7', child: Text('Last 7 days')),
+                      DropdownMenuItem(
+                        value: '14',
+                        child: Text('Last 14 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '30',
+                        child: Text('Last 30 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '60',
+                        child: Text('Last 60 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '90',
+                        child: Text('Last 90 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '180',
+                        child: Text('Last 180 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '270',
+                        child: Text('Last 270 days'),
+                      ),
+                      DropdownMenuItem(
+                        value: '365',
+                        child: Text('Last 365 days'),
+                      ),
+                      DropdownMenuItem(value: '0', child: Text('All days')),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      widget.onChanged(
+                        s.copyWith(deadzoneDays: int.parse(value)),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Controls deadzone fetch window without changing successful scan history range.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  _SectionDivider(),
+                  _SectionTitle(
+                    icon: Icons.sync,
+                    label:
+                        'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
+                  ),
+                  Slider(
+                    value: s.uploadBatchIntervalMinutes.toDouble(),
+                    min: 30,
+                    max: 1440,
+                    divisions: 47,
+                    onChanged: (v) => widget.onChanged(
+                      s.copyWith(
+                        uploadBatchIntervalMinutes: ((v / 30).round() * 30)
+                            .clamp(30, 1440),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} cached locally',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(syncMeta, style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: (widget.syncing || s.forceOffline)
+                        ? null
+                        : widget.onSync,
+                    icon: const Icon(Icons.sync, size: 16),
+                    label: Text(
+                      s.forceOffline
+                          ? 'Sync disabled (Offline Mode)'
+                          : widget.syncing
+                          ? 'Syncing...'
+                          : 'Sync now (${widget.uploadQueueCount})',
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Downloaded scans are marked read-only and excluded from upload queue.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            elevation: 3,
+            shadowColor: Theme.of(
+              context,
+            ).colorScheme.shadow.withValues(alpha: 0.28),
+            surfaceTintColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _CardSectionHeader(
+                    title: 'Data Management',
+                    icon: Icons.storage_outlined,
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Clear Local Data',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  FilledButton.tonalIcon(
+                    onPressed: widget.onClearScanCache,
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: const Text('Clear Scan Cache'),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Delete My Data',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Connect to a radio to enable signed delete request.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  if ((widget.connectedRadioId ?? '').trim().isNotEmpty)
+                    Text(
+                      'Connected radio ID: ${widget.connectedRadioId}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  const SizedBox(height: 6),
+                  OutlinedButton.icon(
+                    onPressed:
+                        (!widget.bleConnected ||
+                            widget.bleBusy ||
+                            widget.deleteInProgress)
+                        ? null
+                        : _handleDeleteRadioData,
+                    icon: const Icon(Icons.delete_forever, size: 16),
+                    label: Text(
+                      widget.deleteInProgress
+                          ? 'Deleting...'
+                          : 'Delete radio data',
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
       ),
     );
-  }
-}
-
-class _ScanResultsConnectionPane extends StatelessWidget {
-  const _ScanResultsConnectionPane({
-    required this.title,
-    required this.status,
-    required this.connected,
-    required this.busy,
-    required this.results,
-    this.selectedDeviceId,
-    this.autoConnectEnabled = false,
-    this.onSelectBleDevice,
-    this.onScanDevices,
-    this.onToggleAutoConnect,
-    this.onConnect,
-    this.onDisconnect,
-  });
-
-  final String title;
-  final String status;
-  final bool connected;
-  final bool busy;
-  final List<String> results;
-  final String? selectedDeviceId;
-  final bool autoConnectEnabled;
-  final ValueChanged<String>? onSelectBleDevice;
-  final Future<void> Function()? onScanDevices;
-  final ValueChanged<bool>? onToggleAutoConnect;
-  final Future<void> Function()? onConnect;
-  final Future<void> Function()? onDisconnect;
-
-  @override
-  Widget build(BuildContext context) {
-    final connectedDeviceLabel = _resolveConnectedDeviceLabel();
-    final listRows = connected
-        ? (connectedDeviceLabel == null
-              ? const <String>[]
-              : <String>[connectedDeviceLabel])
-        : results;
-
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        Text(title, style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(status),
-        const SizedBox(height: 8),
-        if (onToggleAutoConnect != null)
-          Row(
-            children: [
-              const Expanded(child: Text('BLE Auto-connect')),
-              Switch(value: autoConnectEnabled, onChanged: onToggleAutoConnect),
-            ],
-          ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: FilledButton.tonalIcon(
-                onPressed:
-                    (onConnect == null ||
-                        connected ||
-                        busy ||
-                        (selectedDeviceId == null || selectedDeviceId!.isEmpty))
-                    ? null
-                    : onConnect,
-                icon: const Icon(Icons.bluetooth_connected),
-                label: const Text('Connect'),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: FilledButton.tonalIcon(
-                onPressed: (onDisconnect == null || !connected || busy)
-                    ? null
-                    : onDisconnect,
-                icon: const Icon(Icons.bluetooth_disabled),
-                label: const Text('Disconnect'),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        FilledButton.tonalIcon(
-          onPressed: (onScanDevices == null || busy || connected)
-              ? null
-              : onScanDevices,
-          icon: const Icon(Icons.bluetooth_searching),
-          label: const Text('Scan Devices'),
-        ),
-        const SizedBox(height: 12),
-        Text(
-          connected ? 'Connected Device' : 'Devices Found (${listRows.length})',
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: 8),
-        Container(
-          constraints: const BoxConstraints(minHeight: 120, maxHeight: 320),
-          decoration: BoxDecoration(
-            border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: listRows.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text(
-                      connected
-                          ? 'No connected BLE device'
-                          : 'No devices found. Tap "Scan Devices".',
-                    ),
-                  ),
-                )
-              : ListView.separated(
-                  itemCount: listRows.length,
-                  separatorBuilder: (context, index) =>
-                      const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final row = listRows[index];
-                    final match = RegExp(r'\[([^\]]+)\]$').firstMatch(row);
-                    final deviceId = match?.group(1);
-                    final isSelected =
-                        deviceId != null &&
-                        selectedDeviceId != null &&
-                        selectedDeviceId == deviceId;
-                    return ListTile(
-                      dense: true,
-                      visualDensity: VisualDensity.compact,
-                      leading: const Icon(Icons.bluetooth, size: 18),
-                      title: Text(row),
-                      selected: isSelected,
-                      trailing: isSelected
-                          ? const Icon(Icons.check_circle, size: 16)
-                          : null,
-                      onTap:
-                          (!connected &&
-                              deviceId != null &&
-                              onSelectBleDevice != null)
-                          ? () => onSelectBleDevice!(deviceId)
-                          : null,
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
-  }
-
-  String? _resolveConnectedDeviceLabel() {
-    final selected = selectedDeviceId;
-    if (selected == null || selected.isEmpty) return null;
-    for (final row in results) {
-      final match = RegExp(r'\[([^\]]+)\]$').firstMatch(row);
-      if (match?.group(1) == selected) return row;
-    }
-    return 'BLE Device [$selected]';
   }
 }
 
@@ -986,6 +853,42 @@ class _SectionTitle extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _CardSectionHeader extends StatelessWidget {
+  const _CardSectionHeader({required this.title, required this.icon});
+
+  final String title;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.primaryContainer.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w800,
+              color: Theme.of(context).colorScheme.primary,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

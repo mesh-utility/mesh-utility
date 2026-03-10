@@ -14,6 +14,7 @@ class MapTopControls extends StatelessWidget {
     required this.syncing,
     required this.forceOffline,
     required this.onSync,
+    this.connectionLabel,
   });
 
   final bool autoCenter;
@@ -27,60 +28,81 @@ class MapTopControls extends StatelessWidget {
   final bool syncing;
   final bool forceOffline;
   final VoidCallback onSync;
+  final String? connectionLabel;
 
   @override
   Widget build(BuildContext context) {
+    final title = (connectionLabel ?? '').trim();
+    final showTitle = title.isNotEmpty;
     return Card(
       elevation: 1,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Row(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              onPressed: onToggleAutoCenter,
-              icon: Icon(
-                autoCenter ? Icons.location_pin : Icons.location_searching,
-                size: 18,
+            if (showTitle)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 2, 6, 2),
+                child: Text(
+                  title,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
               ),
-              tooltip: autoCenter ? 'Auto-center on' : 'Auto-center off',
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onToggleAutoCenter,
+                  icon: Icon(
+                    autoCenter ? Icons.location_pin : Icons.location_searching,
+                    size: 18,
+                  ),
+                  tooltip: autoCenter ? 'Auto-center on' : 'Auto-center off',
+                ),
+                if (bleUiEnabled)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    onPressed: (!bleConnected || bleBusy) ? null : onToggleScan,
+                    icon: Icon(
+                      bleScanning ? Icons.pause : Icons.play_arrow,
+                      size: 18,
+                    ),
+                    tooltip: bleScanning
+                        ? 'Pause scan loop'
+                        : 'Start scan loop',
+                  ),
+                if (bleUiEnabled)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    onPressed: (!bleConnected || bleBusy || !bleScanning)
+                        ? null
+                        : onForceScan,
+                    icon: const Icon(Icons.flash_on, size: 18),
+                    tooltip: 'Force scan now',
+                  ),
+                if (syncing)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    onPressed: forceOffline ? null : onSync,
+                    icon: const Icon(Icons.sync, size: 18),
+                    tooltip: forceOffline ? 'Offline mode enabled' : 'Sync',
+                  ),
+              ],
             ),
-            if (bleUiEnabled)
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                onPressed: (!bleConnected || bleBusy) ? null : onToggleScan,
-                icon: Icon(
-                  bleScanning ? Icons.pause : Icons.play_arrow,
-                  size: 18,
-                ),
-                tooltip: bleScanning ? 'Pause scan loop' : 'Start scan loop',
-              ),
-            if (bleUiEnabled)
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                onPressed: (!bleConnected || bleBusy || !bleScanning)
-                    ? null
-                    : onForceScan,
-                icon: const Icon(Icons.flash_on, size: 18),
-                tooltip: 'Force scan now',
-              ),
-            if (syncing)
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8),
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              )
-            else
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                onPressed: forceOffline ? null : onSync,
-                icon: const Icon(Icons.sync, size: 18),
-                tooltip: forceOffline ? 'Offline mode enabled' : 'Sync',
-              ),
           ],
         ),
       ),

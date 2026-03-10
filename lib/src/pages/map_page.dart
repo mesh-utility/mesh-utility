@@ -102,7 +102,8 @@ class MapPage extends StatefulWidget {
 class _MapPageState extends State<MapPage> {
   final MapController _mapController = MapController();
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
-  BaseLayer _baseLayer = BaseLayer.dark;
+  BaseLayer _baseLayer = BaseLayer.standard;
+  Brightness? _lastThemeBrightness;
   bool _layerSelectorExpanded = false;
   bool _legendExpanded = false;
   final LayerHitNotifier<String> _polygonHitNotifier = ValueNotifier(null);
@@ -125,6 +126,15 @@ class _MapPageState extends State<MapPage> {
       _focusHexIfRequested();
       _maybeAutoCenterOnObserver();
     });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final brightness = Theme.of(context).brightness;
+    if (_lastThemeBrightness == brightness) return;
+    _lastThemeBrightness = brightness;
+    _baseLayer = _defaultBaseLayerForBrightness(brightness);
   }
 
   @override
@@ -239,6 +249,35 @@ class _MapPageState extends State<MapPage> {
     _debugLog.debug(
       'map_auto_center',
       'Recenter to lat=${target.latitude.toStringAsFixed(6)} '
+          'lng=${target.longitude.toStringAsFixed(6)} zoom=${zoom.toStringAsFixed(2)}',
+    );
+    _mapController.move(target, zoom);
+  }
+
+  Future<void> _handleAutoCenterToggleFromControls() async {
+    _debugLog.info('ui_click', 'Map controls auto-center toggle');
+    final nextValue = !widget.autoCenter;
+    await widget.onToggleAutoCenter(nextValue);
+    if (!mounted || !nextValue) return;
+
+    final lat = widget.observerLat;
+    final lng = widget.observerLng;
+    if (lat == null || lng == null) return;
+
+    if (_selectedZone != null) {
+      setState(() {
+        _selectedZone = null;
+      });
+    }
+    final target = LatLng(lat, lng);
+    _lastAutoCenterTarget = target;
+    const minZoom = 15.8;
+    final zoom = _mapController.camera.zoom < minZoom
+        ? minZoom
+        : _mapController.camera.zoom;
+    _debugLog.debug(
+      'map_auto_center',
+      'Manual center to lat=${target.latitude.toStringAsFixed(6)} '
           'lng=${target.longitude.toStringAsFixed(6)} zoom=${zoom.toStringAsFixed(2)}',
     );
     _mapController.move(target, zoom);
@@ -901,10 +940,8 @@ class _MapPageState extends State<MapPage> {
               left: 12,
               child: MapTopControls(
                 autoCenter: widget.autoCenter,
-                onToggleAutoCenter: () {
-                  _debugLog.info('ui_click', 'Map controls auto-center toggle');
-                  widget.onToggleAutoCenter(!widget.autoCenter);
-                },
+                onToggleAutoCenter: () =>
+                    unawaited(_handleAutoCenterToggleFromControls()),
                 bleConnected: widget.bleConnected,
                 bleBusy: widget.bleBusy,
                 bleScanning: widget.bleScanning,
@@ -919,6 +956,11 @@ class _MapPageState extends State<MapPage> {
                 },
                 syncing: widget.syncing,
                 forceOffline: widget.forceOffline,
+                connectionLabel: widget.bleConnected
+                    ? ((widget.connectedRadioName ?? '').trim().isEmpty
+                          ? 'Connected'
+                          : widget.connectedRadioName!.trim())
+                    : 'Disconnected',
                 onSync: () {
                   _debugLog.info('ui_click', 'Map controls sync click');
                   widget.onRefresh();
@@ -2012,6 +2054,10 @@ String _layerTemplate(BaseLayer layer) {
     case BaseLayer.satellite:
       return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   }
+}
+
+BaseLayer _defaultBaseLayerForBrightness(Brightness brightness) {
+  return brightness == Brightness.dark ? BaseLayer.dark : BaseLayer.standard;
 }
 
 Color _zoneColor(CoverageZone zone) {

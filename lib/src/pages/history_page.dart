@@ -36,6 +36,7 @@ class _HistoryPageState extends State<HistoryPage> {
   DateTimeRange? _selectedDateRange;
   int? _startHour;
   int? _endHour;
+  bool _filtersExpanded = true;
 
   @override
   void initState() {
@@ -132,185 +133,191 @@ class _HistoryPageState extends State<HistoryPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final compact = constraints.maxWidth < 340;
-                      final titleBlock = Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Scan History',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.headlineSmall,
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Recent recorded scans across all nodes',
-                            maxLines: compact ? 2 : 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      );
-                      if (compact) {
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            titleBlock,
-                            const SizedBox(height: 8),
-                            Chip(label: Text('${filtered.length} Scans')),
-                          ],
-                        );
-                      }
-                      return Row(
-                        children: [
-                          Expanded(child: titleBlock),
-                          Chip(label: Text('${filtered.length} Scans')),
-                        ],
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String?>(
-                    isExpanded: true,
-                    initialValue: _selectedNodeId,
-                    decoration: const InputDecoration(
-                      labelText: 'Filter by node',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      const DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text('All nodes'),
-                      ),
-                      ...nodes.entries.map(
-                        (entry) => DropdownMenuItem<String?>(
-                          value: entry.key,
-                          child: Text('${entry.value} (${entry.key})'),
-                        ),
-                      ),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => _selectedNodeId = value),
-                  ),
-                  const SizedBox(height: 10),
                   Row(
                     children: [
                       Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () async {
-                            final now = DateTime.now();
-                            final initialRange =
-                                _selectedDateRange ??
-                                DateTimeRange(
-                                  start: now.subtract(const Duration(days: 7)),
-                                  end: now,
-                                );
-                            final picked = await showDateRangePicker(
-                              context: context,
-                              firstDate: DateTime(2020, 1, 1),
-                              lastDate: DateTime.now().add(
-                                const Duration(days: 365),
-                              ),
-                              initialDateRange: initialRange,
-                            );
-                            if (picked == null) return;
-                            setState(() => _selectedDateRange = picked);
-                          },
-                          icon: const Icon(Icons.event, size: 16),
-                          label: Text(
-                            _selectedDateRange == null
-                                ? 'Filter by date range'
-                                : '${DateFormat.yMd().format(_selectedDateRange!.start)} - ${DateFormat.yMd().format(_selectedDateRange!.end)}',
-                          ),
+                        child: Text(
+                          'All Scans',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.headlineSmall,
                         ),
                       ),
-                      if (_selectedDateRange != null) ...[
-                        const SizedBox(width: 8),
-                        IconButton(
-                          tooltip: 'Clear date range',
-                          onPressed: () =>
-                              setState(() => _selectedDateRange = null),
-                          icon: const Icon(Icons.clear),
+                      IconButton(
+                        tooltip: _filtersExpanded
+                            ? 'Collapse filters'
+                            : 'Expand filters',
+                        onPressed: () => setState(
+                          () => _filtersExpanded = !_filtersExpanded,
                         ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<int?>(
-                          isExpanded: true,
-                          initialValue: _startHour,
-                          decoration: const InputDecoration(
-                            labelText: 'From hour',
-                            border: OutlineInputBorder(),
-                          ),
-                          items: [
-                            const DropdownMenuItem<int?>(
-                              value: null,
-                              child: Text('Any'),
-                            ),
-                            for (var h = 0; h < 24; h++)
-                              DropdownMenuItem<int?>(
-                                value: h,
-                                child: Text(
-                                  '${h.toString().padLeft(2, '0')}:00',
-                                ),
-                              ),
-                          ],
-                          onChanged: (value) =>
-                              setState(() => _startHour = value),
+                        icon: Icon(
+                          _filtersExpanded
+                              ? Icons.filter_alt
+                              : Icons.filter_alt_outlined,
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: DropdownButtonFormField<int?>(
-                          isExpanded: true,
-                          initialValue: _endHour,
-                          decoration: const InputDecoration(
-                            labelText: 'To hour',
-                            border: OutlineInputBorder(),
-                          ),
-                          items: [
-                            const DropdownMenuItem<int?>(
-                              value: null,
-                              child: Text('Any'),
-                            ),
-                            for (var h = 0; h < 24; h++)
-                              DropdownMenuItem<int?>(
-                                value: h,
-                                child: Text(
-                                  '${h.toString().padLeft(2, '0')}:00',
-                                ),
-                              ),
-                          ],
-                          onChanged: (value) =>
-                              setState(() => _endHour = value),
+                      Chip(
+                        label: Text(
+                          '${filtered.length} scans',
+                          style: Theme.of(context).textTheme.labelSmall,
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  if (_selectedHexId != null)
-                    Row(
+                  AnimatedCrossFade(
+                    firstChild: const SizedBox.shrink(),
+                    secondChild: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Expanded(
-                          child: Text(
-                            'Map focus filter is active',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                        const SizedBox(height: 10),
+                        DropdownButtonFormField<String?>(
+                          isExpanded: true,
+                          initialValue: _selectedNodeId,
+                          decoration: const InputDecoration(
+                            labelText: 'Filter by node',
+                            border: OutlineInputBorder(),
                           ),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text('All nodes'),
+                            ),
+                            ...nodes.entries.map(
+                              (entry) => DropdownMenuItem<String?>(
+                                value: entry.key,
+                                child: Text('${entry.value} (${entry.key})'),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) =>
+                              setState(() => _selectedNodeId = value),
                         ),
-                        TextButton(
-                          onPressed: () =>
-                              setState(() => _selectedHexId = null),
-                          child: const Text('Clear'),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () async {
+                                  final now = DateTime.now();
+                                  final initialRange =
+                                      _selectedDateRange ??
+                                      DateTimeRange(
+                                        start: now.subtract(
+                                          const Duration(days: 7),
+                                        ),
+                                        end: now,
+                                      );
+                                  final picked = await showDateRangePicker(
+                                    context: context,
+                                    firstDate: DateTime(2020, 1, 1),
+                                    lastDate: DateTime.now().add(
+                                      const Duration(days: 365),
+                                    ),
+                                    initialDateRange: initialRange,
+                                  );
+                                  if (picked == null) return;
+                                  setState(() => _selectedDateRange = picked);
+                                },
+                                icon: const Icon(Icons.event, size: 16),
+                                label: Text(
+                                  _selectedDateRange == null
+                                      ? 'Filter by date range'
+                                      : '${DateFormat.yMd().format(_selectedDateRange!.start)} - ${DateFormat.yMd().format(_selectedDateRange!.end)}',
+                                ),
+                              ),
+                            ),
+                            if (_selectedDateRange != null) ...[
+                              const SizedBox(width: 8),
+                              IconButton(
+                                tooltip: 'Clear date range',
+                                onPressed: () =>
+                                    setState(() => _selectedDateRange = null),
+                                icon: const Icon(Icons.clear),
+                              ),
+                            ],
+                          ],
                         ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<int?>(
+                                isExpanded: true,
+                                initialValue: _startHour,
+                                decoration: const InputDecoration(
+                                  labelText: 'From hour',
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: [
+                                  const DropdownMenuItem<int?>(
+                                    value: null,
+                                    child: Text('Any'),
+                                  ),
+                                  for (var h = 0; h < 24; h++)
+                                    DropdownMenuItem<int?>(
+                                      value: h,
+                                      child: Text(
+                                        '${h.toString().padLeft(2, '0')}:00',
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (value) =>
+                                    setState(() => _startHour = value),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: DropdownButtonFormField<int?>(
+                                isExpanded: true,
+                                initialValue: _endHour,
+                                decoration: const InputDecoration(
+                                  labelText: 'To hour',
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: [
+                                  const DropdownMenuItem<int?>(
+                                    value: null,
+                                    child: Text('Any'),
+                                  ),
+                                  for (var h = 0; h < 24; h++)
+                                    DropdownMenuItem<int?>(
+                                      value: h,
+                                      child: Text(
+                                        '${h.toString().padLeft(2, '0')}:00',
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (value) =>
+                                    setState(() => _endHour = value),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        if (_selectedHexId != null)
+                          Row(
+                            children: [
+                              const Expanded(
+                                child: Text(
+                                  'Map focus filter is active',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    setState(() => _selectedHexId = null),
+                                child: const Text('Clear'),
+                              ),
+                            ],
+                          ),
                       ],
                     ),
+                    crossFadeState: _filtersExpanded
+                        ? CrossFadeState.showSecond
+                        : CrossFadeState.showFirst,
+                    duration: const Duration(milliseconds: 180),
+                  ),
                 ],
               ),
             ),

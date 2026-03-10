@@ -14,6 +14,8 @@ class BleTransport extends Transport {
   static const String _nusServiceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
   static const String _nusWriteUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
   static const String _nusNotifyUuid = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+  static final String _meshCoreServiceUuidCanonical =
+      BleUuidParser.stringOrNull(_nusServiceUuid) ?? _nusServiceUuid;
 
   BleTransport({
     this.preferredDeviceId,
@@ -69,9 +71,7 @@ class BleTransport extends Transport {
   @override
   Future<void> connect() async {
     _debugLog.info('ble_transport', 'Requesting BLE permissions');
-    await UniversalBle.requestPermissions(
-      withAndroidFineLocation: !kIsWeb,
-    );
+    await UniversalBle.requestPermissions(withAndroidFineLocation: !kIsWeb);
 
     final state = await UniversalBle.getBluetoothAvailabilityState();
     if (state != AvailabilityState.poweredOn) {
@@ -83,6 +83,7 @@ class BleTransport extends Transport {
     if (targetDeviceId == null || targetDeviceId.isEmpty) {
       throw StateError('No BLE device selected');
     }
+    await _prepareFreshLink(targetDeviceId);
     _debugLog.info('ble_transport', 'Target device selected: $targetDeviceId');
     await _ensureLinuxPairing(targetDeviceId);
     try {
@@ -100,6 +101,34 @@ class BleTransport extends Transport {
       await _ensureLinuxPairing(targetDeviceId);
       await _connectAndBindWithSoftRetry(targetDeviceId);
     }
+  }
+
+  Future<void> _prepareFreshLink(String targetDeviceId) async {
+    // Ensure scan and any stale connection state from a previous app session
+    // are cleared before a fresh connect attempt.
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    _scanInProgress = false;
+
+    try {
+      await UniversalBle.disconnect(targetDeviceId);
+      _debugLog.debug(
+        'ble_transport',
+        'Pre-connect stale link reset attempted for $targetDeviceId',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    } catch (_) {
+      // Not connected is expected on many runs.
+    }
+
+    await _valueSubscription?.cancel();
+    _valueSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _resetSessionState();
   }
 
   bool get _isLinuxDesktop =>
@@ -299,25 +328,34 @@ class BleTransport extends Transport {
     final scanFor = timeout ?? scanTimeout;
     _debugLog.info(
       'ble_scan',
-      'Scanning devices timeout=${scanFor.inSeconds}s',
+      'Scanning devices timeout=${scanFor.inSeconds}s '
+          'service=$_meshCoreServiceUuidCanonical',
     );
     final seenSession = <String>{};
     _scanSubscription = UniversalBle.scanStream.listen((device) {
+      if (!_hasMeshCoreService(device)) {
+        final key = '${device.deviceId}|ignored-no-meshcore-service';
+        if (!seenSession.add(key)) return;
+        _debugLog.debug(
+          'ble_scan',
+          'Ignoring non-meshcore advertisement id=${device.deviceId} '
+              'services=${device.services}',
+        );
+        return;
+      }
       final seenName = (device.name ?? device.rawName ?? '').trim();
       onScanResult?.call(device.deviceId, seenName);
       final key = '${device.deviceId}|$seenName';
       if (!seenSession.add(key)) return;
       _debugLog.debug(
         'ble_scan',
-        'Seen device id=${device.deviceId} name=$seenName',
+        'Seen meshcore device id=${device.deviceId} name=$seenName',
       );
     });
-    final scanFilter = kIsWeb
-        ? ScanFilter(
-            withServices: const [_nusServiceUuid],
-            withNamePrefix: namePrefixes,
-          )
-        : null;
+    final scanFilter = ScanFilter(
+      withServices: const [_nusServiceUuid],
+      withNamePrefix: namePrefixes,
+    );
     await UniversalBle.startScan(scanFilter: scanFilter);
     try {
       await Future<void>.delayed(scanFor);
@@ -330,6 +368,17 @@ class BleTransport extends Transport {
       _scanInProgress = false;
       _debugLog.info('ble_scan', 'Scan stopped');
     }
+  }
+
+  bool _hasMeshCoreService(BleDevice device) {
+    if (device.services.isEmpty) return false;
+    for (final service in device.services) {
+      final normalized = BleUuidParser.stringOrNull(service) ?? service;
+      if (normalized == _meshCoreServiceUuidCanonical) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<void> stopDeviceScan() async {

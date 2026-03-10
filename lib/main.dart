@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:mesh_utility/src/pages/connections_page.dart';
 import 'package:mesh_utility/src/pages/history_page.dart';
 import 'package:mesh_utility/src/pages/manual_page.dart';
 import 'package:mesh_utility/src/pages/map_page.dart';
@@ -43,26 +44,115 @@ class _MeshUtilityAppState extends State<MeshUtilityApp> {
     });
   }
 
+  ThemeData _buildTheme(Brightness brightness) {
+    final base = ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xFF2563EB),
+        brightness: brightness,
+      ),
+      useMaterial3: true,
+      visualDensity: VisualDensity.standard,
+    );
+    final textTheme = base.textTheme
+        .copyWith(
+          bodyLarge: base.textTheme.bodyLarge?.copyWith(
+            fontSize: 17,
+            height: 1.35,
+          ),
+          bodyMedium: base.textTheme.bodyMedium?.copyWith(
+            fontSize: 15.5,
+            height: 1.35,
+          ),
+          bodySmall: base.textTheme.bodySmall?.copyWith(
+            fontSize: 13.5,
+            height: 1.3,
+          ),
+          titleMedium: base.textTheme.titleMedium?.copyWith(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            height: 1.25,
+          ),
+          titleLarge: base.textTheme.titleLarge?.copyWith(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            height: 1.2,
+          ),
+          labelLarge: base.textTheme.labelLarge?.copyWith(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+          ),
+        )
+        .apply(
+          bodyColor: base.colorScheme.onSurface,
+          displayColor: base.colorScheme.onSurface,
+        );
+
+    return base.copyWith(
+      textTheme: textTheme,
+      appBarTheme: AppBarTheme(titleTextStyle: textTheme.titleMedium),
+      cardTheme: CardThemeData(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        elevation: 1,
+      ),
+      chipTheme: base.chipTheme.copyWith(
+        labelStyle: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      ),
+      listTileTheme: ListTileThemeData(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+        titleTextStyle: textTheme.bodyLarge?.copyWith(
+          fontWeight: FontWeight.w600,
+        ),
+        subtitleTextStyle: textTheme.bodyMedium,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: base.colorScheme.surfaceContainerHighest.withValues(
+          alpha: brightness == Brightness.dark ? 0.24 : 0.5,
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 14,
+        ),
+        labelStyle: textTheme.bodyMedium?.copyWith(
+          fontWeight: FontWeight.w600,
+          color: base.colorScheme.onSurface,
+        ),
+        floatingLabelStyle: textTheme.bodySmall?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: base.colorScheme.primary,
+        ),
+        border: const OutlineInputBorder(),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          minimumSize: const Size(96, 44),
+          textStyle: textTheme.labelLarge,
+        ),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(96, 44),
+          textStyle: textTheme.labelLarge,
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(96, 44),
+          textStyle: textTheme.labelLarge,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Mesh Utility',
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0F766E),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0F766E),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
       home: MeshHomePage(
         onToggleTheme: _toggleTheme,
         darkMode: _themeMode == ThemeMode.dark,
@@ -109,6 +199,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   String _lastStatusNotificationKey = '';
   bool? _portraitLockActive;
   static const double _tabletShortestSideDp = 600.0;
+  bool _startupNavResolved = false;
 
   @override
   void initState() {
@@ -178,6 +269,12 @@ class _MeshHomePageState extends State<MeshHomePage>
   }
 
   void _onAppStateChanged() {
+    if (!_startupNavResolved && !_appState.loading) {
+      _startupNavResolved = true;
+      if (!_appState.bleConnected && _index == 0) {
+        setState(() => _index = 1);
+      }
+    }
     unawaited(_syncStatusNotification());
   }
 
@@ -430,7 +527,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     if (!mounted) return;
     if (_appState.loading) return;
     if (_appState.settings.privacyAccepted) return;
-    if (_index == 5) return;
+    if (_index == 6) return;
     if (_initialPrivacyDismissedForSession) return;
     if (_initialPrivacyDialogOpen || _requirePrivacyDialogOpen) return;
     _debugLog.info('privacy', 'Showing initial privacy acceptance dialog');
@@ -461,7 +558,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             'privacy',
             'Initial privacy dialog requested full privacy page',
           );
-          setState(() => _index = 5);
+          setState(() => _index = 6);
           break;
         case _PrivacyDialogAction.skipOrClose:
           _debugLog.info(
@@ -503,7 +600,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         'privacy',
         'Required privacy dialog requested full privacy page',
       );
-      setState(() => _index = 5);
+      setState(() => _index = 6);
     }
     _debugLog.info(
       'privacy',
@@ -599,14 +696,12 @@ class _MeshHomePageState extends State<MeshHomePage>
           builder: (context, constraints) {
             final desktop = constraints.maxWidth >= 860;
             final compactHeader = constraints.maxWidth < 520;
-            final connectedRadioLabel =
-                (_appState.connectedRadioDisplayName ??
-                        _appState.connectedRadioName)
-                    ?.trim();
-            final headerRadioName =
-                (connectedRadioLabel != null && connectedRadioLabel.isNotEmpty)
-                ? connectedRadioLabel
-                : 'Unknown Radio';
+            final statusPillWidth =
+                (compactHeader
+                        ? constraints.maxWidth * 0.55
+                        : constraints.maxWidth * 0.36)
+                    .clamp(180.0, 460.0)
+                    .toDouble();
             String scanHeaderLabel() {
               if (!_appState.bleConnected) return 'Idle';
               if (!_appState.bleScanning) return 'Paused';
@@ -649,6 +744,34 @@ class _MeshHomePageState extends State<MeshHomePage>
                       ? const Color(0xFFFFEB3B)
                       : const Color(0xFFB45309))
                 : Theme.of(context).textTheme.bodySmall?.color;
+            Widget buildHeaderStatusPill() {
+              return Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: EdgeInsets.symmetric(
+                  horizontal: compactHeader ? 8 : 10,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: SizedBox(
+                  width: statusPillWidth,
+                  child: OverflowMarqueeText(
+                    text: headerStatusText,
+                    pixelsPerSecond: 34,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: headerStatusColor,
+                      fontWeight: headerStatusIsSmartSkip
+                          ? FontWeight.w700
+                          : FontWeight.w600,
+                    ),
+                  ),
+                ),
+              );
+            }
 
             return Scaffold(
               key: _scaffoldKey,
@@ -675,17 +798,13 @@ class _MeshHomePageState extends State<MeshHomePage>
                           );
                           if (context.mounted) Navigator.of(context).pop();
                         },
-                        onTheme: () {
-                          widget.onToggleTheme();
-                          Navigator.of(context).pop();
-                        },
                         onShare: _shareApp,
                         onPrivacy: () {
                           _debugLog.info(
                             'ui_click',
                             'Sidebar privacy click (drawer)',
                           );
-                          setState(() => _index = 5);
+                          setState(() => _index = 6);
                           Navigator.of(context).pop();
                         },
                       ),
@@ -709,14 +828,13 @@ class _MeshHomePageState extends State<MeshHomePage>
                         onSupport: () => _openUrl(
                           'https://www.buymeacoffee.com/Just_Stuff_TM',
                         ),
-                        onTheme: widget.onToggleTheme,
                         onShare: _shareApp,
                         onPrivacy: () {
                           _debugLog.info(
                             'ui_click',
                             'Sidebar privacy click (desktop)',
                           );
-                          setState(() => _index = 5);
+                          setState(() => _index = 6);
                         },
                       ),
                     ),
@@ -753,149 +871,52 @@ class _MeshHomePageState extends State<MeshHomePage>
                                       icon: const Icon(Icons.menu),
                                       tooltip: 'Menu',
                                     ),
-                                  if (_appState.settings.forceOffline)
-                                    compactHeader
-                                        ? const Padding(
-                                            padding: EdgeInsets.only(right: 4),
-                                            child: Icon(
-                                              Icons.wifi_off,
-                                              size: 18,
-                                            ),
-                                          )
-                                        : const Padding(
-                                            padding: EdgeInsets.only(right: 8),
-                                            child: Chip(
-                                              avatar: Icon(
-                                                Icons.wifi_off,
-                                                size: 16,
-                                              ),
-                                              label: Text('Offline'),
-                                            ),
+                                  compactHeader
+                                      ? Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 4,
                                           ),
-                                  if (_index == 0)
-                                    Expanded(
-                                      child: SingleChildScrollView(
-                                        scrollDirection: Axis.horizontal,
-                                        child: Row(
-                                          children: [
-                                            Container(
-                                              margin: const EdgeInsets.only(
-                                                right: 6,
-                                              ),
-                                              padding: EdgeInsets.symmetric(
-                                                horizontal: compactHeader
-                                                    ? 8
-                                                    : 10,
-                                                vertical: 5,
-                                              ),
-                                              decoration: BoxDecoration(
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .surfaceContainerHighest
-                                                    .withValues(alpha: 0.35),
-                                                borderRadius:
-                                                    BorderRadius.circular(999),
-                                              ),
-                                              child: Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  Icon(
-                                                    Icons.radio_button_checked,
-                                                    size: 10,
-                                                    color:
-                                                        _appState.bleConnected
-                                                        ? const Color(
-                                                            0xFF34D399,
-                                                          )
-                                                        : Colors.grey,
-                                                  ),
-                                                  const SizedBox(width: 6),
-                                                  Text(
-                                                    _appState.bleConnected
-                                                        ? headerRadioName
-                                                        : 'Disconnected',
-                                                    style: Theme.of(context)
-                                                        .textTheme
-                                                        .bodySmall
-                                                        ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            Container(
-                                              margin: const EdgeInsets.only(
-                                                right: 6,
-                                              ),
-                                              padding: EdgeInsets.symmetric(
-                                                horizontal: compactHeader
-                                                    ? 8
-                                                    : 10,
-                                                vertical: 5,
-                                              ),
-                                              decoration: BoxDecoration(
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .surfaceContainerHighest
-                                                    .withValues(alpha: 0.25),
-                                                borderRadius:
-                                                    BorderRadius.circular(999),
-                                              ),
-                                              child: SizedBox(
-                                                width: compactHeader
-                                                    ? 132
-                                                    : 220,
-                                                child: OverflowMarqueeText(
-                                                  text: headerStatusText,
-                                                  pixelsPerSecond: 34,
-                                                  style: Theme.of(context)
-                                                      .textTheme
-                                                      .bodySmall
-                                                      ?.copyWith(
-                                                        color:
-                                                            headerStatusColor,
-                                                        fontWeight:
-                                                            headerStatusIsSmartSkip
-                                                            ? FontWeight.w700
-                                                            : FontWeight.w600,
-                                                      ),
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    )
-                                  else if (_index == 1)
-                                    Expanded(
-                                      child: Row(
-                                        children: [
-                                          Expanded(
-                                            child: Text(
-                                              'Mesh Nodes',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .titleMedium
-                                                  ?.copyWith(
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                            ),
+                                          child: Icon(
+                                            _appState.settings.forceOffline
+                                                ? Icons.cloud_off
+                                                : Icons.cloud,
+                                            size: 18,
+                                            color:
+                                                _appState.settings.forceOffline
+                                                ? Colors.orange
+                                                : Colors.green,
                                           ),
-                                          const SizedBox(width: 8),
-                                          Chip(
+                                        )
+                                      : Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 8,
+                                          ),
+                                          child: Chip(
+                                            avatar: Icon(
+                                              _appState.settings.forceOffline
+                                                  ? Icons.cloud_off
+                                                  : Icons.cloud,
+                                              size: 16,
+                                              color:
+                                                  _appState
+                                                      .settings
+                                                      .forceOffline
+                                                  ? Colors.orange
+                                                  : Colors.green,
+                                            ),
                                             label: Text(
-                                              '${_appState.nodes.length} Nodes',
+                                              _appState.settings.forceOffline
+                                                  ? 'Offline'
+                                                  : 'Online',
                                             ),
                                           ),
-                                        ],
-                                      ),
-                                    )
-                                  else
-                                    const Spacer(),
+                                        ),
+                                  Expanded(
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: buildHeaderStatusPill(),
+                                    ),
+                                  ),
                                 ],
                               ),
                             ),
@@ -965,9 +986,6 @@ class _MeshHomePageState extends State<MeshHomePage>
         resolvedNodeNames.putIfAbsent(id, () => name);
       }
     }
-    final webBleUiUnsupported =
-        kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
-
     switch (index) {
       case 0:
         final observer = _latestObserverPosition();
@@ -999,7 +1017,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             _debugLog.info('ui_click', 'Map -> History from zone=$zoneId');
             setState(() {
               _historyHexFilter = zoneId;
-              _index = 2;
+              _index = 3;
             });
           },
           focusHexId: _mapFocusHexId,
@@ -1015,9 +1033,26 @@ class _MeshHomePageState extends State<MeshHomePage>
           observerLng: observer?.$2,
           connectedRadioName: _appState.connectedRadioDisplayName,
           connectedRadioMeshId: _appState.connectedRadioMeshId8,
-          bleUiEnabled: !webBleUiUnsupported,
+          bleUiEnabled: true,
         );
       case 1:
+        return ConnectionsPage(
+          status: _appState.bleStatus,
+          connected: _appState.bleConnected,
+          busy: _appState.bleBusy || _appState.bleConnecting,
+          bleUiEnabled: true,
+          results: _appState.bleScanDevices,
+          autoConnectEnabled: _appState.settings.bleAutoConnect,
+          selectedDeviceId: _appState.bleSelectedDeviceId,
+          onSelectBleDevice: _appState.selectBleDevice,
+          onScanDevices: _appState.scanBleDevices,
+          onToggleAutoConnect: (v) => _appState.updateSettings(
+            _appState.settings.copyWith(bleAutoConnect: v),
+          ),
+          onConnect: _appState.connectBle,
+          onDisconnect: _appState.disconnectBle,
+        );
+      case 2:
         return NodesPage(
           nodes: _appState.nodes,
           scanResults: _appState.scanResults,
@@ -1030,7 +1065,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             });
           },
         );
-      case 2:
+      case 3:
         return HistoryPage(
           scans: _appState.scanResults,
           initialHexId: _historyHexFilter,
@@ -1047,9 +1082,9 @@ class _MeshHomePageState extends State<MeshHomePage>
             });
           },
         );
-      case 3:
-        return const ManualPage();
       case 4:
+        return const ManualPage();
+      case 5:
         return SettingsPage(
           settings: _appState.settings,
           syncing: _appState.syncing,
@@ -1059,11 +1094,6 @@ class _MeshHomePageState extends State<MeshHomePage>
           lastSyncScanCount: _appState.lastSyncScanCount,
           bleConnected: _appState.bleConnected,
           bleBusy: _appState.bleBusy || _appState.bleConnecting,
-          bleStatus: _appState.bleStatus,
-          bleScanDevices: _appState.bleScanDevices,
-          bleSelectedDeviceId: _appState.bleSelectedDeviceId,
-          onSelectBleDevice: _appState.selectBleDevice,
-          onScanBleDevices: _appState.scanBleDevices,
           debugLogs: _appState.debugLogs,
           onClearDebugLogs: _appState.clearDebugLogs,
           onClearScanCache: _appState.clearScanCache,
@@ -1072,6 +1102,8 @@ class _MeshHomePageState extends State<MeshHomePage>
           onDeleteRadioData: _appState.deleteConnectedRadioData,
           deleteInProgress: _appState.deleteInProgress,
           connectedRadioId: _appState.connectedRadioMeshId8,
+          darkMode: widget.darkMode,
+          onToggleTheme: widget.onToggleTheme,
           onChanged: (value) async {
             final wantsOnline =
                 _appState.settings.forceOffline && !value.forceOffline;
@@ -1102,12 +1134,8 @@ class _MeshHomePageState extends State<MeshHomePage>
             await _appState.updateSettings(value);
           },
           onSync: _appState.syncFromWorker,
-          onBleConnect: _appState.connectBle,
-          onBleDisconnect: _appState.disconnectBle,
-          onBleNodeDiscover: _appState.runNodeDiscover,
-          bleUiEnabled: !webBleUiUnsupported,
         );
-      case 5:
+      case 6:
         return const PrivacyPage();
       default:
         return const NotFoundPage();
@@ -1135,7 +1163,6 @@ class _AppSidebar extends StatelessWidget {
     required this.onSelect,
     required this.onDiscord,
     required this.onSupport,
-    required this.onTheme,
     required this.onShare,
     required this.onPrivacy,
   });
@@ -1144,7 +1171,6 @@ class _AppSidebar extends StatelessWidget {
   final ValueChanged<int> onSelect;
   final Future<void> Function() onDiscord;
   final Future<void> Function() onSupport;
-  final VoidCallback onTheme;
   final VoidCallback onShare;
   final VoidCallback onPrivacy;
 
@@ -1157,127 +1183,133 @@ class _AppSidebar extends StatelessWidget {
           right: BorderSide(color: Theme.of(context).dividerColor),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.asset(
-                    'assets/app-icon.png',
-                    width: 36,
-                    height: 36,
-                    fit: BoxFit.cover,
+      child: SafeArea(
+        bottom: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 18, 14, 10),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.asset(
+                      'assets/app-icon.png',
+                      width: 36,
+                      height: 36,
+                      fit: BoxFit.cover,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Mesh Utility',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                      SizedBox(height: 2),
-                      Text('LoRa MeshCore', style: TextStyle(fontSize: 11)),
-                    ],
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Mesh Utility',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        SizedBox(height: 2),
+                        Text('LoRa MeshCore', style: TextStyle(fontSize: 11)),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: Text(
-              i18n.t('nav.navigation'),
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Text(
+                i18n.t('nav.navigation'),
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          _NavButton(
-            label: i18n.t('nav.coverageMap'),
-            icon: Icons.map_outlined,
-            selected: selectedIndex == 0,
-            onTap: () => onSelect(0),
-          ),
-          _NavButton(
-            label: i18n.t('settings.title'),
-            icon: Icons.settings_outlined,
-            selected: selectedIndex == 4,
-            onTap: () => onSelect(4),
-          ),
-          _NavButton(
-            label: i18n.t('nav.nodes'),
-            icon: Icons.settings_input_antenna,
-            selected: selectedIndex == 1,
-            onTap: () => onSelect(1),
-          ),
-          _NavButton(
-            label: i18n.t('nav.scanHistory'),
-            icon: Icons.stacked_line_chart,
-            selected: selectedIndex == 2,
-            onTap: () => onSelect(2),
-          ),
-          _NavButton(
-            label: i18n.t('nav.howToUse'),
-            icon: Icons.help_outline,
-            selected: selectedIndex == 3,
-            onTap: () => onSelect(3),
-          ),
-          _NavButton(
-            label: 'Discord',
-            icon: Icons.forum_outlined,
-            selected: false,
-            onTap: () {
-              onDiscord();
-            },
-          ),
-          _NavButton(
-            label: 'Support Development',
-            icon: Icons.coffee_outlined,
-            selected: false,
-            onTap: () {
-              onSupport();
-            },
-          ),
-          _NavButton(
-            label: 'Theme',
-            icon: Icons.dark_mode_outlined,
-            selected: false,
-            onTap: onTheme,
-          ),
-          const Spacer(),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: onShare,
-                  icon: const Icon(Icons.share, size: 16),
-                  label: const Text('Share App'),
-                ),
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: onPrivacy,
-                  icon: const Icon(Icons.privacy_tip_outlined, size: 14),
-                  label: Text(i18n.t('nav.privacyPolicy')),
-                ),
-                const SizedBox(height: 6),
-                const Center(
-                  child: Text(
-                    'Mesh Utility v1.2',
-                    style: TextStyle(fontSize: 11),
+            const SizedBox(height: 8),
+            _NavButton(
+              label: i18n.t('nav.coverageMap'),
+              icon: Icons.map_outlined,
+              selected: selectedIndex == 0,
+              onTap: () => onSelect(0),
+            ),
+            _NavButton(
+              label: i18n.t('settings.connections'),
+              icon: Icons.bluetooth_searching,
+              selected: selectedIndex == 1,
+              onTap: () => onSelect(1),
+            ),
+            _NavButton(
+              label: i18n.t('settings.title'),
+              icon: Icons.settings_outlined,
+              selected: selectedIndex == 5,
+              onTap: () => onSelect(5),
+            ),
+            _NavButton(
+              label: i18n.t('nav.nodes'),
+              icon: Icons.settings_input_antenna,
+              selected: selectedIndex == 2,
+              onTap: () => onSelect(2),
+            ),
+            _NavButton(
+              label: i18n.t('nav.scanHistory'),
+              icon: Icons.radar_outlined,
+              selected: selectedIndex == 3,
+              onTap: () => onSelect(3),
+            ),
+            _NavButton(
+              label: i18n.t('nav.howToUse'),
+              icon: Icons.help_outline,
+              selected: selectedIndex == 4,
+              onTap: () => onSelect(4),
+            ),
+            _NavButton(
+              label: 'Discord',
+              icon: Icons.forum_outlined,
+              selected: false,
+              onTap: () {
+                onDiscord();
+              },
+            ),
+            _NavButton(
+              label: 'Support Development',
+              icon: Icons.coffee_outlined,
+              selected: false,
+              onTap: () {
+                onSupport();
+              },
+            ),
+            const SizedBox(height: 14),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onShare,
+                    icon: const Icon(Icons.share, size: 16),
+                    label: const Text('Share App'),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: onPrivacy,
+                    icon: const Icon(Icons.privacy_tip_outlined, size: 14),
+                    label: Text(i18n.t('nav.privacyPolicy')),
+                  ),
+                  const SizedBox(height: 6),
+                  const Center(
+                    child: Text(
+                      'Mesh Utility v1.2',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

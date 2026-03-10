@@ -32,7 +32,7 @@ class ManualPage extends StatelessWidget {
         ],
       ),
       (
-        icon: Icons.document_scanner_outlined,
+        icon: Icons.radar_outlined,
         title: 'Scanning',
         content: [
           "With your radio connected, flip the Scan switch to start. The app sends out a discovery signal and listens for any repeaters that respond, measuring how strong and clear each signal is.",
@@ -85,7 +85,7 @@ class ManualPage extends StatelessWidget {
         ],
       ),
       (
-        icon: Icons.history,
+        icon: Icons.radar_outlined,
         title: 'Scan History',
         content: [
           "The History page shows a timeline of your recent scans. Each entry includes the signal readings, which repeater responded, your location, altitude, and when the scan happened.",
@@ -119,7 +119,7 @@ class ManualPage extends StatelessWidget {
         ],
       ),
       (
-        icon: Icons.wifi_off_outlined,
+        icon: Icons.cloud_off_outlined,
         title: 'Online / Offline',
         content: [
           "The app works fully offline after your first visit. Scans, nodes, and coverage data are all stored on your device automatically.",
