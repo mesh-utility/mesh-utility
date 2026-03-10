@@ -421,6 +421,9 @@ class _MeshHomePageState extends State<MeshHomePage>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      if (state == AppLifecycleState.detached) {
+        _appState.markHostDetaching();
+      }
       if (_appState.bleScanning) {
         _resumeScanAfterResume = true;
       }

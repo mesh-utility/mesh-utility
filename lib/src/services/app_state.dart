@@ -208,6 +208,7 @@ class AppState extends ChangeNotifier {
   String? _lastSelfInfoHex;
   String? _lastSelfInfoText;
   bool _deleteInProgress = false;
+  bool _hostDetaching = false;
   final Stopwatch _monotonicClock = Stopwatch()..start();
   DateTime? _internetTimeAnchorUtc;
   Duration? _internetTimeAnchorElapsed;
@@ -613,6 +614,10 @@ class AppState extends ChangeNotifier {
   }
 
   void selectBleDevice(String deviceId) {
+    if (bleSelectedDeviceId == deviceId) {
+      _debugLog.debug('ble', 'BLE device already selected: $deviceId');
+      return;
+    }
     bleSelectedDeviceId = deviceId;
     if (_transport is BleTransport) {
       (_transport).preferredDeviceId = deviceId;
@@ -2087,6 +2092,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void markHostDetaching() {
+    _hostDetaching = true;
+    _debugLog.info(
+      'app_state',
+      'Host detaching; will skip explicit transport disconnect on dispose',
+    );
+  }
+
   @override
   void dispose() {
     _debugLog.info('app_state', 'Disposing app state');
@@ -2095,7 +2108,19 @@ class AppState extends ChangeNotifier {
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
     _periodicSyncTimer?.cancel();
-    unawaited(_transport.dispose());
+    final skipTransportDisposeOnMobileDetach =
+        _hostDetaching &&
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
+    if (skipTransportDisposeOnMobileDetach) {
+      _debugLog.info(
+        'app_state',
+        'Skipped explicit transport dispose on mobile detach',
+      );
+    } else {
+      unawaited(_transport.dispose());
+    }
     super.dispose();
   }
 
