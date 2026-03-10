@@ -17,7 +17,7 @@ concurrency:
 
 env:
   PAGES_PROJECT: mesh-utility-tracker
-  PAGES_BRANCH: main
+  PAGES_BRANCH: mesh-utility
   WORKER_URL: https://mesh-utility.org/api
 
 jobs:
