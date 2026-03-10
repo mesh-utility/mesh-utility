@@ -3,6 +3,7 @@ name: Deploy
 on:
   push:
     branches:
+      - main
       - master
       - mesh-utility
   workflow_dispatch:
@@ -16,7 +17,7 @@ concurrency:
 
 env:
   PAGES_PROJECT: mesh-utility-tracker
-  PAGES_BRANCH: mesh-utility
+  PAGES_BRANCH: main
   WORKER_URL: https://mesh-utility.org/api
 
 jobs:
