@@ -48,18 +48,23 @@ flutter pub get
 flutter run
 ```
 
-## Linux Installer (Direct)
+## Linux Installer (Latest Release)
+
+```bash
+ASSET_URL="$(curl -fsSL https://api.github.com/repos/mesh-utility/mesh-utility/releases/latest \
+  | jq -r '.assets[] | select(.name=="mesh-utility-install-linux.sh") | .browser_download_url')"
+
+curl -fL -o install_mesh_utility.sh "$ASSET_URL"
+chmod +x install_mesh_utility.sh
+./install_mesh_utility.sh
+```
+
+If `jq` is not installed, use this fallback:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mesh-utility/mesh-utility/main/tool/install_linux.sh -o install_mesh_utility.sh
 chmod +x install_mesh_utility.sh
 ./install_mesh_utility.sh
-```
-
-Optional: install a different tag:
-
-```bash
-./install_mesh_utility.sh Alpha-3
 ```
 
 ## Worker (Cloudflare)
