@@ -67,25 +67,6 @@ chmod +x install_mesh_utility.sh
 ./install_mesh_utility.sh
 ```
 
-## Worker (Cloudflare)
-
-```bash
-cd /home/chris/Projects/mesh-utility/worker
-npx wrangler deploy
-```
-
-## Web Build Prep (Cloudflare Pages, No Deploy)
-
-```bash
-cd /home/chris/Projects/mesh-utility
-WORKER_URL="https://mesh-utility-worker.aaffiliate796.workers.dev" ./tool/build_web_cloudflare.sh
-python3 -m http.server 8080 --directory build/web
-```
-
-Notes:
-- Worker URL can be set with `--dart-define=WORKER_URL=...`.
-- SPA routing files are in `web/_redirects`.
-- Cache headers are in `web/_headers`.
 
 ## Contributing Docs
 
