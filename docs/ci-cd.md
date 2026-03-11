@@ -2,9 +2,9 @@
 
 This repository uses four GitHub Actions workflows:
 
-- `CI` (`.github/workflows/ci.yml`): static checks/tests only, no secrets.
+- `CI` (`.github/workflows/ci.yml`): static checks/tests only, no release builds.
 - `Deploy` (`.github/workflows/deploy.yml`): deploys Cloudflare Worker + Flutter web to Cloudflare Pages.
-- `iOS IPA` (`.github/workflows/ios-ipa.yml`): builds signed iOS IPA on tag pushes (`v*`, `*-alpha*`, `*-beta*`, `*-rc*`) and uploads to TestFlight.
+- `iOS IPA` (`.github/workflows/ios-ipa.yml`): builds signed iOS IPA on GitHub `published`/`prereleased` releases and uploads to TestFlight.
 - `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/macOS/web and attaches non-web artifacts to the release page.
 
 ## 1) Required GitHub Secrets
@@ -71,6 +71,8 @@ Deployment steps:
 
 - `release.published`
 - `release.prereleased`
+
+`ios-ipa.yml` uses the same release trigger types to keep release builds aligned under one event source.
 
 Build matrix:
 

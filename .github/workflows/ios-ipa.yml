@@ -1,13 +1,10 @@
 name: iOS IPA
 
 on:
-  push:
-    tags:
-      - 'v*'
-      - 'V*'
-      - '*-alpha*'
-      - '*-beta*'
-      - '*-rc*'
+  release:
+    types:
+      - published
+      - prereleased
 
 permissions:
   contents: read
