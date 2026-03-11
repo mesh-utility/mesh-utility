@@ -113,15 +113,17 @@ class BleTransport extends Transport {
     _scanSubscription = null;
     _scanInProgress = false;
 
-    try {
-      await UniversalBle.disconnect(targetDeviceId);
-      _debugLog.debug(
-        'ble_transport',
-        'Pre-connect stale link reset attempted for $targetDeviceId',
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 250));
-    } catch (_) {
-      // Not connected is expected on many runs.
+    if (!kIsWeb) {
+      try {
+        await UniversalBle.disconnect(targetDeviceId);
+        _debugLog.debug(
+          'ble_transport',
+          'Pre-connect stale link reset attempted for $targetDeviceId',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      } catch (_) {
+        // Not connected is expected on many runs.
+      }
     }
 
     await _valueSubscription?.cancel();
@@ -146,7 +148,17 @@ class BleTransport extends Transport {
       await _connectAndBind(targetDeviceId);
       return;
     } catch (e) {
-      if (!_isLinuxDesktop) rethrow;
+      if (!_isLinuxDesktop && !kIsWeb) rethrow;
+      if (kIsWeb) {
+        _debugLog.warn(
+          'ble_transport',
+          'Initial web connect/bind attempt failed for $targetDeviceId: $e; retrying once',
+        );
+        await _prepareFreshLink(targetDeviceId);
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        await _connectAndBind(targetDeviceId);
+        return;
+      }
       _debugLog.warn(
         'ble_transport',
         'Initial Linux connect attempt failed for $targetDeviceId: $e; retrying once',
@@ -205,12 +217,6 @@ class BleTransport extends Transport {
     await UniversalBle.connect(targetDeviceId, timeout: timeout);
     _debugLog.info('ble_transport', 'Connected to device $targetDeviceId');
     _deviceId = targetDeviceId;
-    await _connectionSubscription?.cancel();
-    _connectionSubscription = UniversalBle.connectionStream(targetDeviceId)
-        .listen((connected) {
-          if (connected) return;
-          unawaited(_handleUnexpectedDisconnect('connection state changed'));
-        });
     if (!kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.linux)) {
@@ -242,6 +248,12 @@ class BleTransport extends Transport {
     }
     await _subscribeInbound();
     _connected = true;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = UniversalBle.connectionStream(targetDeviceId)
+        .listen((connected) {
+          if (connected) return;
+          unawaited(_handleUnexpectedDisconnect('connection state changed'));
+        });
     onConnectionStateChanged?.call(
       connected: true,
       deviceId: _deviceId,
@@ -358,6 +370,12 @@ class BleTransport extends Transport {
     );
     await UniversalBle.startScan(scanFilter: scanFilter);
     try {
+      if (kIsWeb) {
+        // Web scan is an interactive picker request, not a continuous scan.
+        // Do not hold scan state open for scanTimeout.
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        return;
+      }
       await Future<void>.delayed(scanFor);
     } finally {
       try {
@@ -371,6 +389,11 @@ class BleTransport extends Transport {
   }
 
   bool _hasMeshCoreService(BleDevice device) {
+    if (kIsWeb) {
+      // Web picker already applies service filters in requestDevice().
+      // The returned scan result may still have an empty `services` list.
+      return true;
+    }
     if (device.services.isEmpty) return false;
     for (final service in device.services) {
       final normalized = BleUuidParser.stringOrNull(service) ?? service;

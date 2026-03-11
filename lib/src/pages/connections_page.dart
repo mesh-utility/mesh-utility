@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 class ConnectionsPage extends StatelessWidget {
   const ConnectionsPage({
@@ -53,6 +54,7 @@ class ConnectionsPage extends StatelessWidget {
     final statusText = connected
         ? (connectedDeviceLabel ?? 'Device [${selectedDeviceId ?? 'unknown'}]')
         : cleanStatus;
+    final isWebPickerFlow = kIsWeb;
     final listRows = connected ? const <String>[] : results;
 
     return ListView(
@@ -65,7 +67,10 @@ class ConnectionsPage extends StatelessWidget {
         Row(
           children: [
             const Expanded(child: Text('Auto-connect')),
-            Switch(value: autoConnectEnabled, onChanged: onToggleAutoConnect),
+            Switch(
+              value: autoConnectEnabled,
+              onChanged: kIsWeb ? null : onToggleAutoConnect,
+            ),
           ],
         ),
         const SizedBox(height: 10),
@@ -73,7 +78,12 @@ class ConnectionsPage extends StatelessWidget {
           children: [
             Expanded(
               child: FilledButton.tonalIcon(
-                onPressed: (!connected || busy) ? null : onDisconnect,
+                onPressed: (!connected || busy)
+                    ? null
+                    : () async {
+                        _logButton('connections_disconnect');
+                        await onDisconnect();
+                      },
                 icon: const Icon(Icons.bluetooth_disabled),
                 label: const Text('Disconnect'),
               ),
@@ -82,12 +92,27 @@ class ConnectionsPage extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         FilledButton.tonalIcon(
-          onPressed: (busy || connected) ? null : onScanDevices,
+          onPressed: (busy || connected)
+              ? null
+              : () async {
+                  _logButton(
+                    isWebPickerFlow
+                        ? 'connections_connect_device'
+                        : 'connections_scan_devices',
+                  );
+                  await onScanDevices();
+                },
           icon: const Icon(Icons.bluetooth_searching),
-          label: const Text('Scan Devices'),
+          label: Text(isWebPickerFlow ? 'Connect Device' : 'Scan Devices'),
         ),
         const SizedBox(height: 12),
-        if (!connected) ...[
+        if (!connected && isWebPickerFlow) ...[
+          Text(
+            'Tap Connect Device to open your browser Bluetooth picker.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (!connected && !isWebPickerFlow) ...[
           Text(
             'Devices Found (${listRows.length})',
             style: Theme.of(context).textTheme.titleMedium,
@@ -138,6 +163,9 @@ class ConnectionsPage extends StatelessWidget {
                                     onPressed: (busy || connected)
                                         ? null
                                         : () async {
+                                            _logButton(
+                                              'connections_device_connect:$deviceId',
+                                            );
                                             onSelectBleDevice(deviceId);
                                             await onConnect();
                                           },
@@ -153,7 +181,12 @@ class ConnectionsPage extends StatelessWidget {
                                 ],
                               ),
                         onTap: (!connected && deviceId != null)
-                            ? () => onSelectBleDevice(deviceId)
+                            ? () {
+                                _logButton(
+                                  'connections_device_select:$deviceId',
+                                );
+                                onSelectBleDevice(deviceId);
+                              }
                             : null,
                       );
                     },
@@ -180,5 +213,9 @@ class ConnectionsPage extends StatelessWidget {
       return trimmed.substring(4);
     }
     return trimmed;
+  }
+
+  void _logButton(String action) {
+    debugPrint('[ui_click] $action');
   }
 }

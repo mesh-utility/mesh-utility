@@ -650,8 +650,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> scanBleDevices() async {
-    if (!await _ensureBleAvailable(context: 'ble_scan')) {
-      return;
+    if (!kIsWeb) {
+      if (!await _ensureBleAvailable(context: 'ble_scan')) {
+        return;
+      }
     }
     if (_transport is! BleTransport ||
         bleBusy ||
@@ -662,7 +664,9 @@ class AppState extends ChangeNotifier {
     }
     final ble = _transport;
     bleDeviceScanInProgress = true;
-    bleStatus = 'Scanning BLE devices...';
+    bleStatus = kIsWeb
+        ? 'Choose a radio in the browser Bluetooth picker...'
+        : 'Scanning BLE devices...';
     _webAutoConnectAttemptedDeviceId = null;
     if (!kIsWeb) {
       bleScanDevices = const [];
@@ -673,12 +677,34 @@ class AppState extends ChangeNotifier {
       if (bleConnected || bleConnecting) {
         return;
       }
+      if (kIsWeb) {
+        final selected = (bleSelectedDeviceId ?? '').trim();
+        if (selected.isNotEmpty) {
+          _debugLog.info(
+            'ble',
+            'Web picker selected device $selected; ensuring connect',
+          );
+          await connectBle();
+          return;
+        }
+        bleStatus = 'No radio selected in browser picker';
+        return;
+      }
       bleStatus = bleScanDevices.isEmpty
           ? 'No BLE devices found'
           : 'Select a BLE device from results, then Connect';
     } catch (e) {
       final message = e.toString();
-      if (message.contains('bluetoothNotEnabled') ||
+      if (kIsWeb &&
+          (message.contains('DeviceNotFoundError') ||
+              message.contains('No device selected'))) {
+        bleStatus = 'No radio selected in browser picker';
+      } else if (kIsWeb &&
+          (message.contains('NotAllowedError') ||
+              message.contains('user gesture') ||
+              message.contains('User cancelled'))) {
+        bleStatus = 'Browser blocked Bluetooth request. Tap Connect Device again.';
+      } else if (message.contains('bluetoothNotEnabled') ||
           message.contains('BLUETOOTH_NOT_ENABLED')) {
         bleStatus = 'Bluetooth is off. Turn Bluetooth on, then scan again.';
       } else {
