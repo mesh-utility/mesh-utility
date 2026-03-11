@@ -4,7 +4,7 @@ This repository uses four GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): static checks/tests only, no release builds.
 - `Deploy` (`.github/workflows/deploy.yml`): deploys Cloudflare Worker + Flutter web to Cloudflare Pages.
-- `iOS IPA` (`.github/workflows/ios-ipa.yml`): builds signed iOS IPA on GitHub `published`/`prereleased` releases and uploads to TestFlight.
+- `iOS Archive` (`.github/workflows/ios-ipa.yml`): builds an unsigned iOS archive on GitHub `published`/`prereleased` releases without requiring signing certificates, and can also be run manually for an existing release tag.
 - `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/macOS/web and attaches non-web artifacts to the release page.
 
 ## 1) Required GitHub Secrets
@@ -79,8 +79,15 @@ Build matrix:
 - Android (`flutter build apk --release`)
 - Linux (`flutter build linux --release`)
 - Windows (`flutter build windows --release`)
-- macOS (`flutter build macos --release`)
+- macOS (`flutter build macos --release --no-codesign`)
 - Web (`flutter build web --release`) for verification only
+
+iOS release workflow:
+
+- iOS (`flutter build ipa --release --no-codesign`)
+- Packages the resulting `.xcarchive` as `mesh-utility-<tag>-ios-xcarchive.tar.gz`
+- Uploads that tarball as both a workflow artifact and a GitHub release asset
+- Can be manually dispatched with a `release_tag` input to backfill an existing release
 
 Uploaded to release page (web excluded):
 

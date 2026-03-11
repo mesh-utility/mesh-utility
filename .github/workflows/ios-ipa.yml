@@ -1,147 +1,72 @@
-name: iOS IPA
+name: iOS Archive
 
 on:
   release:
     types:
       - published
       - prereleased
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Git tag / release tag to attach the unsigned iOS archive to
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ios-ipa-${{ github.ref }}
+  group: ios-archive-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-ios-ipa:
-    name: Build Signed iOS IPA
+  build-ios-archive:
+    name: Build Unsigned iOS Archive
     runs-on: macos-14
-    env:
-      APP_BUNDLE_ID: org.meshutility.app
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CERT_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERT_BASE64 }}
-      CERT_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERT_PASSWORD }}
-      PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
-      PROFILE_NAME: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
-      ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-      ASC_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY_BASE64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required signing secrets
-        id: signing
-        run: |
-          missing=()
-          for v in APPLE_TEAM_ID CERT_BASE64 CERT_PASSWORD PROFILE_BASE64 PROFILE_NAME; do
-            if [ -z "${!v}" ]; then
-              echo "Missing required secret backing env: $v"
-              missing+=("$v")
-            fi
-          done
-          if [ "${#missing[@]}" -ne 0 ]; then
-            echo "has_signing_secrets=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Skipping iOS IPA build. Missing secrets: ${missing[*]}"
-          else
-            echo "has_signing_secrets=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Setup Flutter
-        if: steps.signing.outputs.has_signing_secrets == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
       - name: Install Flutter dependencies
-        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: flutter pub get
 
       - name: Install CocoaPods dependencies
-        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           cd ios
           pod install
 
-      - name: Configure iOS signing assets
-        if: steps.signing.outputs.has_signing_secrets == 'true'
+      - name: Build unsigned iOS archive
         run: |
-          CERT_PATH="$RUNNER_TEMP/dist_cert.p12"
-          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          flutter build ipa --release --no-codesign
 
-          echo "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
-          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/"
-
-      - name: Create ExportOptions.plist
-        if: steps.signing.outputs.has_signing_secrets == 'true'
+      - name: Package iOS archive
         run: |
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>app-store</string>
-            <key>teamID</key>
-            <string>${APPLE_TEAM_ID}</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${APP_BUNDLE_ID}</key>
-              <string>${PROFILE_NAME}</string>
-            </dict>
-            <key>uploadBitcode</key>
-            <false/>
-            <key>compileBitcode</key>
-            <false/>
-          </dict>
-          </plist>
-          EOF
+          mkdir -p dist
+          ARCHIVE_PATH="$(find build/ios/archive -maxdepth 1 -name '*.xcarchive' | head -n 1)"
+          if [ -z "$ARCHIVE_PATH" ]; then
+            echo "No .xcarchive found in build/ios/archive."
+            exit 1
+          fi
+          tar -C "$(dirname "$ARCHIVE_PATH")" -czf \
+            "dist/mesh-utility-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}-ios-xcarchive.tar.gz" \
+            "$(basename "$ARCHIVE_PATH")"
 
-      - name: Build signed IPA
-        if: steps.signing.outputs.has_signing_secrets == 'true'
-        run: |
-          flutter build ipa --release --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
-
-      - name: Upload IPA artifact
-        if: steps.signing.outputs.has_signing_secrets == 'true'
+      - name: Upload iOS archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ios-ipa-${{ github.run_number }}
-          path: build/ios/ipa/*.ipa
+          name: ios-xcarchive-${{ github.run_number }}
+          path: dist/mesh-utility-*-ios-xcarchive.tar.gz
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload to TestFlight
-        if: steps.signing.outputs.has_signing_secrets == 'true'
-        run: |
-          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_BASE64; do
-            if [ -z "${!v}" ]; then
-              echo "Missing required secret backing env: $v"
-              exit 1
-            fi
-          done
-
-          IPA_PATH="$(ls -1 build/ios/ipa/*.ipa | head -n 1)"
-          mkdir -p "$HOME/private_keys"
-          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
-
-          xcrun iTMSTransporter \
-            -m upload \
-            -assetFile "$IPA_PATH" \
-            -apiKey "$ASC_KEY_ID" \
-            -apiIssuer "$ASC_ISSUER_ID"
+      - name: Attach iOS archive to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+          files: dist/mesh-utility-*-ios-xcarchive.tar.gz

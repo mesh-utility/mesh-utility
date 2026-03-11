@@ -143,8 +143,8 @@ jobs:
       - name: Install Flutter dependencies
         run: flutter pub get
 
-      - name: Build macOS (release)
-        run: flutter build macos --release
+      - name: Build macOS (release, unsigned)
+        run: flutter build macos --release --no-codesign
 
       - name: Stage release artifact
         run: |
