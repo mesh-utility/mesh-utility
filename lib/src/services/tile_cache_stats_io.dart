@@ -13,7 +13,10 @@ Future<TileCacheStats> readTileCacheStats() async {
 
   var tileCount = 0;
   var totalBytes = 0;
-  await for (final entity in cacheDir.list(recursive: true, followLinks: false)) {
+  await for (final entity in cacheDir.list(
+    recursive: true,
+    followLinks: false,
+  )) {
     if (entity is! File) continue;
     final normalized = entity.path.replaceAll('\\', '/');
     if (normalized.endsWith('/sizeMonitor.bin')) continue;

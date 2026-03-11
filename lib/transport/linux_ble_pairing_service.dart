@@ -7,7 +7,10 @@ import 'package:mesh_utility/transport/linux_ble_pairing_service_base.dart';
 class LinuxBlePairingService implements LinuxBlePairingServiceBase {
   @override
   Future<bool> isPairedAndTrusted(String remoteId) async {
-    final result = await Process.run('bluetoothctl', <String>['info', remoteId]);
+    final result = await Process.run('bluetoothctl', <String>[
+      'info',
+      remoteId,
+    ]);
     if (result.exitCode != 0) {
       return false;
     }
@@ -74,11 +77,14 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
       if (lower.contains('confirm passkey') ||
           lower.contains('requestconfirmation') ||
           lower.contains('[agent] confirm')) {
-        onLog?.call('Pairing agent requested passkey confirmation; answering yes');
+        onLog?.call(
+          'Pairing agent requested passkey confirmation; answering yes',
+        );
         writeCmd('yes');
       }
 
-      if (lower.contains('pairing successful') || lower.contains('already paired')) {
+      if (lower.contains('pairing successful') ||
+          lower.contains('already paired')) {
         onLog?.call('Pairing reported success');
         pairSucceeded = true;
       }
@@ -91,8 +97,12 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
       }
     }
 
-    final stdoutSub = process.stdout.transform(utf8.decoder).listen(handleChunk);
-    final stderrSub = process.stderr.transform(utf8.decoder).listen(handleChunk);
+    final stdoutSub = process.stdout
+        .transform(utf8.decoder)
+        .listen(handleChunk);
+    final stderrSub = process.stderr
+        .transform(utf8.decoder)
+        .listen(handleChunk);
 
     writeCmd('power on');
     writeCmd('agent KeyboardDisplay');
@@ -122,7 +132,9 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
 
     if (pairFailed) {
       if (!removeRetryUsed) {
-        onLog?.call('Pairing failed before completion; removing cached bond and retrying once');
+        onLog?.call(
+          'Pairing failed before completion; removing cached bond and retrying once',
+        );
         await _removeDevice(remoteId, onLog: onLog);
         return pairAndTrust(
           remoteId: remoteId,
@@ -134,7 +146,9 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
         );
       }
       if (!pinSent && !proactivePinRetryUsed && onRequestPin != null) {
-        onLog?.call('Pairing failed before PIN challenge; requesting PIN for proactive retry');
+        onLog?.call(
+          'Pairing failed before PIN challenge; requesting PIN for proactive retry',
+        );
         final pin = await onRequestPin();
         if (pin == null || pin.trim().isEmpty) {
           onLog?.call('No PIN provided for proactive retry');
@@ -158,7 +172,9 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
 
     onLog?.call('Pairing did not complete before timeout');
     if (!pinSent && !proactivePinRetryUsed && onRequestPin != null) {
-      onLog?.call('No PIN challenge observed before timeout; requesting PIN for proactive retry');
+      onLog?.call(
+        'No PIN challenge observed before timeout; requesting PIN for proactive retry',
+      );
       final pin = await onRequestPin();
       if (pin == null || pin.trim().isEmpty) {
         onLog?.call('No PIN provided for proactive retry after timeout');
@@ -175,7 +191,8 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
     }
 
     final allOutput = output.toString().toLowerCase();
-    return allOutput.contains('pairing successful') || allOutput.contains('already paired');
+    return allOutput.contains('pairing successful') ||
+        allOutput.contains('already paired');
   }
 
   Future<void> _removeDevice(

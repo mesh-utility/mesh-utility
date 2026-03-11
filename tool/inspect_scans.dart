@@ -1,6 +1,7 @@
 import 'package:mesh_utility/src/services/reax_database.dart';
 
-String norm(String? v) => (v ?? '').toUpperCase().replaceAll(RegExp(r'[^0-9A-F]'), '');
+String norm(String? v) =>
+    (v ?? '').toUpperCase().replaceAll(RegExp(r'[^0-9A-F]'), '');
 
 Future<void> main() async {
   final db = await ReaxDatabase.instance();
@@ -59,12 +60,16 @@ Future<void> main() async {
   }
 
   List<MapEntry<String, int>> top(Map<String, int> m) {
-    final l = m.entries.toList()..sort((a,b) => b.value.compareTo(a.value));
+    final l = m.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     return l.take(12).toList();
   }
 
-  print('total=$total downloadedFromWorker=true:$downloadedTrue false:$downloadedFalse');
-  print('radioId   full=$radioFull prefix8=$radio8 target=$target target8=$target8');
+  print(
+    'total=$total downloadedFromWorker=true:$downloadedTrue false:$downloadedFalse',
+  );
+  print(
+    'radioId   full=$radioFull prefix8=$radio8 target=$target target8=$target8',
+  );
   print('observer  full=$observerFull prefix8=$observer8');
   print('nodeId    full=$nodeFull prefix8=$node8');
   print('top radio prefixes: ${top(radioPrefixCounts)}');

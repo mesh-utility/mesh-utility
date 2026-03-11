@@ -2,7 +2,10 @@ import 'dart:async';
 
 abstract class LinuxBlePairingServiceBase {
   Future<bool> isPairedAndTrusted(String remoteId);
-  Future<void> removeDevice(String remoteId, {void Function(String message)? onLog});
+  Future<void> removeDevice(
+    String remoteId, {
+    void Function(String message)? onLog,
+  });
 
   Future<bool> pairAndTrust({
     required String remoteId,

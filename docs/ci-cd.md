@@ -1,9 +1,11 @@
 # CI/CD Setup
 
-This repository uses two GitHub Actions workflows:
+This repository uses four GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): static checks/tests only, no secrets.
 - `Deploy` (`.github/workflows/deploy.yml`): deploys Cloudflare Worker + Flutter web to Cloudflare Pages.
+- `iOS IPA` (`.github/workflows/ios-ipa.yml`): builds signed iOS IPA on tag pushes (`v*`, `*-alpha*`, `*-beta*`, `*-rc*`) and uploads to TestFlight.
+- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/macOS/web and attaches non-web artifacts to the release page.
 
 ## 1) Required GitHub Secrets
 
@@ -63,14 +65,37 @@ Deployment steps:
 2. Build Flutter web (`tool/build_web_cloudflare.sh`)
 3. Deploy `build/web` to Cloudflare Pages project `mesh-utility-tracker` on branch `mesh-utility`
 
-## 6) Open-Source Safety Rules
+## 6) Release Artifact Behavior
+
+`release-artifacts.yml` triggers on:
+
+- `release.published`
+- `release.prereleased`
+
+Build matrix:
+
+- Android (`flutter build apk --release`)
+- Linux (`flutter build linux --release`)
+- Windows (`flutter build windows --release`)
+- macOS (`flutter build macos --release`)
+- Web (`flutter build web --release`) for verification only
+
+Uploaded to release page (web excluded):
+
+- `mesh-utility-<tag>-android.apk`
+- `mesh-utility-<tag>-linux-x64.tar.gz`
+- `mesh-utility-<tag>-windows-x64.zip`
+- `mesh-utility-<tag>-macos.tar.gz`
+- `SHA256SUMS.txt`
+
+## 7) Open-Source Safety Rules
 
 - Never commit secrets, tokens, private keys, or `.env` values.
 - Keep examples only (`.env.example`, docs with placeholders).
 - Use GitHub secret scanning and push protection.
 - Rotate secrets immediately if leaked.
 
-## 7) Quick Validation
+## 8) Quick Validation
 
 After deploy:
 
@@ -83,4 +108,3 @@ From browser console on `https://mesh-utility.org`, verify no CORS errors for:
 
 - `.../history`
 - `.../scans`
-

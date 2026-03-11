@@ -33,10 +33,9 @@ class CoverageZone {
       return raw
           .whereType<List>()
           .where((p) => p.length >= 2)
-          .map((p) => LatLng(
-                (p[0] as num).toDouble(),
-                (p[1] as num).toDouble(),
-              ))
+          .map(
+            (p) => LatLng((p[0] as num).toDouble(), (p[1] as num).toDouble()),
+          )
           .toList();
     }
 
@@ -48,7 +47,9 @@ class CoverageZone {
       avgRssi: (json['avgRssi'] as num?)?.toDouble(),
       avgSnr: (json['avgSnr'] as num?)?.toDouble(),
       scanCount: (json['scanCount'] as num?)?.toInt() ?? 0,
-      lastScanned: DateTime.tryParse(json['lastScanned']?.toString() ?? '') ?? DateTime.now(),
+      lastScanned:
+          DateTime.tryParse(json['lastScanned']?.toString() ?? '') ??
+          DateTime.now(),
       isDeadZone: json['isDeadZone'] == true,
       polygon: parsePolygon(json['polygon']),
       radioId: json['radioId']?.toString(),

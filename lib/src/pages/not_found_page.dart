@@ -13,7 +13,10 @@ class NotFoundPage extends StatelessWidget {
           children: [
             Text('404', style: Theme.of(context).textTheme.displayMedium),
             const SizedBox(height: 8),
-            Text('Page not found', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              'Page not found',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 4),
             Text(
               'The requested page does not exist in the current app shell.',

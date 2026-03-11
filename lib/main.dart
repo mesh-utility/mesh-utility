@@ -19,6 +19,8 @@ import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 import 'package:mesh_utility/transport/transport.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
+import 'package:universal_ble/universal_ble.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 void main() {
@@ -181,6 +183,9 @@ class _MeshHomePageState extends State<MeshHomePage>
   static const String _statusChannelId = 'radio_status_channel';
   static const String _actionToggleScan = 'toggle_scan';
   static const String _actionForceScan = 'force_scan';
+  static const MethodChannel _settingsChannel = MethodChannel(
+    'org.meshutility.app/settings',
+  );
 
   late final AppState _appState;
   final FlutterLocalNotificationsPlugin _notifications =
@@ -196,6 +201,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   String? _mapFocusNodeId;
   bool _resumeScanAfterResume = false;
   bool _notificationsReady = false;
+  bool _bleUnavailableDialogOpen = false;
   String _lastStatusNotificationKey = '';
   bool? _portraitLockActive;
   static const double _tabletShortestSideDp = 600.0;
@@ -214,6 +220,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     _appState.addListener(_onAppStateChanged);
     _appState.onBlePinRequest = _showBlePinDialog;
     _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
+    _appState.onBleUnavailablePrompt = _showBleUnavailableDialog;
     unawaited(_initNotifications());
   }
 
@@ -230,8 +237,105 @@ class _MeshHomePageState extends State<MeshHomePage>
     _appState.removeListener(_onAppStateChanged);
     _appState.onBlePinRequest = null;
     _appState.onLocationPermissionPrompt = null;
+    _appState.onBleUnavailablePrompt = null;
     _appState.dispose();
     super.dispose();
+  }
+
+  Future<T?> _showPromptPage<T>({required Widget child, bool canPop = true}) {
+    if (!mounted) return Future<T?>.value(null);
+    return Navigator.of(context).push<T>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _PromptPageShell(canPop: canPop, child: child),
+      ),
+    );
+  }
+
+  Future<void> _showBleUnavailableDialog({
+    required AvailabilityState state,
+    required String context,
+  }) async {
+    if (kIsWeb || !mounted) return;
+    if (_bleUnavailableDialogOpen) return;
+    if (state == AvailabilityState.poweredOn ||
+        state == AvailabilityState.unsupported) {
+      return;
+    }
+    _bleUnavailableDialogOpen = true;
+    try {
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted) return;
+      final title = switch (state) {
+        AvailabilityState.poweredOff => 'Turn Bluetooth On',
+        AvailabilityState.unauthorized => 'Allow Bluetooth Access',
+        AvailabilityState.resetting => 'Bluetooth Resetting',
+        _ => 'Bluetooth Unavailable',
+      };
+      final message = switch (state) {
+        AvailabilityState.poweredOff =>
+          'Bluetooth is currently off. Turn it on to scan and connect to radios.',
+        AvailabilityState.unauthorized =>
+          'Bluetooth permission is blocked for Mesh Utility. Allow Bluetooth access in Android settings, then try again.',
+        AvailabilityState.resetting =>
+          'Bluetooth is resetting right now. Wait a moment, then try again.',
+        _ =>
+          'Bluetooth is unavailable right now. Check your device settings and retry.',
+      };
+      final canOpenSettings =
+          !kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS);
+      final openSettings = await _showPromptPage<bool>(
+        child: Builder(
+          builder: (pageContext) => _PromptCard(
+            title: Text(title),
+            content: Text(message),
+            actions: [
+              if (canOpenSettings)
+                TextButton(
+                  onPressed: () => Navigator.of(pageContext).pop(false),
+                  child: const Text('Not now'),
+                ),
+              FilledButton(
+                onPressed: () => Navigator.of(pageContext).pop(canOpenSettings),
+                child: Text(canOpenSettings ? 'Open Settings' : 'OK'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (canOpenSettings && openSettings == true) {
+        if (_isAndroidNative && state == AvailabilityState.poweredOff) {
+          final opened = await _openAndroidBluetoothSettings();
+          if (!opened) {
+            await ph.openAppSettings();
+          }
+        } else {
+          await ph.openAppSettings();
+        }
+      }
+      _debugLog.info('ble', 'BLE prompt shown state=$state context=$context');
+    } finally {
+      _bleUnavailableDialogOpen = false;
+    }
+  }
+
+  Future<bool> _openAndroidBluetoothSettings() async {
+    if (!_isAndroidNative) return false;
+    try {
+      final opened =
+          await _settingsChannel.invokeMethod<bool>('openBluetoothSettings') ??
+          false;
+      _debugLog.info(
+        'ble',
+        'Requested Android Bluetooth settings opened=$opened',
+      );
+      return opened;
+    } catch (e) {
+      _debugLog.warn('ble', 'Failed opening Android Bluetooth settings: $e');
+      return false;
+    }
   }
 
   Future<bool> _showLocationPermissionDialog({required bool background}) async {
@@ -247,22 +351,23 @@ class _MeshHomePageState extends State<MeshHomePage>
               'Android will now show the system background-location prompt.'
         : 'Mesh Utility needs location access to map coverage and support BLE '
               'scanning. Android will now show the system location prompt.';
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Not now'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Continue'),
-          ),
-        ],
+    final result = await _showPromptPage<bool>(
+      canPop: false,
+      child: Builder(
+        builder: (pageContext) => _PromptCard(
+          title: Text(title),
+          content: Text(content),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(pageContext).pop(false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(pageContext).pop(true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
       ),
     );
     return result ?? false;
@@ -477,52 +582,55 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   Future<String?> _showBlePinDialog(String deviceId) async {
     if (!mounted) return null;
-    return await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        var pinValue = '';
-        return AlertDialog(
-          title: const Text('Bluetooth Pairing'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Enter PIN/passkey for device $deviceId'),
-              const SizedBox(height: 12),
-              TextField(
-                autofocus: true,
-                keyboardType: TextInputType.number,
-                obscureText: true,
-                enableSuggestions: false,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: 'PIN / Passkey',
-                  border: OutlineInputBorder(),
+    return await _showPromptPage<String>(
+      canPop: false,
+      child: Builder(
+        builder: (pageContext) {
+          var pinValue = '';
+          return _PromptCard(
+            title: const Text('Bluetooth Pairing'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Enter PIN/passkey for device $deviceId'),
+                const SizedBox(height: 12),
+                TextField(
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'PIN / Passkey',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (value) => pinValue = value,
+                  onSubmitted: (value) {
+                    final submit = value.trim();
+                    Navigator.of(
+                      pageContext,
+                    ).pop(submit.isEmpty ? null : submit);
+                  },
                 ),
-                onChanged: (value) => pinValue = value,
-                onSubmitted: (value) {
-                  final submit = value.trim();
-                  Navigator.of(context).pop(submit.isEmpty ? null : submit);
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(pageContext).pop(null),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final value = pinValue.trim();
+                  Navigator.of(pageContext).pop(value.isEmpty ? null : value);
                 },
+                child: const Text('Submit'),
               ),
             ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(null),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final value = pinValue.trim();
-                Navigator.of(context).pop(value.isEmpty ? null : value);
-              },
-              child: const Text('Submit'),
-            ),
-          ],
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
@@ -615,12 +723,10 @@ class _MeshHomePageState extends State<MeshHomePage>
   Future<_PrivacyDialogAction> _showPrivacyDialog({
     required bool initialMode,
   }) async {
-    final result = await showDialog<_PrivacyDialogAction>(
-      context: context,
-      barrierDismissible: !initialMode,
-      builder: (context) => PopScope(
-        canPop: !initialMode,
-        child: AlertDialog(
+    final result = await _showPromptPage<_PrivacyDialogAction>(
+      canPop: !initialMode,
+      child: Builder(
+        builder: (pageContext) => _PromptCard(
           title: const Row(
             children: [
               Icon(Icons.privacy_tip_outlined, size: 18),
@@ -628,57 +734,57 @@ class _MeshHomePageState extends State<MeshHomePage>
               Expanded(child: Text('Privacy Policy')),
             ],
           ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  initialMode
-                      ? 'Please review our privacy policy to continue.'
-                      : 'You must accept the privacy policy before switching to online mode.',
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'Mesh Utility collects location data, radio signal measurements, and device identifiers when you scan. This data is used to build the coverage map and is stored on the server.',
-                  style: TextStyle(fontSize: 13),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'No account or login is required. The app does not collect personal contact information or use tracking cookies.',
-                  style: TextStyle(fontSize: 13),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Bluetooth and Location permissions are required for core functionality. Data is also stored locally for offline use.',
-                  style: TextStyle(fontSize: 13),
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: () => Navigator.of(
-                    context,
-                  ).pop(_PrivacyDialogAction.readPolicy),
-                  child: const Text('Read full privacy policy'),
-                ),
-              ],
-            ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                initialMode
+                    ? 'Please review our privacy policy to continue.'
+                    : 'You must accept the privacy policy before switching to online mode.',
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Mesh Utility collects location data, radio signal measurements, and device identifiers when you scan. This data is used to build the coverage map and is stored on the server.',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'No account or login is required. The app does not collect personal contact information or use tracking cookies.',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Bluetooth and Location permissions are required for core functionality. Data is also stored locally for offline use.',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () => Navigator.of(
+                  pageContext,
+                ).pop(_PrivacyDialogAction.readPolicy),
+                child: const Text('Read full privacy policy'),
+              ),
+            ],
           ),
           actions: [
             if (initialMode)
               TextButton(
-                onPressed: () =>
-                    Navigator.of(context).pop(_PrivacyDialogAction.skipOrClose),
+                onPressed: () => Navigator.of(
+                  pageContext,
+                ).pop(_PrivacyDialogAction.skipOrClose),
                 child: const Text('Skip (Offline Only)'),
               )
             else
               TextButton(
-                onPressed: () =>
-                    Navigator.of(context).pop(_PrivacyDialogAction.skipOrClose),
+                onPressed: () => Navigator.of(
+                  pageContext,
+                ).pop(_PrivacyDialogAction.skipOrClose),
                 child: const Text('Cancel'),
               ),
             FilledButton(
               onPressed: () =>
-                  Navigator.of(context).pop(_PrivacyDialogAction.accept),
+                  Navigator.of(pageContext).pop(_PrivacyDialogAction.accept),
               child: const Text('I Accept'),
             ),
           ],
@@ -1159,6 +1265,76 @@ class _MeshHomePageState extends State<MeshHomePage>
 }
 
 enum _PrivacyDialogAction { accept, skipOrClose, readPolicy }
+
+class _PromptPageShell extends StatelessWidget {
+  const _PromptPageShell({required this.child, required this.canPop});
+
+  final Widget child;
+  final bool canPop;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: canPop,
+      child: Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 620),
+                child: child,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PromptCard extends StatelessWidget {
+  const _PromptCard({
+    required this.title,
+    required this.content,
+    required this.actions,
+  });
+
+  final Widget title;
+  final Widget content;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            DefaultTextStyle.merge(
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              child: title,
+            ),
+            const SizedBox(height: 12),
+            content,
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.end,
+              children: actions,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _AppSidebar extends StatelessWidget {
   const _AppSidebar({

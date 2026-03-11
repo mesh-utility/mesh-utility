@@ -110,6 +110,18 @@ class AppState extends ChangeNotifier {
               unawaited(_attemptAutoReconnect(reason: reason));
             }
           };
+      _bleAvailabilitySubscription = UniversalBle.availabilityStream.listen((
+        state,
+      ) {
+        if (state == AvailabilityState.poweredOn) return;
+        unawaited(
+          _handleBleUnavailableState(
+            state: state,
+            context: 'ble_state',
+            prompt: true,
+          ),
+        );
+      });
     }
     if (kIsWeb) {
       bleStatus = 'BLE ready (web)';
@@ -155,6 +167,7 @@ class AppState extends ChangeNotifier {
   Timer? _periodicSyncTimer;
   StreamSubscription<Position>? _locationSubscription;
   Timer? _locationPollTimer;
+  StreamSubscription<AvailabilityState>? _bleAvailabilitySubscription;
   DateTime? _lastIpFallbackAt;
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _bleDeviceNamesById = {};
@@ -191,12 +204,74 @@ class AppState extends ChangeNotifier {
     return 'BLE unavailable in this browser. Use Android Chrome/Edge with Web Bluetooth enabled.';
   }
 
+  String _bleUnavailableStateMessage(AvailabilityState state) {
+    switch (state) {
+      case AvailabilityState.poweredOff:
+        return 'Bluetooth is off. Turn Bluetooth on, then try again.';
+      case AvailabilityState.unauthorized:
+        return 'Bluetooth permission denied. Allow Bluetooth access, then try again.';
+      case AvailabilityState.resetting:
+        return 'Bluetooth is resetting. Please wait and retry.';
+      case AvailabilityState.unsupported:
+        return _bleUnavailableStatusMessage();
+      case AvailabilityState.unknown:
+        return 'Bluetooth status unavailable. Check Bluetooth settings and retry.';
+      case AvailabilityState.poweredOn:
+        return 'Bluetooth is on';
+    }
+  }
+
+  bool _shouldPromptBleUnavailable(AvailabilityState state) {
+    if (state == AvailabilityState.poweredOn) return false;
+    if (state == AvailabilityState.unsupported) return false;
+    if (kIsWeb) return false;
+    final now = DateTime.now();
+    final last = _lastBleUnavailablePromptAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 4)) {
+      return false;
+    }
+    _lastBleUnavailablePromptAt = now;
+    return true;
+  }
+
+  Future<void> _handleBleUnavailableState({
+    required AvailabilityState state,
+    required String context,
+    bool prompt = true,
+  }) async {
+    if (state == AvailabilityState.unsupported) {
+      _setBleUnavailableStatus(context: context);
+      return;
+    }
+    bleConnected = false;
+    bleConnecting = false;
+    bleBusy = false;
+    bleScanning = false;
+    bleDeviceScanInProgress = false;
+    bleScanStatus = 'idle';
+    _bleAutoScanTimer?.cancel();
+    _bleCountdownTimer?.cancel();
+    bleNextScanCountdown = null;
+    _autoScanRemainingSeconds = 0;
+    _smartScanPausedForRecentCoverage = false;
+    _smartScanPausedZoneId = null;
+    bleStatus = _bleUnavailableStateMessage(state);
+    _debugLog.warn(context, '$bleStatus state=$state');
+    notifyListeners();
+
+    if (prompt &&
+        _shouldPromptBleUnavailable(state) &&
+        onBleUnavailablePrompt != null) {
+      await onBleUnavailablePrompt!(state: state, context: context);
+    }
+  }
+
   Future<bool> _ensureBleAvailable({String context = 'ble'}) async {
     if (_transport is! BleTransport) return false;
     try {
       final state = await _transport.getAvailabilityState();
-      if (state == AvailabilityState.unsupported) {
-        _setBleUnavailableStatus(context: context);
+      if (state != AvailabilityState.poweredOn) {
+        await _handleBleUnavailableState(state: state, context: context);
         return false;
       }
       return true;
@@ -230,6 +305,12 @@ class AppState extends ChangeNotifier {
   bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
   Future<bool> Function({required bool background})? onLocationPermissionPrompt;
+  Future<void> Function({
+    required AvailabilityState state,
+    required String context,
+  })?
+  onBleUnavailablePrompt;
+  DateTime? _lastBleUnavailablePromptAt;
 
   List<RawScan> rawScans = const [];
   List<CoverageZone> coverageZones = const [];
@@ -518,8 +599,22 @@ class AppState extends ChangeNotifier {
       await _applyCompanionLocationPolicyFromSettings();
     } catch (e) {
       bleConnected = false;
+      final lowered = e.toString().toLowerCase();
+      var handledAsBluetoothOff = false;
+      if (lowered.contains('bluetooth is not powered on') ||
+          lowered.contains('bluetooth_not_enabled') ||
+          lowered.contains('bluetoothnoten') ||
+          lowered.contains('poweredoff')) {
+        handledAsBluetoothOff = true;
+        await _handleBleUnavailableState(
+          state: AvailabilityState.poweredOff,
+          context: 'ble_connect',
+        );
+      }
       _debugLog.error('ble', 'Connect failed: $e');
-      bleStatus = 'BLE connect failed: $e';
+      if (!handledAsBluetoothOff) {
+        bleStatus = 'BLE connect failed: $e';
+      }
     } finally {
       bleConnecting = false;
       notifyListeners();
@@ -703,10 +798,14 @@ class AppState extends ChangeNotifier {
           (message.contains('NotAllowedError') ||
               message.contains('user gesture') ||
               message.contains('User cancelled'))) {
-        bleStatus = 'Browser blocked Bluetooth request. Tap Connect Device again.';
+        bleStatus =
+            'Browser blocked Bluetooth request. Tap Connect Device again.';
       } else if (message.contains('bluetoothNotEnabled') ||
           message.contains('BLUETOOTH_NOT_ENABLED')) {
-        bleStatus = 'Bluetooth is off. Turn Bluetooth on, then scan again.';
+        await _handleBleUnavailableState(
+          state: AvailabilityState.poweredOff,
+          context: 'ble_scan',
+        );
       } else {
         bleStatus = 'BLE scan failed: $e';
       }
@@ -2160,6 +2259,7 @@ class AppState extends ChangeNotifier {
     _debugLog.info('app_state', 'Disposing app state');
     _locationSubscription?.cancel();
     _locationPollTimer?.cancel();
+    _bleAvailabilitySubscription?.cancel();
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
     _periodicSyncTimer?.cancel();
