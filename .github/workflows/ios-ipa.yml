@@ -32,34 +32,41 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate required signing secrets
+        id: signing
         run: |
-          missing=0
+          missing=()
           for v in APPLE_TEAM_ID CERT_BASE64 CERT_PASSWORD PROFILE_BASE64 PROFILE_NAME; do
             if [ -z "${!v}" ]; then
               echo "Missing required secret backing env: $v"
-              missing=1
+              missing+=("$v")
             fi
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "Set iOS signing secrets before running this workflow."
-            exit 1
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "has_signing_secrets=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping iOS IPA build. Missing secrets: ${missing[*]}"
+          else
+            echo "has_signing_secrets=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Flutter
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
       - name: Install Flutter dependencies
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: flutter pub get
 
       - name: Install CocoaPods dependencies
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           cd ios
           pod install
 
       - name: Configure iOS signing assets
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           CERT_PATH="$RUNNER_TEMP/dist_cert.p12"
           PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
@@ -79,6 +86,7 @@ jobs:
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/"
 
       - name: Create ExportOptions.plist
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -105,10 +113,12 @@ jobs:
           EOF
 
       - name: Build signed IPA
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           flutter build ipa --release --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
 
       - name: Upload IPA artifact
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ios-ipa-${{ github.run_number }}
@@ -117,6 +127,7 @@ jobs:
           retention-days: 14
 
       - name: Upload to TestFlight
+        if: steps.signing.outputs.has_signing_secrets == 'true'
         run: |
           for v in ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_BASE64; do
             if [ -z "${!v}" ]; then
