@@ -57,9 +57,22 @@ class AppState extends ChangeNotifier {
         final name = deviceName.isEmpty ? '(Unnamed)' : deviceName;
         _bleDeviceNamesById[deviceId] = name;
         final label = '$name [$deviceId]';
-        if (bleScanDevices.contains(label)) return;
-        bleScanDevices = [...bleScanDevices, label];
-        notifyListeners();
+        final knownLabel = bleScanDevices.contains(label);
+        if (!knownLabel) {
+          bleScanDevices = [...bleScanDevices, label];
+          notifyListeners();
+        }
+        if (kIsWeb &&
+            !bleConnected &&
+            !bleConnecting &&
+            _webAutoConnectAttemptedDeviceId != deviceId) {
+          _webAutoConnectAttemptedDeviceId = deviceId;
+          _debugLog.info(
+            'ble',
+            'Web picker returned device; selecting and auto-connecting: $deviceId',
+          );
+          selectBleDevice(deviceId);
+        }
       };
       ble.onConnectionStateChanged =
           ({required bool connected, String? deviceId, String? reason}) {
@@ -93,7 +106,7 @@ class AppState extends ChangeNotifier {
               'Connection lost device=${deviceId ?? 'unknown'} reason=${reason ?? 'unknown'}',
             );
             notifyListeners();
-            if (!_manualBleDisconnectRequested) {
+            if (!_manualBleDisconnectRequested && !kIsWeb) {
               unawaited(_attemptAutoReconnect(reason: reason));
             }
           };
@@ -146,6 +159,7 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _bleDeviceNamesById = {};
   bool _manualBleDisconnectRequested = false;
+  String? _webAutoConnectAttemptedDeviceId;
 
   void _setBleUnavailableStatus({String context = 'ble'}) {
     bleConnected = false;
@@ -616,6 +630,10 @@ class AppState extends ChangeNotifier {
   void selectBleDevice(String deviceId) {
     if (bleSelectedDeviceId == deviceId) {
       _debugLog.debug('ble', 'BLE device already selected: $deviceId');
+      if (kIsWeb && !bleConnected && !bleConnecting) {
+        _debugLog.info('ble', 'Retrying web BLE connect for selected device');
+        unawaited(connectBle());
+      }
       return;
     }
     bleSelectedDeviceId = deviceId;
@@ -625,6 +643,10 @@ class AppState extends ChangeNotifier {
     _debugLog.info('ble', 'Selected BLE device: $deviceId');
     bleStatus = 'Selected device: $deviceId';
     notifyListeners();
+    if (kIsWeb && !bleConnected && !bleConnecting) {
+      _debugLog.info('ble', 'Auto-connecting selected web BLE device');
+      unawaited(connectBle());
+    }
   }
 
   Future<void> scanBleDevices() async {
@@ -641,10 +663,16 @@ class AppState extends ChangeNotifier {
     final ble = _transport;
     bleDeviceScanInProgress = true;
     bleStatus = 'Scanning BLE devices...';
-    bleScanDevices = const [];
+    _webAutoConnectAttemptedDeviceId = null;
+    if (!kIsWeb) {
+      bleScanDevices = const [];
+    }
     notifyListeners();
     try {
       await ble.scanDevices();
+      if (bleConnected || bleConnecting) {
+        return;
+      }
       bleStatus = bleScanDevices.isEmpty
           ? 'No BLE devices found'
           : 'Select a BLE device from results, then Connect';
@@ -1741,6 +1769,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _attemptAutoReconnect({String? reason}) async {
+    if (kIsWeb) return;
     if (_autoReconnectInProgress || _manualBleDisconnectRequested) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) return;
     _autoReconnectInProgress = true;
