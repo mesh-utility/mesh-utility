@@ -5,16 +5,23 @@ on:
     types:
       - published
       - prereleased
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Git tag / release tag to build and attach artifacts for
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-artifacts-${{ github.event.release.tag_name }}
+  group: release-artifacts-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 env:
   WORKER_URL: https://mesh-utility.org/api
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
 
 jobs:
   # TODO(alpha6): Re-enable macOS and iOS artifact jobs here once platform
@@ -26,6 +33,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -43,7 +52,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-android.apk"
+            "dist/mesh-utility-${RELEASE_TAG}-android.apk"
 
       - name: Upload staged artifact
         uses: actions/upload-artifact@v4
@@ -59,6 +68,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Linux build dependencies
         run: |
@@ -86,7 +97,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -C build/linux/x64/release/bundle -czf \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-linux-x64.tar.gz" .
+            "dist/mesh-utility-${RELEASE_TAG}-linux-x64.tar.gz" .
 
       - name: Upload staged artifact
         uses: actions/upload-artifact@v4
@@ -102,6 +113,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -120,7 +133,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Compress-Archive -Path build/windows/x64/runner/Release/* `
-            -DestinationPath "dist/mesh-utility-${{ github.event.release.tag_name }}-windows-x64.zip"
+            -DestinationPath "dist/mesh-utility-${env:RELEASE_TAG}-windows-x64.zip"
 
       - name: Upload staged artifact
         uses: actions/upload-artifact@v4
@@ -136,6 +149,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -172,9 +187,9 @@ jobs:
       - name: Attach artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            dist/mesh-utility-${{ github.event.release.tag_name }}-android.apk
-            dist/mesh-utility-${{ github.event.release.tag_name }}-linux-x64.tar.gz
-            dist/mesh-utility-${{ github.event.release.tag_name }}-windows-x64.zip
+            dist/mesh-utility-${{ env.RELEASE_TAG }}-android.apk
+            dist/mesh-utility-${{ env.RELEASE_TAG }}-linux-x64.tar.gz
+            dist/mesh-utility-${{ env.RELEASE_TAG }}-windows-x64.zip
             dist/SHA256SUMS.txt

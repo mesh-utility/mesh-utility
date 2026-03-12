@@ -71,6 +71,7 @@ Deployment steps:
 
 - `release.published`
 - `release.prereleased`
+- manual `workflow_dispatch` with `release_tag` input (for re-running asset publish on an existing tag)
 
 `ios-ipa.yml` is currently manual-only (`workflow_dispatch`) and requires a `release_tag` input.
 TODO: move iOS (and future macOS re-enable) into `release-artifacts.yml` so all platform release builds are under one trigger.
