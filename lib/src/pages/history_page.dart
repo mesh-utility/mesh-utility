@@ -185,7 +185,7 @@ class _HistoryPageState extends State<HistoryPage> {
                             ...nodes.entries.map(
                               (entry) => DropdownMenuItem<String?>(
                                 value: entry.key,
-                                child: Text('${entry.value} (${entry.key})'),
+                                child: Text(entry.value),
                               ),
                             ),
                           ],
@@ -586,36 +586,65 @@ String _displayNodeLabel(
   String nodeId,
   String? resolvedName,
 ) {
+  String baseLabel;
   if (senderName == null || senderName.trim().isEmpty) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+    } else {
+      baseLabel = nodeId;
     }
-    return nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   final trimmed = senderName.trim();
   if (trimmed == nodeId &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   if (trimmed.toLowerCase() == 'unknown' &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   if (trimmed == 'Unknown ($nodeId)') {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+      return _formatNodeDisplayWithId(baseLabel, nodeId);
     }
-    return nodeId;
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   if (trimmed.startsWith('Unknown (') && trimmed.endsWith(')')) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+      return _formatNodeDisplayWithId(baseLabel, nodeId);
     }
-    return nodeId;
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
-  return trimmed;
+  baseLabel = trimmed;
+  return _formatNodeDisplayWithId(baseLabel, nodeId);
+}
+
+String _formatNodeDisplayWithId(String label, String nodeId) {
+  final trimmedLabel = label.trim();
+  final shortId = _normalizedRadioId(nodeId) ?? _normalizeHexId(nodeId);
+  if (shortId.isEmpty) return trimmedLabel;
+  if (trimmedLabel.isEmpty) return shortId;
+  final alreadyTagged = RegExp(
+    '\\(${RegExp.escape(shortId)}\\)\$',
+    caseSensitive: false,
+  ).hasMatch(trimmedLabel);
+  if (alreadyTagged) return trimmedLabel;
+  final labelShortId = _normalizedRadioId(trimmedLabel);
+  if (_looksLikeObserverId(trimmedLabel) &&
+      labelShortId != null &&
+      labelShortId == shortId) {
+    return shortId;
+  }
+  return '$trimmedLabel ($shortId)';
 }
 
 String _observerName(

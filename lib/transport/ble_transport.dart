@@ -343,40 +343,107 @@ class BleTransport extends Transport {
       'Scanning devices timeout=${scanFor.inSeconds}s '
           'service=$_meshCoreServiceUuidCanonical',
     );
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+
     final seenSession = <String>{};
-    _scanSubscription = UniversalBle.scanStream.listen((device) {
+    final seenMeshcoreIds = <String>{};
+    int handleDevice(BleDevice device) {
       if (!_hasMeshCoreService(device)) {
         final key = '${device.deviceId}|ignored-no-meshcore-service';
-        if (!seenSession.add(key)) return;
+        if (!seenSession.add(key)) return 0;
         _debugLog.debug(
           'ble_scan',
           'Ignoring non-meshcore advertisement id=${device.deviceId} '
+              'name=${(device.name ?? device.rawName ?? '').trim()} '
               'services=${device.services}',
         );
-        return;
+        return 0;
       }
       final seenName = (device.name ?? device.rawName ?? '').trim();
       onScanResult?.call(device.deviceId, seenName);
       final key = '${device.deviceId}|$seenName';
-      if (!seenSession.add(key)) return;
+      if (seenSession.add(key)) {
+        _debugLog.debug(
+          'ble_scan',
+          'Seen meshcore device id=${device.deviceId} name=$seenName',
+        );
+      }
+      return seenMeshcoreIds.add(device.deviceId) ? 1 : 0;
+    }
+
+    Future<int> runScanPass({
+      required ScanFilter filter,
+      required Duration duration,
+      required String label,
+    }) async {
+      if (duration.inMilliseconds <= 0) return 0;
+      var passHits = 0;
       _debugLog.debug(
         'ble_scan',
-        'Seen meshcore device id=${device.deviceId} name=$seenName',
+        'Starting $label scan pass duration=${duration.inMilliseconds}ms '
+            'withServices=${filter.withServices} withNamePrefix=${filter.withNamePrefix}',
       );
-    });
-    final scanFilter = ScanFilter(
-      withServices: const [_nusServiceUuid],
-      withNamePrefix: namePrefixes,
-    );
-    await UniversalBle.startScan(scanFilter: scanFilter);
+      _scanSubscription = UniversalBle.scanStream.listen((device) {
+        passHits += handleDevice(device);
+      });
+      await UniversalBle.startScan(scanFilter: filter);
+      try {
+        await Future<void>.delayed(duration);
+      } finally {
+        try {
+          await UniversalBle.stopScan();
+        } catch (_) {}
+        await _scanSubscription?.cancel();
+        _scanSubscription = null;
+      }
+      _debugLog.debug('ble_scan', '$label scan pass complete hits=$passHits');
+      return passHits;
+    }
+
     try {
       if (kIsWeb) {
+        final scanFilter = ScanFilter(
+          withServices: const [_nusServiceUuid],
+          withNamePrefix: namePrefixes,
+        );
+        await runScanPass(
+          filter: scanFilter,
+          duration: const Duration(milliseconds: 150),
+          label: 'web',
+        );
         // Web scan is an interactive picker request, not a continuous scan.
         // Do not hold scan state open for scanTimeout.
-        await Future<void>.delayed(const Duration(milliseconds: 150));
         return;
       }
-      await Future<void>.delayed(scanFor);
+      final totalMs = scanFor.inMilliseconds;
+      final primaryMs = totalMs >= 6000 ? 6000 : totalMs;
+      final fallbackMs = totalMs - primaryMs;
+      final strictFilter = ScanFilter(
+        withServices: const [_nusServiceUuid],
+        withNamePrefix: namePrefixes,
+      );
+      final strictHits = await runScanPass(
+        filter: strictFilter,
+        duration: Duration(milliseconds: primaryMs),
+        label: 'strict',
+      );
+      if (strictHits == 0 && fallbackMs > 0) {
+        _debugLog.warn(
+          'ble_scan',
+          'No meshcore results from strict service-filter pass; '
+              'starting broad fallback scan',
+        );
+        final broadFilter = ScanFilter(withNamePrefix: namePrefixes);
+        await runScanPass(
+          filter: broadFilter,
+          duration: Duration(milliseconds: fallbackMs),
+          label: 'fallback',
+        );
+      }
     } finally {
       try {
         await UniversalBle.stopScan();
@@ -394,12 +461,30 @@ class BleTransport extends Transport {
       // The returned scan result may still have an empty `services` list.
       return true;
     }
-    if (device.services.isEmpty) return false;
-    for (final service in device.services) {
-      final normalized = BleUuidParser.stringOrNull(service) ?? service;
-      if (normalized == _meshCoreServiceUuidCanonical) {
-        return true;
+    final targetDeviceId = (preferredDeviceId ?? '').trim();
+    if (targetDeviceId.isNotEmpty && device.deviceId == targetDeviceId) {
+      return true;
+    }
+    if (device.services.isNotEmpty) {
+      for (final service in device.services) {
+        final normalized = BleUuidParser.stringOrNull(service) ?? service;
+        if (normalized == _meshCoreServiceUuidCanonical) {
+          return true;
+        }
       }
+    }
+    final advertisedName = (device.name ?? device.rawName ?? '')
+        .trim()
+        .toLowerCase();
+    if (advertisedName.contains('meshcore') ||
+        advertisedName.contains('meshcore-') ||
+        advertisedName.contains('mesh core')) {
+      return true;
+    }
+    for (final prefix in namePrefixes) {
+      final normalizedPrefix = prefix.trim().toLowerCase();
+      if (normalizedPrefix.isEmpty) continue;
+      if (advertisedName.startsWith(normalizedPrefix)) return true;
     }
     return false;
   }
@@ -413,6 +498,35 @@ class BleTransport extends Transport {
     _scanSubscription = null;
     _scanInProgress = false;
     _debugLog.info('ble_scan', 'Scan stopped (forced)');
+  }
+
+  Future<void> resetLinkState({String? deviceId}) async {
+    final target = (deviceId ?? preferredDeviceId ?? _deviceId ?? '').trim();
+    _debugLog.info(
+      'ble_transport',
+      'Resetting BLE link state target=${target.isEmpty ? 'none' : target}',
+    );
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    _scanInProgress = false;
+    if (!kIsWeb && target.isNotEmpty) {
+      try {
+        await UniversalBle.disconnect(target);
+        _debugLog.debug(
+          'ble_transport',
+          'Link-state reset disconnect attempted for $target',
+        );
+      } catch (_) {}
+    }
+    await _valueSubscription?.cancel();
+    _valueSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _resetSessionState();
+    await Future<void>.delayed(const Duration(milliseconds: 250));
   }
 
   void _bindCharacteristics(List<BleService> services) {
@@ -512,10 +626,6 @@ class BleTransport extends Transport {
           notifyCharacteristicUuid,
         ).listen((value) {
           if (!_inboundController.isClosed) {
-            _debugLog.debug(
-              'ble_transport_rx',
-              'Received ${value.length} byte(s)',
-            );
             _handleInboundChunk(value);
           }
         });

@@ -21,6 +21,7 @@ class AppSettings {
     required this.uploadBatchIntervalMinutes,
     required this.bleAutoConnect,
     required this.knownBleDeviceIds,
+    required this.knownBleDeviceNames,
   });
 
   final String workerUrl;
@@ -41,6 +42,7 @@ class AppSettings {
   final int uploadBatchIntervalMinutes;
   final bool bleAutoConnect;
   final List<String> knownBleDeviceIds;
+  final Map<String, String> knownBleDeviceNames;
 
   static const defaults = AppSettings(
     workerUrl: AppConfig.deployedWorkerUrl,
@@ -61,6 +63,7 @@ class AppSettings {
     uploadBatchIntervalMinutes: 30,
     bleAutoConnect: false,
     knownBleDeviceIds: <String>[],
+    knownBleDeviceNames: <String, String>{},
   );
 
   AppSettings copyWith({
@@ -82,6 +85,7 @@ class AppSettings {
     int? uploadBatchIntervalMinutes,
     bool? bleAutoConnect,
     List<String>? knownBleDeviceIds,
+    Map<String, String>? knownBleDeviceNames,
   }) {
     return AppSettings(
       workerUrl: workerUrl ?? this.workerUrl,
@@ -104,6 +108,7 @@ class AppSettings {
       ),
       bleAutoConnect: bleAutoConnect ?? this.bleAutoConnect,
       knownBleDeviceIds: knownBleDeviceIds ?? this.knownBleDeviceIds,
+      knownBleDeviceNames: knownBleDeviceNames ?? this.knownBleDeviceNames,
     );
   }
 
@@ -127,6 +132,7 @@ class AppSettings {
       'uploadBatchIntervalMinutes': uploadBatchIntervalMinutes,
       'bleAutoConnect': bleAutoConnect,
       'knownBleDeviceIds': knownBleDeviceIds,
+      'knownBleDeviceNames': knownBleDeviceNames,
     };
   }
 
@@ -171,6 +177,18 @@ class AppSettings {
       knownBleDeviceIds: ((json['knownBleDeviceIds'] as List?) ?? const [])
           .whereType<String>()
           .toList(growable: false),
+      knownBleDeviceNames:
+          ((json['knownBleDeviceNames'] as Map?) ?? const <Object?, Object?>{})
+              .entries
+              .where((entry) => entry.key is String && entry.value is String)
+              .fold<Map<String, String>>(<String, String>{}, (next, entry) {
+                final id = (entry.key as String).trim();
+                final name = (entry.value as String).trim();
+                if (id.isNotEmpty && name.isNotEmpty) {
+                  next[id] = name;
+                }
+                return next;
+              }),
     );
   }
 

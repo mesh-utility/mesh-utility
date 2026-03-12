@@ -74,11 +74,19 @@ class OverflowMarqueeText extends StatefulWidget {
     required this.text,
     this.style,
     this.pixelsPerSecond = 30,
+    this.gapPixels = 28,
+    this.alwaysScroll = false,
+    this.deferTextUpdatesUntilLoopEnd = false,
+    this.onLoopComplete,
   });
 
   final String text;
   final TextStyle? style;
   final double pixelsPerSecond;
+  final double? gapPixels;
+  final bool alwaysScroll;
+  final bool deferTextUpdatesUntilLoopEnd;
+  final VoidCallback? onLoopComplete;
 
   @override
   State<OverflowMarqueeText> createState() => _OverflowMarqueeTextState();
@@ -87,18 +95,38 @@ class OverflowMarqueeText extends StatefulWidget {
 class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
     with SingleTickerProviderStateMixin {
   AnimationController? _controller;
+  late String _displayText;
+  String? _queuedText;
   double _overflow = 0;
   bool _restartRequested = false;
-  static const double _marqueeGap = 28;
+  late final VoidCallback _tickListener;
+  double _lastControllerValue = 0;
 
   @override
   void initState() {
     super.initState();
+    _displayText = widget.text;
     _controller = AnimationController(vsync: this);
+    _tickListener = () {
+      final controller = _controller;
+      if (controller == null) return;
+      final current = controller.value;
+      if (_overflow > 0 && current < _lastControllerValue && mounted) {
+        if (_queuedText != null) {
+          _displayText = _queuedText!;
+          _queuedText = null;
+          _restartRequested = true;
+        }
+        widget.onLoopComplete?.call();
+      }
+      _lastControllerValue = current;
+    };
+    _controller?.addListener(_tickListener);
   }
 
   @override
   void dispose() {
+    _controller?.removeListener(_tickListener);
     _controller?.dispose();
     _controller = null;
     super.dispose();
@@ -107,8 +135,22 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
   @override
   void didUpdateWidget(covariant OverflowMarqueeText oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.text != widget.text ||
-        oldWidget.pixelsPerSecond != widget.pixelsPerSecond) {
+    if (oldWidget.text != widget.text) {
+      final canDefer =
+          widget.deferTextUpdatesUntilLoopEnd &&
+          _overflow > 0 &&
+          (_controller?.isAnimating ?? false);
+      if (canDefer) {
+        _queuedText = widget.text;
+      } else {
+        _displayText = widget.text;
+        _queuedText = null;
+        _restartRequested = true;
+      }
+    }
+    if (oldWidget.pixelsPerSecond != widget.pixelsPerSecond ||
+        (oldWidget.gapPixels ?? 28) != (widget.gapPixels ?? 28) ||
+        oldWidget.alwaysScroll != widget.alwaysScroll) {
       _restartRequested = true;
     }
   }
@@ -125,6 +167,7 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
     if (_overflow <= 0) {
       _controller?.stop();
       _controller?.value = 0;
+      _lastControllerValue = 0;
       _restartRequested = false;
       return;
     }
@@ -136,6 +179,7 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
     if (_restartRequested || overflowChanged || !controller.isAnimating) {
       controller.stop();
       controller.value = 0;
+      _lastControllerValue = 0;
       controller.repeat();
     }
     _restartRequested = false;
@@ -160,21 +204,41 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
       builder: (context, constraints) {
         if (!constraints.hasBoundedWidth || constraints.maxWidth <= 0) {
           return Text(
-            widget.text,
+            _displayText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: style,
           );
         }
         final textWidth = _measureTextWidth(
-          widget.text,
+          _displayText,
           style ?? const TextStyle(),
         );
-        final loopDistance = textWidth + _marqueeGap;
-        _updateOverflow(textWidth - constraints.maxWidth, loopDistance);
-        if (_overflow <= 0) {
+        final configuredGap = widget.gapPixels ?? 28;
+        final gap = configuredGap < 0 ? 0.0 : configuredGap;
+        final shouldScroll =
+            widget.alwaysScroll || textWidth > (constraints.maxWidth + 0.5);
+        // Travel one full viewport width in addition to text width so the
+        // line fully exits left before looping back from the right.
+        final loopDistance = constraints.maxWidth + textWidth + gap;
+        _updateOverflow(
+          shouldScroll ? max(1.0, textWidth - constraints.maxWidth) : 0,
+          loopDistance,
+        );
+        if (!shouldScroll || _overflow <= 0) {
+          if (_queuedText != null && _queuedText != _displayText) {
+            _displayText = _queuedText!;
+            _queuedText = null;
+            _restartRequested = true;
+            return Text(
+              _displayText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: style,
+            );
+          }
           return Text(
-            widget.text,
+            _displayText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: style,
@@ -182,7 +246,7 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
         }
         return SizedBox(
           height: lineHeight,
-          width: double.infinity,
+          width: constraints.maxWidth,
           child: ClipRect(
             child: AnimatedBuilder(
               animation: _controller!,
@@ -192,22 +256,11 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
                 return Stack(
                   clipBehavior: Clip.hardEdge,
                   children: [
-                    // Keep a trailing copy so loop reset remains visually seamless.
-                    Positioned(
-                      left: dx - loopDistance,
-                      top: 0,
-                      child: Text(
-                        widget.text,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: style,
-                      ),
-                    ),
                     Positioned(
                       left: dx,
                       top: 0,
                       child: Text(
-                        widget.text,
+                        _displayText,
                         maxLines: 1,
                         softWrap: false,
                         style: style,
@@ -217,7 +270,7 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
                       left: dx + loopDistance,
                       top: 0,
                       child: Text(
-                        widget.text,
+                        _displayText,
                         maxLines: 1,
                         softWrap: false,
                         style: style,

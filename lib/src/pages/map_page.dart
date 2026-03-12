@@ -437,14 +437,19 @@ class _MapPageState extends State<MapPage> {
       resolvedNodeNames: widget.resolvedNodeNames,
     );
     if (!mounted) return;
-    final selected = Set<String>.from(_selectedNodeFilters);
+    final selected = Set<String>.from(
+      _effectiveNodeFilters(
+        focusNodeId: widget.focusNodeId,
+        selectedNodeFilters: _selectedNodeFilters,
+      ),
+    );
     final result = await showDialog<Set<String>>(
       context: context,
       builder: (context) =>
           _NodeFilterDialog(options: options, initiallySelected: selected),
     );
     if (!mounted || result == null) return;
-    final signatureBefore = _selectedNodeFilters.toList()..sort();
+    final signatureBefore = selected.toList()..sort();
     final signatureAfter = result.toList()..sort();
     if (signatureBefore.join(',') == signatureAfter.join(',')) {
       return;
@@ -838,9 +843,9 @@ class _MapPageState extends State<MapPage> {
                             _openNodeFilterDialog();
                           },
                           icon: const Icon(Icons.filter_alt),
-                          tooltip: 'Filter by nodes',
+                          tooltip: 'Filter repeater hits',
                         ),
-                        if (_selectedNodeFilters.isNotEmpty)
+                        if (effectiveNodeFilters.isNotEmpty)
                           Positioned(
                             right: 6,
                             top: 6,
@@ -1047,6 +1052,27 @@ class _MapPageState extends State<MapPage> {
                               rssi: _selectedZone!.avgRssi,
                               snr: _selectedZone!.avgSnr,
                             );
+                      final popupNodeLabel = latest != null
+                          ? _stripPopupEntityLabel(
+                              _nodeDisplayName(
+                                latest.senderName,
+                                latest.nodeId,
+                                widget.resolvedNodeNames[latest.nodeId],
+                              ),
+                            )
+                          : (latestRaw != null
+                                ? _stripPopupEntityLabel(
+                                    _nodeDisplayName(
+                                      latestRaw.senderName,
+                                      latestRaw.nodeId ??
+                                          latestRaw.observerId ??
+                                          '',
+                                      widget.resolvedNodeNames[latestRaw
+                                              .nodeId ??
+                                          ''],
+                                    ),
+                                  )
+                                : '');
                       final popupSig = latest != null
                           ? 'zone=${_selectedZone!.id}|ts=${latest.timestamp.toIso8601String()}|node=${latest.nodeId}|obs=${_observerDisplayName(latest, connectedRadioName: widget.connectedRadioName, connectedRadioMeshId: widget.connectedRadioMeshId, resolvedNodeNames: widget.resolvedNodeNames)}|rssi=${latest.rssi.toStringAsFixed(1)}|snrOut=${latest.snr?.toStringAsFixed(1) ?? 'N/A'}|snrIn=${latest.snrIn?.toStringAsFixed(1) ?? 'N/A'}|alt=${latest.altitude?.toStringAsFixed(1) ?? 'N/A'}|scans=${_selectedZone!.scanCount}|dead=$effectiveDead'
                           : (latestRaw != null
@@ -1119,8 +1145,8 @@ class _MapPageState extends State<MapPage> {
                                             const Icon(Icons.radio, size: 14),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: OverflowMarqueeText(
-                                                text: _stripPopupEntityLabel(
+                                              child: Text(
+                                                _stripPopupEntityLabel(
                                                   _observerDisplayNameRaw(
                                                     latestRaw,
                                                     connectedRadioName: widget
@@ -1133,7 +1159,6 @@ class _MapPageState extends State<MapPage> {
                                                         showCoverageTitle,
                                                   ),
                                                 ),
-                                                pixelsPerSecond: 38,
                                                 style: Theme.of(
                                                   context,
                                                 ).textTheme.bodyMedium,
@@ -1172,18 +1197,7 @@ class _MapPageState extends State<MapPage> {
                                             const SizedBox(width: 4),
                                             Expanded(
                                               child: Text(
-                                                _stripPopupEntityLabel(
-                                                  _nodeDisplayName(
-                                                    latestRaw.senderName,
-                                                    latestRaw.nodeId ??
-                                                        latestRaw.observerId ??
-                                                        '',
-                                                    widget
-                                                        .resolvedNodeNames[latestRaw
-                                                            .nodeId ??
-                                                        ''],
-                                                  ),
-                                                ),
+                                                popupNodeLabel,
                                                 maxLines: 1,
                                                 overflow: TextOverflow.ellipsis,
                                               ),
@@ -1262,8 +1276,8 @@ class _MapPageState extends State<MapPage> {
                                         const Icon(Icons.radio, size: 14),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: OverflowMarqueeText(
-                                            text: _stripPopupEntityLabel(
+                                          child: Text(
+                                            _stripPopupEntityLabel(
                                               _observerDisplayName(
                                                 latest,
                                                 connectedRadioName:
@@ -1276,7 +1290,6 @@ class _MapPageState extends State<MapPage> {
                                                     showCoverageTitle,
                                               ),
                                             ),
-                                            pixelsPerSecond: 38,
                                             style: Theme.of(
                                               context,
                                             ).textTheme.bodyMedium,
@@ -1309,16 +1322,8 @@ class _MapPageState extends State<MapPage> {
                                         ),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: OverflowMarqueeText(
-                                            text: _stripPopupEntityLabel(
-                                              _nodeDisplayName(
-                                                latest.senderName,
-                                                latest.nodeId,
-                                                widget.resolvedNodeNames[latest
-                                                    .nodeId],
-                                              ),
-                                            ),
-                                            pixelsPerSecond: 26,
+                                          child: Text(
+                                            popupNodeLabel,
                                             style: Theme.of(
                                               context,
                                             ).textTheme.bodyMedium,
@@ -1828,31 +1833,59 @@ String _nodeDisplayName(
   String nodeId,
   String? resolvedName,
 ) {
+  String baseLabel;
   if (senderName == null || senderName.trim().isEmpty) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+    } else {
+      baseLabel = nodeId;
     }
-    return nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   final trimmed = senderName.trim();
   if (trimmed == nodeId &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   if (trimmed.toLowerCase() == 'unknown' &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
-  if (trimmed == 'Unknown ($nodeId)') return nodeId;
+  if (trimmed == 'Unknown ($nodeId)') {
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  }
   if (trimmed.startsWith('Unknown (') && trimmed.endsWith(')')) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+      return _formatNodeDisplayWithId(baseLabel, nodeId);
     }
-    return nodeId;
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
-  return trimmed;
+  baseLabel = trimmed;
+  return _formatNodeDisplayWithId(baseLabel, nodeId);
+}
+
+String _formatNodeDisplayWithId(String label, String nodeId) {
+  final trimmedLabel = label.trim();
+  final shortId = _nodeFilterKey(nodeId);
+  if (shortId.isEmpty) return trimmedLabel;
+  if (trimmedLabel.isEmpty) return shortId;
+  final alreadyTagged = RegExp(
+    '\\(${RegExp.escape(shortId)}\\)\$',
+    caseSensitive: false,
+  ).hasMatch(trimmedLabel);
+  if (alreadyTagged) return trimmedLabel;
+  if (_looksLikeObserverId(trimmedLabel) &&
+      _nodeFilterKey(trimmedLabel) == shortId) {
+    return shortId;
+  }
+  return '$trimmedLabel ($shortId)';
 }
 
 String _observerDisplayName(

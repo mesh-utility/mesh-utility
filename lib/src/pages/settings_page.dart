@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
@@ -16,6 +18,9 @@ class SettingsPage extends StatefulWidget {
     required this.uploadQueueCount,
     required this.lastSyncAt,
     required this.lastSyncScanCount,
+    required this.periodicSyncEnabled,
+    required this.periodicSyncWaitingForInternetTimeAnchor,
+    required this.nextPeriodicSyncDueAtUtc,
     required this.bleConnected,
     required this.bleBusy,
     required this.debugLogs,
@@ -38,6 +43,9 @@ class SettingsPage extends StatefulWidget {
   final int uploadQueueCount;
   final DateTime? lastSyncAt;
   final int lastSyncScanCount;
+  final bool periodicSyncEnabled;
+  final bool periodicSyncWaitingForInternetTimeAnchor;
+  final DateTime? nextPeriodicSyncDueAtUtc;
 
   final bool bleConnected;
   final bool bleBusy;
@@ -60,11 +68,22 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _tileOpInProgress = false;
   bool _tileStatsLoading = false;
   TileCacheStats? _tileCacheStats;
+  Timer? _autoSyncCountdownTicker;
 
   @override
   void initState() {
     super.initState();
     _loadTileCacheStats();
+    _autoSyncCountdownTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoSyncCountdownTicker?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadTileCacheStats() async {
@@ -177,6 +196,60 @@ class _SettingsPageState extends State<SettingsPage> {
     return '${value.toStringAsFixed(decimals)} ${units[unit]}';
   }
 
+  String _nextAutoSyncLabel() {
+    if (!widget.periodicSyncEnabled) {
+      return 'Next Auto Sync: Disabled (Offline Mode)';
+    }
+    if (widget.syncing) {
+      return 'Next Auto Sync: Running Now';
+    }
+    if (widget.periodicSyncWaitingForInternetTimeAnchor) {
+      final estimatedDueAtUtc = _estimatedDueAtUtcWithoutAnchor();
+      if (estimatedDueAtUtc != null) {
+        final remaining = estimatedDueAtUtc.difference(DateTime.now().toUtc());
+        if (remaining > Duration.zero) {
+          return 'Next Auto Sync In ${_formatCountdown(remaining)} (Estimated)';
+        }
+        return 'Next Auto Sync: Due (Waiting For Internet Time Anchor)';
+      }
+      return 'Next Auto Sync: Waiting For Internet Time Anchor';
+    }
+    final dueAtUtc = widget.nextPeriodicSyncDueAtUtc;
+    if (dueAtUtc == null) {
+      return 'Next Auto Sync: Waiting For Internet Time Anchor';
+    }
+    final remaining = dueAtUtc.difference(DateTime.now().toUtc());
+    if (remaining <= Duration.zero) {
+      return 'Next Auto Sync: Due Now';
+    }
+    return 'Next Auto Sync In ${_formatCountdown(remaining)}';
+  }
+
+  String _formatCountdown(Duration remaining) {
+    final totalSeconds = remaining.inSeconds;
+    if (totalSeconds <= 0) return '0s';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return '${hours}h ${minutes}m ${seconds}s';
+    }
+    if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    }
+    return '${seconds}s';
+  }
+
+  DateTime? _estimatedDueAtUtcWithoutAnchor() {
+    final last = widget.lastSyncAt;
+    if (last == null) return null;
+    final configured = widget.settings.uploadBatchIntervalMinutes;
+    final intervalMinutes = configured < 30
+        ? 30
+        : (configured > 1440 ? 1440 : configured);
+    return last.toUtc().add(Duration(minutes: intervalMinutes));
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = widget.settings;
@@ -195,6 +268,7 @@ class _SettingsPageState extends State<SettingsPage> {
       count: widget.lastSyncScanCount,
       at: widget.lastSyncAt,
     );
+    final nextAutoSyncLabel = _nextAutoSyncLabel();
     return SafeArea(
       top: false,
       bottom: true,
@@ -495,28 +569,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     },
                   ),
                   _SectionDivider(),
-                  DropdownButtonFormField<String>(
-                    isExpanded: true,
-                    initialValue: s.language,
-                    decoration: const InputDecoration(
-                      labelText: 'Language',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: 'en', child: Text('English')),
-                      DropdownMenuItem(value: 'es', child: Text('Español')),
-                      DropdownMenuItem(value: 'fr', child: Text('Français')),
-                      DropdownMenuItem(value: 'de', child: Text('Deutsch')),
-                      DropdownMenuItem(value: 'pt', child: Text('Português')),
-                      DropdownMenuItem(value: 'zh', child: Text('中文')),
-                      DropdownMenuItem(value: 'ja', child: Text('日本語')),
-                      DropdownMenuItem(value: 'ko', child: Text('한국어')),
-                    ],
-                    onChanged: (value) {
-                      if (value == null) return;
-                      widget.onChanged(s.copyWith(language: value));
-                    },
-                  ),
+                  // TODO(alpha6): Re-enable language selector after localization pass.
                   _SectionDivider(),
                   OutlinedButton.icon(
                     onPressed: widget.onToggleTheme,
@@ -703,10 +756,10 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   _SectionDivider(),
-                  _SectionTitle(
-                    icon: Icons.sync,
-                    label:
-                        'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
+                  _SectionTitle(icon: Icons.sync, label: nextAutoSyncLabel),
+                  Text(
+                    'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                   Slider(
                     value: s.uploadBatchIntervalMinutes.toDouble(),
