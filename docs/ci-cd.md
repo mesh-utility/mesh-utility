@@ -4,8 +4,8 @@ This repository uses four GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): static checks/tests only, no release builds.
 - `Deploy` (`.github/workflows/deploy.yml`): deploys Cloudflare Worker + Flutter web to Cloudflare Pages.
-- `iOS Archive` (`.github/workflows/ios-ipa.yml`): builds an unsigned iOS archive on GitHub `published`/`prereleased` releases without requiring signing certificates, and can also be run manually for an existing release tag.
-- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/macOS/web and attaches non-web artifacts to the release page.
+- `iOS Archive` (`.github/workflows/ios-ipa.yml`): manual-only workflow for building an unsigned iOS archive for an existing release tag.
+- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/web and attaches non-web artifacts to the release page.
 
 ## 1) Required GitHub Secrets
 
@@ -72,17 +72,17 @@ Deployment steps:
 - `release.published`
 - `release.prereleased`
 
-`ios-ipa.yml` uses the same release trigger types to keep release builds aligned under one event source.
+`ios-ipa.yml` is currently manual-only (`workflow_dispatch`) and requires a `release_tag` input.
+TODO: move iOS (and future macOS re-enable) into `release-artifacts.yml` so all platform release builds are under one trigger.
 
 Build matrix:
 
 - Android (`flutter build apk --release`)
 - Linux (`flutter build linux --release`)
 - Windows (`flutter build windows --release`)
-- macOS (`flutter build macos --release --no-codesign`)
 - Web (`flutter build web --release`) for verification only
 
-iOS release workflow:
+iOS manual archive workflow:
 
 - iOS (`flutter build ipa --release --no-codesign`)
 - Packages the resulting `.xcarchive` as `mesh-utility-<tag>-ios-xcarchive.tar.gz`
@@ -94,7 +94,6 @@ Uploaded to release page (web excluded):
 - `mesh-utility-<tag>-android.apk`
 - `mesh-utility-<tag>-linux-x64.tar.gz`
 - `mesh-utility-<tag>-windows-x64.zip`
-- `mesh-utility-<tag>-macos.tar.gz`
 - `SHA256SUMS.txt`
 
 ## 7) Open-Source Safety Rules

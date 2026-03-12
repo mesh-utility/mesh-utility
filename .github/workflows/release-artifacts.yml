@@ -17,6 +17,9 @@ env:
   WORKER_URL: https://mesh-utility.org/api
 
 jobs:
+  # TODO(alpha6): Re-enable macOS and iOS artifact jobs here once platform
+  # packaging/signing paths are stable. Keep release artifacts under this
+  # single workflow trigger.
   build-android:
     name: Build Android
     runs-on: ubuntu-latest
@@ -127,45 +130,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Install Flutter dependencies
-        run: flutter pub get
-
-      - name: Build macOS (release, unsigned)
-        run: flutter build macos --release --no-codesign
-
-      - name: Stage release artifact
-        run: |
-          mkdir -p dist
-          APP_PATH="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n 1)"
-          if [ -z "$APP_PATH" ]; then
-            echo "No .app bundle found in release output."
-            exit 1
-          fi
-          tar -C "$(dirname "$APP_PATH")" -czf \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-macos.tar.gz" \
-            "$(basename "$APP_PATH")"
-
-      - name: Upload staged artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-release
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
   build-web:
     name: Build Web (verification only)
     runs-on: ubuntu-latest
@@ -192,7 +156,6 @@ jobs:
       - build-android
       - build-linux
       - build-windows
-      - build-macos
       - build-web
     steps:
       - name: Download staged artifacts
@@ -214,5 +177,4 @@ jobs:
             dist/mesh-utility-${{ github.event.release.tag_name }}-android.apk
             dist/mesh-utility-${{ github.event.release.tag_name }}-linux-x64.tar.gz
             dist/mesh-utility-${{ github.event.release.tag_name }}-windows-x64.zip
-            dist/mesh-utility-${{ github.event.release.tag_name }}-macos.tar.gz
             dist/SHA256SUMS.txt

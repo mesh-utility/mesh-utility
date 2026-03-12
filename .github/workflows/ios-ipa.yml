@@ -1,10 +1,8 @@
 name: iOS Archive
 
 on:
-  release:
-    types:
-      - published
-      - prereleased
+  # TODO(alpha6): Move iOS release builds into release-artifacts.yml when iOS
+  # packaging/signing flow is ready. Keep this manual-only for now.
   workflow_dispatch:
     inputs:
       release_tag:
@@ -16,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ios-archive-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+  group: ios-archive-${{ inputs.release_tag }}
   cancel-in-progress: true
 
 jobs:
@@ -54,7 +52,7 @@ jobs:
             exit 1
           fi
           tar -C "$(dirname "$ARCHIVE_PATH")" -czf \
-            "dist/mesh-utility-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}-ios-xcarchive.tar.gz" \
+            "dist/mesh-utility-${{ inputs.release_tag }}-ios-xcarchive.tar.gz" \
             "$(basename "$ARCHIVE_PATH")"
 
       - name: Upload iOS archive artifact
@@ -68,5 +66,5 @@ jobs:
       - name: Attach iOS archive to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+          tag_name: ${{ inputs.release_tag }}
           files: dist/mesh-utility-*-ios-xcarchive.tar.gz
