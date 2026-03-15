@@ -29,10 +29,15 @@ npm run check
 Before opening a PR:
 
 ```bash
+dart format .
 flutter analyze
 flutter test
 cd worker && npm run check
 ```
+
+Formatting policy:
+
+- Run `dart format .` after every file edit, not only at PR time.
 
 PRs should pass CI:
 
@@ -71,4 +76,3 @@ If you change behavior, update:
 - `README.md` for user-facing flow
 - `docs/ci-cd.md` for deployment changes
 - `docs/flutter-best-practices.md` for architecture/style impacts
-

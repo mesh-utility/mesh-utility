@@ -68,21 +68,15 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _tileOpInProgress = false;
   bool _tileStatsLoading = false;
   TileCacheStats? _tileCacheStats;
-  Timer? _autoSyncCountdownTicker;
 
   @override
   void initState() {
     super.initState();
     _loadTileCacheStats();
-    _autoSyncCountdownTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {});
-    });
   }
 
   @override
   void dispose() {
-    _autoSyncCountdownTicker?.cancel();
     super.dispose();
   }
 
@@ -196,60 +190,6 @@ class _SettingsPageState extends State<SettingsPage> {
     return '${value.toStringAsFixed(decimals)} ${units[unit]}';
   }
 
-  String _nextAutoSyncLabel() {
-    if (!widget.periodicSyncEnabled) {
-      return 'Next Auto Sync: Disabled (Offline Mode)';
-    }
-    if (widget.syncing) {
-      return 'Next Auto Sync: Running Now';
-    }
-    if (widget.periodicSyncWaitingForInternetTimeAnchor) {
-      final estimatedDueAtUtc = _estimatedDueAtUtcWithoutAnchor();
-      if (estimatedDueAtUtc != null) {
-        final remaining = estimatedDueAtUtc.difference(DateTime.now().toUtc());
-        if (remaining > Duration.zero) {
-          return 'Next Auto Sync In ${_formatCountdown(remaining)} (Estimated)';
-        }
-        return 'Next Auto Sync: Due (Waiting For Internet Time Anchor)';
-      }
-      return 'Next Auto Sync: Waiting For Internet Time Anchor';
-    }
-    final dueAtUtc = widget.nextPeriodicSyncDueAtUtc;
-    if (dueAtUtc == null) {
-      return 'Next Auto Sync: Waiting For Internet Time Anchor';
-    }
-    final remaining = dueAtUtc.difference(DateTime.now().toUtc());
-    if (remaining <= Duration.zero) {
-      return 'Next Auto Sync: Due Now';
-    }
-    return 'Next Auto Sync In ${_formatCountdown(remaining)}';
-  }
-
-  String _formatCountdown(Duration remaining) {
-    final totalSeconds = remaining.inSeconds;
-    if (totalSeconds <= 0) return '0s';
-    final hours = totalSeconds ~/ 3600;
-    final minutes = (totalSeconds % 3600) ~/ 60;
-    final seconds = totalSeconds % 60;
-    if (hours > 0) {
-      return '${hours}h ${minutes}m ${seconds}s';
-    }
-    if (minutes > 0) {
-      return '${minutes}m ${seconds}s';
-    }
-    return '${seconds}s';
-  }
-
-  DateTime? _estimatedDueAtUtcWithoutAnchor() {
-    final last = widget.lastSyncAt;
-    if (last == null) return null;
-    final configured = widget.settings.uploadBatchIntervalMinutes;
-    final intervalMinutes = configured < 30
-        ? 30
-        : (configured > 1440 ? 1440 : configured);
-    return last.toUtc().add(Duration(minutes: intervalMinutes));
-  }
-
   @override
   Widget build(BuildContext context) {
     final s = widget.settings;
@@ -268,7 +208,6 @@ class _SettingsPageState extends State<SettingsPage> {
       count: widget.lastSyncScanCount,
       at: widget.lastSyncAt,
     );
-    final nextAutoSyncLabel = _nextAutoSyncLabel();
     return SafeArea(
       top: false,
       bottom: true,
@@ -569,7 +508,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     },
                   ),
                   _SectionDivider(),
-                  // TODO(alpha6): Re-enable language selector after localization pass.
+                  // TODO: Re-enable language selector after localization pass.
                   _SectionDivider(),
                   OutlinedButton.icon(
                     onPressed: widget.onToggleTheme,
@@ -756,7 +695,16 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   _SectionDivider(),
-                  _SectionTitle(icon: Icons.sync, label: nextAutoSyncLabel),
+                  AutoSyncSectionTitle(
+                    periodicSyncEnabled: widget.periodicSyncEnabled,
+                    syncing: widget.syncing,
+                    periodicSyncWaitingForInternetTimeAnchor:
+                        widget.periodicSyncWaitingForInternetTimeAnchor,
+                    nextPeriodicSyncDueAtUtc: widget.nextPeriodicSyncDueAtUtc,
+                    lastSyncAt: widget.lastSyncAt,
+                    uploadBatchIntervalMinutes:
+                        widget.settings.uploadBatchIntervalMinutes,
+                  ),
                   Text(
                     'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
                     style: Theme.of(context).textTheme.bodySmall,
@@ -907,6 +855,114 @@ class _SectionTitle extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+@visibleForTesting
+class AutoSyncSectionTitle extends StatefulWidget {
+  const AutoSyncSectionTitle({
+    super.key,
+    required this.periodicSyncEnabled,
+    required this.syncing,
+    required this.periodicSyncWaitingForInternetTimeAnchor,
+    required this.nextPeriodicSyncDueAtUtc,
+    required this.lastSyncAt,
+    required this.uploadBatchIntervalMinutes,
+  });
+
+  final bool periodicSyncEnabled;
+  final bool syncing;
+  final bool periodicSyncWaitingForInternetTimeAnchor;
+  final DateTime? nextPeriodicSyncDueAtUtc;
+  final DateTime? lastSyncAt;
+  final int uploadBatchIntervalMinutes;
+
+  @override
+  State<AutoSyncSectionTitle> createState() => _AutoSyncSectionTitleState();
+}
+
+class _AutoSyncSectionTitleState extends State<AutoSyncSectionTitle> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTimer();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _ticker?.cancel();
+    if (widget.periodicSyncEnabled && !widget.syncing) {
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AutoSyncSectionTitle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.periodicSyncEnabled != oldWidget.periodicSyncEnabled ||
+        widget.syncing != oldWidget.syncing) {
+      _startTimer();
+    }
+  }
+
+  String _formatCountdown(Duration remaining) {
+    final totalSeconds = remaining.inSeconds;
+    if (totalSeconds <= 0) return '0s';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    if (hours > 0) return '${hours}h ${minutes}m ${seconds}s';
+    if (minutes > 0) return '${minutes}m ${seconds}s';
+    return '${seconds}s';
+  }
+
+  DateTime? _estimatedDueAtUtcWithoutAnchor() {
+    final last = widget.lastSyncAt;
+    if (last == null) return null;
+    final configured = widget.uploadBatchIntervalMinutes;
+    final intervalMinutes = configured < 30
+        ? 30
+        : (configured > 1440 ? 1440 : configured);
+    return last.toUtc().add(Duration(minutes: intervalMinutes));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String label;
+    if (!widget.periodicSyncEnabled) {
+      label = 'Next Auto Sync: Disabled (Offline Mode)';
+    } else if (widget.syncing) {
+      label = 'Next Auto Sync: Running Now';
+    } else if (widget.periodicSyncWaitingForInternetTimeAnchor) {
+      final estimated = _estimatedDueAtUtcWithoutAnchor();
+      if (estimated != null) {
+        final remaining = estimated.difference(DateTime.now().toUtc());
+        label = remaining > Duration.zero
+            ? 'Next Auto Sync In ${_formatCountdown(remaining)} (Estimated)'
+            : 'Next Auto Sync: Due (Waiting For Internet Time Anchor)';
+      } else {
+        label = 'Next Auto Sync: Waiting For Internet Time Anchor';
+      }
+    } else if (widget.nextPeriodicSyncDueAtUtc == null) {
+      label = 'Next Auto Sync: Waiting For Internet Time Anchor';
+    } else {
+      final remaining = widget.nextPeriodicSyncDueAtUtc!.difference(
+        DateTime.now().toUtc(),
+      );
+      label = remaining <= Duration.zero
+          ? 'Next Auto Sync: Due Now'
+          : 'Next Auto Sync In ${_formatCountdown(remaining)}';
+    }
+    return _SectionTitle(icon: Icons.sync, label: label);
   }
 }
 

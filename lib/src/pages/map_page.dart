@@ -54,6 +54,8 @@ class MapPage extends StatefulWidget {
     this.observerLng,
     this.connectedRadioName,
     this.connectedRadioMeshId,
+    this.onTapNodes,
+    this.onTapScans,
   });
 
   final List<CoverageZone> zones;
@@ -94,6 +96,8 @@ class MapPage extends StatefulWidget {
   final double? observerLng;
   final String? connectedRadioName;
   final String? connectedRadioMeshId;
+  final VoidCallback? onTapNodes;
+  final VoidCallback? onTapScans;
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -233,7 +237,7 @@ class _MapPageState extends State<MapPage> {
 
     final target = LatLng(lat, lng);
     if (_lastAutoCenterTarget != null) {
-      final movedMiles = _distanceMiles(
+      final movedMiles = distanceMiles(
         _lastAutoCenterTarget!.latitude,
         _lastAutoCenterTarget!.longitude,
         target.latitude,
@@ -347,6 +351,7 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (target == null || !mounted) return false;
+    _disableAutoCenter('node focus');
     setState(() {
       // Node-focus mode should not auto-open a zone popup.
       _selectedZone = null;
@@ -406,6 +411,7 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (coordinates.isEmpty) return;
+    _disableAutoCenter('node filter focus');
     _mapController.fitCamera(
       CameraFit.coordinates(
         coordinates: coordinates,
@@ -431,9 +437,21 @@ class _MapPageState extends State<MapPage> {
     return <String>{key};
   }
 
+  List<ScanResult> _filterScansByRadius(List<ScanResult> scans) {
+    final radius = widget.statsRadiusMiles;
+    final lat = widget.observerLat;
+    final lng = widget.observerLng;
+    if (radius == 0 || lat == null || lng == null) return scans;
+    return scans.where((s) {
+      return distanceMiles(lat, lng, s.latitude, s.longitude) <= radius;
+    }).toList();
+  }
+
   Future<void> _openNodeFilterDialog() async {
+    // Respect Stats Radius so only nodes with scans inside the radius appear.
+    final radiusScans = _filterScansByRadius(widget.scans);
     final options = _nodeFilterOptions(
-      scans: widget.scans,
+      scans: radiusScans,
       resolvedNodeNames: widget.resolvedNodeNames,
     );
     if (!mounted) return;
@@ -732,7 +750,7 @@ class _MapPageState extends State<MapPage> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
+                          children: const [
                             Align(
                               alignment: Alignment.center,
                               child: Icon(Icons.chevron_right, size: 16),
@@ -995,6 +1013,8 @@ class _MapPageState extends State<MapPage> {
                       hasObserver:
                           widget.observerLat != null &&
                           widget.observerLng != null,
+                      onTapNodes: widget.onTapNodes,
+                      onTapScans: widget.onTapScans,
                     ),
                   );
                 },
@@ -1522,7 +1542,7 @@ class _MapPageState extends State<MapPage> {
                             alignment: Alignment.center,
                             child: CustomPaint(
                               size: const Size(22, 10),
-                              painter: PopupVPointerPainter(),
+                              painter: const PopupVPointerPainter(),
                             ),
                           ),
                         ],
@@ -1641,17 +1661,17 @@ class _NodeFilterDialogState extends State<_NodeFilterDialog> {
               option.nodeId.toLowerCase().contains(query);
         })
         .toList(growable: false);
-    final ordered = [...filtered]
-      ..sort((a, b) {
-        final aSelected = _selected.contains(a.nodeId);
-        final bSelected = _selected.contains(b.nodeId);
-        if (aSelected != bSelected) {
-          return aSelected ? -1 : 1;
-        }
-        final byLabel = a.label.toLowerCase().compareTo(b.label.toLowerCase());
-        if (byLabel != 0) return byLabel;
-        return a.nodeId.compareTo(b.nodeId);
-      });
+
+    final selectedList = <_NodeFilterOption>[];
+    final unselectedList = <_NodeFilterOption>[];
+    for (final option in filtered) {
+      if (_selected.contains(option.nodeId)) {
+        selectedList.add(option);
+      } else {
+        unselectedList.add(option);
+      }
+    }
+    final ordered = [...selectedList, ...unselectedList];
 
     return AlertDialog(
       title: const Text('Filter Nodes'),
@@ -2107,24 +2127,7 @@ List<CoverageZone> _filterZonesByRadius({
     return zones;
   }
   return zones.where((z) {
-    final d = _distanceMiles(
-      observerLat,
-      observerLng,
-      z.centerLat,
-      z.centerLng,
-    );
+    final d = distanceMiles(observerLat, observerLng, z.centerLat, z.centerLng);
     return d <= radiusMiles;
   }).toList();
-}
-
-double _distanceMiles(double lat1, double lng1, double lat2, double lng2) {
-  const r = 3958.8;
-  final dLat = (lat2 - lat1) * (3.141592653589793 / 180.0);
-  final dLng = (lng2 - lng1) * (3.141592653589793 / 180.0);
-  final a =
-      (sin(dLat / 2) * sin(dLat / 2)) +
-      cos(lat1 * (3.141592653589793 / 180.0)) *
-          cos(lat2 * (3.141592653589793 / 180.0)) *
-          (sin(dLng / 2) * sin(dLng / 2));
-  return r * 2 * atan2(sqrt(a), sqrt(1 - a));
 }

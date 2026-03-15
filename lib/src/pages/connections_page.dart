@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 
+final _deviceIdRegex = RegExp(r'\[([^\]]+)\]$');
+
 class ConnectionsPage extends StatelessWidget {
   const ConnectionsPage({
     super.key,
@@ -131,13 +133,11 @@ class ConnectionsPage extends StatelessWidget {
                       child: Text('No devices found. Tap "Scan Devices".'),
                     ),
                   )
-                : ListView.separated(
+                : ListView.builder(
                     itemCount: listRows.length,
-                    separatorBuilder: (context, index) =>
-                        const Divider(height: 1),
                     itemBuilder: (context, index) {
                       final row = listRows[index];
-                      final match = RegExp(r'\[([^\]]+)\]$').firstMatch(row);
+                      final match = _deviceIdRegex.firstMatch(row);
                       final deviceId = match?.group(1);
                       final isSelected =
                           deviceId != null &&
@@ -149,43 +149,25 @@ class ConnectionsPage extends StatelessWidget {
                         leading: const Icon(Icons.bluetooth, size: 18),
                         title: Text(row),
                         selected: isSelected,
-                        trailing: deviceId == null
-                            ? null
-                            : Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (isSelected)
-                                    const Padding(
-                                      padding: EdgeInsets.only(right: 8),
-                                      child: Icon(Icons.check_circle, size: 16),
-                                    ),
-                                  FilledButton.tonal(
-                                    onPressed: (busy || connected)
-                                        ? null
-                                        : () async {
-                                            _logButton(
-                                              'connections_device_connect:$deviceId',
-                                            );
-                                            onSelectBleDevice(deviceId);
-                                            await onConnect();
-                                          },
-                                    style: FilledButton.styleFrom(
-                                      visualDensity: VisualDensity.compact,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 6,
-                                      ),
-                                    ),
-                                    child: const Text('Connect'),
-                                  ),
-                                ],
-                              ),
-                        onTap: (!connected && deviceId != null)
-                            ? () {
+                        shape: Border(
+                          bottom: BorderSide(
+                            color: Theme.of(context).dividerColor,
+                            width: 0.5,
+                          ),
+                        ),
+                        trailing: isSelected
+                            ? const Icon(Icons.check_circle, size: 16)
+                            : null,
+                        onTap: (!connected && !busy && deviceId != null)
+                            ? () async {
                                 _logButton(
                                   'connections_device_select:$deviceId',
                                 );
+                                _logButton(
+                                  'connections_device_connect:$deviceId',
+                                );
                                 onSelectBleDevice(deviceId);
+                                await onConnect();
                               }
                             : null,
                       );
@@ -201,7 +183,7 @@ class ConnectionsPage extends StatelessWidget {
     final selected = selectedDeviceId;
     if (selected == null || selected.isEmpty) return null;
     for (final row in results) {
-      final match = RegExp(r'\[([^\]]+)\]$').firstMatch(row);
+      final match = _deviceIdRegex.firstMatch(row);
       if (match?.group(1) == selected) return row;
     }
     return 'Device [$selected]';

@@ -42,11 +42,13 @@ class MapTopControls extends StatelessWidget {
     'Tip: Use The Bolt Icon To Trigger An Immediate Scan.',
     'Tip: Tap A Hex To View RSSI, SNR, Scans, And Last-Seen Details.',
     'Tip: Use The Top-Right Filter Button To Focus On Selected Repeaters.',
+    'Tip: Node Filter Focus Zooms To Matching Coverage And Pauses Auto-Center.',
     'Tip: Auto-Center Keeps The Map On Your Current GPS Position.',
     'Tip: Dragging The Map Disables Auto-Center Until You Re-Enable It.',
     'Tip: Smart Scan Can Skip Recently Covered Zones To Reduce Network Congestion.',
     'Tip: Open Nodes To Review Discovered Repeaters And Short IDs.',
-    'Tip: Use Sync To Upload Local Scans And Refresh Worker Data.',
+    'Tip: In The Scans History Page Tap, The Download Icon To Download Filtered Data To A CSV File',
+    'Tip: Use Sync To Upload Local Scans Manually And Refresh Cloud Data.',
   ];
 
   @override

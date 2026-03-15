@@ -51,6 +51,8 @@ class LegendRow extends StatelessWidget {
 }
 
 class PopupVPointerPainter extends CustomPainter {
+  const PopupVPointerPainter();
+
   @override
   void paint(Canvas canvas, Size size) {
     final stroke = Paint()
@@ -317,6 +319,8 @@ class ScanStatsPanel extends StatelessWidget {
     required this.statsRadiusMiles,
     required this.unitSystem,
     required this.hasObserver,
+    this.onTapNodes,
+    this.onTapScans,
   });
 
   final int nodesCount;
@@ -328,6 +332,8 @@ class ScanStatsPanel extends StatelessWidget {
   final int statsRadiusMiles;
   final String unitSystem;
   final bool hasObserver;
+  final VoidCallback? onTapNodes;
+  final VoidCallback? onTapScans;
 
   @override
   Widget build(BuildContext context) {
@@ -363,12 +369,14 @@ class ScanStatsPanel extends StatelessWidget {
               value: '$nodesCount',
               label: 'Nodes',
               sub: isConnected ? 'Active' : 'Offline',
+              onTap: onTapNodes,
             ),
             _MiniStatCard(
               icon: Icons.place_outlined,
               value: '$activeZones',
               label: 'Zones',
               sub: '$deadZones dead',
+              onTap: onTapScans,
             ),
             _MiniStatCard(
               icon: Icons.network_cell,
@@ -395,78 +403,84 @@ class _MiniStatCard extends StatelessWidget {
     required this.value,
     required this.label,
     required this.sub,
+    this.onTap,
   });
 
   final IconData icon;
   final String value;
   final String label;
   final String sub;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return Card(
       margin: EdgeInsets.zero,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final h = constraints.maxHeight;
-          final tiny = h < 58;
-          final compact = h < 66;
-          final showSub = h >= 62;
-          final iconSize = tiny ? 10.0 : (compact ? 11.0 : 12.0);
-          final valueSize = tiny ? 12.0 : (compact ? 13.0 : 14.0);
-          final labelSize = tiny ? 8.0 : (compact ? 9.0 : 10.0);
-          final subSize = tiny ? 8.0 : 9.0;
-          final topGap = tiny ? 0.0 : (compact ? 1.0 : 3.0);
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final h = constraints.maxHeight;
+            final tiny = h < 58;
+            final compact = h < 66;
+            final showSub = h >= 62;
+            final iconSize = tiny ? 10.0 : (compact ? 11.0 : 12.0);
+            final valueSize = tiny ? 12.0 : (compact ? 13.0 : 14.0);
+            final labelSize = tiny ? 8.0 : (compact ? 9.0 : 10.0);
+            final subSize = tiny ? 8.0 : 9.0;
+            final topGap = tiny ? 0.0 : (compact ? 1.0 : 3.0);
 
-          return Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: 4,
-              vertical: tiny ? 2 : (compact ? 4 : 6),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  size: iconSize,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-                SizedBox(height: topGap),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: valueSize,
-                    fontWeight: FontWeight.w700,
-                    height: 1.0,
+            return Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: tiny ? 2 : (compact ? 4 : 6),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: iconSize,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
-                ),
-                SizedBox(height: tiny ? 0 : 1),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontSize: labelSize,
-                    height: 1.0,
-                  ),
-                ),
-                if (showSub)
+                  SizedBox(height: topGap),
                   Text(
-                    sub,
+                    value,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontSize: subSize,
+                    style: TextStyle(
+                      fontSize: valueSize,
+                      fontWeight: FontWeight.w700,
                       height: 1.0,
                     ),
                   ),
-              ],
-            ),
-          );
-        },
+                  SizedBox(height: tiny ? 0 : 1),
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontSize: labelSize,
+                      height: 1.0,
+                    ),
+                  ),
+                  if (showSub)
+                    Text(
+                      sub,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: subSize,
+                        height: 1.0,
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }

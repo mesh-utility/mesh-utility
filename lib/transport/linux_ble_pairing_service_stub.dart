@@ -2,7 +2,28 @@ import 'package:mesh_utility/transport/linux_ble_pairing_service_base.dart';
 
 class _LinuxBlePairingServiceStub implements LinuxBlePairingServiceBase {
   @override
+  Future<bool> isBluetoothctlAvailable() async => false;
+
+  @override
   Future<bool> isPairedAndTrusted(String remoteId) async => false;
+
+  @override
+  Future<bool> trustDevice(
+    String remoteId, {
+    void Function(String message)? onLog,
+  }) async => false;
+
+  @override
+  Future<void> disconnectDevice(
+    String remoteId, {
+    void Function(String message)? onLog,
+  }) async {}
+
+  @override
+  Future<bool> connectDevice(
+    String remoteId, {
+    void Function(String message)? onLog,
+  }) async => false;
 
   @override
   Future<void> removeDevice(
@@ -16,8 +37,6 @@ class _LinuxBlePairingServiceStub implements LinuxBlePairingServiceBase {
     Duration timeout = const Duration(seconds: 45),
     void Function(String message)? onLog,
     Future<String?> Function()? onRequestPin,
-    bool proactivePinRetryUsed = false,
-    bool removeRetryUsed = false,
   }) async {
     return false;
   }

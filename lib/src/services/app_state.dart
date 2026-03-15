@@ -646,7 +646,7 @@ class AppState extends ChangeNotifier {
       settings = settings.copyWith(forceOffline: true);
       await _settingsStore.save(settings);
     }
-    // TODO(alpha6): Re-enable user-selectable language setting.
+    // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
     _restoreKnownBleDeviceNames();
@@ -678,7 +678,7 @@ class AppState extends ChangeNotifier {
     settings = !next.privacyAccepted && !next.forceOffline
         ? next.copyWith(forceOffline: true)
         : next;
-    // TODO(alpha6): Re-enable user-selectable language setting.
+    // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
     await _settingsStore.save(settings);
@@ -712,6 +712,35 @@ class AppState extends ChangeNotifier {
     if (previous.updateRadioPosition != settings.updateRadioPosition &&
         bleConnected) {
       unawaited(_applyCompanionLocationPolicyFromSettings());
+    }
+
+    // --- Auto-connect toggle changed ---
+    final autoConnectChanged =
+        previous.bleAutoConnect != settings.bleAutoConnect;
+    if (autoConnectChanged) {
+      if (settings.bleAutoConnect) {
+        // Toggled ON: connect if we have a known device and are not already
+        // connected or connecting.
+        if (!bleConnected &&
+            !bleConnecting &&
+            settings.knownBleDeviceIds.isNotEmpty) {
+          bleSelectedDeviceId ??= settings.knownBleDeviceIds.first;
+          if (_transport is BleTransport) {
+            _transport.preferredDeviceId = bleSelectedDeviceId;
+          }
+          _debugLog.info(
+            'ble',
+            'Auto-connect enabled; connecting to $bleSelectedDeviceId',
+          );
+          unawaited(connectBle());
+        }
+      } else {
+        // Toggled OFF: disconnect gracefully so the radio is released.
+        if (bleConnected || bleConnecting) {
+          _debugLog.info('ble', 'Auto-connect disabled; disconnecting');
+          unawaited(disconnectBle());
+        }
+      }
     }
   }
 
@@ -893,7 +922,11 @@ class AppState extends ChangeNotifier {
       }
       _debugLog.error('ble', 'Connect failed: $e');
       if (!handledAsBluetoothOff) {
-        bleStatus = 'BLE connect failed: $e';
+        if (_isDeviceNotFoundConnectError(e)) {
+          bleStatus = 'Device not found – is your radio powered on?';
+        } else {
+          bleStatus = 'BLE connect failed';
+        }
       }
     } finally {
       bleConnecting = false;
@@ -980,7 +1013,7 @@ class AppState extends ChangeNotifier {
       _debugLog.warn('ble', 'Recovery link-state reset failed: $resetError');
     }
     try {
-      await ble.scanDevices(timeout: const Duration(seconds: 8));
+      await ble.scanDevices(timeout: const Duration(seconds: 3));
     } catch (scanError) {
       _debugLog.warn('ble', 'Recovery scan failed: $scanError');
     }
@@ -993,15 +1026,43 @@ class AppState extends ChangeNotifier {
         'Recovery connect succeeded after scan refresh target=$targetDeviceId',
       );
       return true;
-    } catch (retryError) {
-      _debugLog.error(
+    } catch (scanRetryError) {
+      _debugLog.warn(
         'ble',
-        'Recovery connect failed after scan refresh target=$targetDeviceId: '
-            '$retryError',
+        'Recovery connect after scan failed: $scanRetryError; '
+            'trying direct BlueZ connect',
       );
-      bleConnected = false;
-      return false;
     }
+
+    // Last resort: ask bluetoothctl to connect directly (works for
+    // previously-paired devices that BlueZ still has cached even though
+    // they weren't discovered in the scan).
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      bleStatus = 'Trying direct BlueZ connect...';
+      notifyListeners();
+      final directOk = await ble.tryDirectBlueZConnect(targetDeviceId);
+      if (directOk) {
+        // Device is now connected at the BlueZ level; re-discover & bind.
+        try {
+          await _bleProtocol.run(_protocol.connect());
+          await _completeBleConnectSuccess();
+          _debugLog.info(
+            'ble',
+            'Recovery connect succeeded via direct BlueZ connect '
+                'target=$targetDeviceId',
+          );
+          return true;
+        } catch (directRetryError) {
+          _debugLog.error(
+            'ble',
+            'Recovery connect failed after direct BlueZ connect '
+                'target=$targetDeviceId: $directRetryError',
+          );
+        }
+      }
+    }
+    bleConnected = false;
+    return false;
   }
 
   Future<bool> _ensureAndroidLocationReadyForBle() async {
@@ -1178,7 +1239,7 @@ class AppState extends ChangeNotifier {
       }
       bleStatus = bleScanDevices.isEmpty
           ? 'No BLE devices found'
-          : 'Select a BLE device from results, then Connect';
+          : 'Tap a BLE device from results to connect';
     } catch (e) {
       final message = e.toString();
       if (kIsWeb &&
@@ -1417,6 +1478,12 @@ class AppState extends ChangeNotifier {
           'ble_discover',
           'Stored $appended local scan(s) with OS location',
         );
+      } else if (byPrefix.isEmpty) {
+        final recorded = _recordDeadZoneScan();
+        if (recorded) {
+          await _localStore.saveRawScans(rawScans);
+          _rebuildDerivedData();
+        }
       }
       bleScanStatus = 'done';
       if (bleDiscoveries.isEmpty) {
@@ -1576,8 +1643,84 @@ class AppState extends ChangeNotifier {
     }
     if (appended.isNotEmpty) {
       rawScans = [...appended, ...rawScans];
+      final beforeDelete = rawScans.length;
+      rawScans = _applyDeadzoneSuccessPrecedence(
+        rawScans,
+        source: 'local_discover',
+      );
+      final deleted = beforeDelete - rawScans.length;
+      if (deleted > 0) {
+        _debugLog.info(
+          'scan_store',
+          'Deleted $deleted local deadzone row(s) after successful discover scan(s)',
+        );
+      }
     }
     return appended.length;
+  }
+
+  /// Records a synthetic dead-zone [RawScan] at the current GPS location
+  /// when a node_discover completes with zero responses.
+  bool _recordDeadZoneScan() {
+    final lat = deviceLatitude;
+    final lng = deviceLongitude;
+    if (lat == null || lng == null) {
+      _debugLog.warn(
+        'dead_zone',
+        'No OS location fix; skipping dead-zone scan',
+      );
+      return false;
+    }
+    final connectedMeshId8 = _connectedRadioMeshId8();
+    if (connectedMeshId8 == null || connectedMeshId8.isEmpty) {
+      _debugLog.warn(
+        'dead_zone',
+        'No connected radio ID; skipping dead-zone scan',
+      );
+      return false;
+    }
+    final now = DateTime.now();
+    final scan = _normalizeRawScanIds(
+      RawScan(
+        observerId: connectedMeshId8,
+        nodeId: null,
+        latitude: lat,
+        longitude: lng,
+        rssi: null,
+        snr: null,
+        altitude: deviceAltitude,
+        timestamp: now,
+        receivedAt: now,
+        senderName: null,
+        receiverName: (_connectedRadioDisplayName ?? '').trim().isEmpty
+            ? connectedMeshId8
+            : _connectedRadioDisplayName!.trim(),
+        radioId: connectedMeshId8,
+        downloadedFromWorker: false,
+      ),
+    );
+    rawScans = [scan, ...rawScans];
+    // Suppress the new dead-zone row if a successful scan already covers
+    // the same hex (e.g. from a previous discover cycle).
+    final beforeDelete = rawScans.length;
+    rawScans = _applyDeadzoneSuccessPrecedence(
+      rawScans,
+      source: 'dead_zone_local',
+    );
+    final deleted = beforeDelete - rawScans.length;
+    if (deleted > 0) {
+      _debugLog.info(
+        'dead_zone',
+        'Suppressed dead-zone scan; hex already has successful coverage',
+      );
+      return false;
+    }
+    _debugLog.info(
+      'dead_zone',
+      'Recorded dead-zone scan radio=$connectedMeshId8 '
+          'lat=${lat.toStringAsFixed(6)} lng=${lng.toStringAsFixed(6)}',
+    );
+    return true;
   }
 
   Future<void> _syncContactsAndBackfillNames() async {
@@ -2373,6 +2516,7 @@ class AppState extends ChangeNotifier {
   Future<void> _attemptAutoReconnect({String? reason}) async {
     if (kIsWeb) return;
     if (_autoReconnectInProgress || _manualBleDisconnectRequested) return;
+    if (!settings.bleAutoConnect) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) return;
     _autoReconnectInProgress = true;
     try {
