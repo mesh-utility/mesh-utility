@@ -9,8 +9,25 @@ set -euo pipefail
 # - Creates desktop launcher entry with app icon
 
 REPO="${REPO:-mesh-utility/mesh-utility}"
-TAG="${1:-Alpha-3}"
-ASSET_NAME="${ASSET_NAME:-mesh-utility-1.0.0-alpha.3-linux-x64.tar.gz}"
+
+# Auto-detect latest release tag (including pre-releases) if not specified.
+if [[ -n "${1:-}" ]]; then
+  TAG="$1"
+elif command -v curl >/dev/null 2>&1; then
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+    | grep -m1 '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+  if [[ -z "${TAG}" ]]; then
+    echo "ERROR: Could not detect latest release tag. Pass it manually: $0 Alpha-6"
+    exit 1
+  fi
+  echo "==> Detected latest release: ${TAG}"
+else
+  echo "ERROR: curl is required. Install curl or pass the tag manually: $0 Alpha-6"
+  exit 1
+fi
+
+# Derive asset name from tag.
+ASSET_NAME="${ASSET_NAME:-mesh-utility-${TAG}-linux-x64.tar.gz}"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/opt/mesh-utility}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
