@@ -14,8 +14,8 @@ REPO="${REPO:-mesh-utility/mesh-utility}"
 if [[ -n "${1:-}" ]]; then
   TAG="$1"
 elif command -v curl >/dev/null 2>&1; then
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
-    | grep -m1 '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)"
   if [[ -z "${TAG}" ]]; then
     echo "ERROR: Could not detect latest release tag. Pass it manually: $0 Alpha-6"
     exit 1
