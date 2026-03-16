@@ -10,6 +10,7 @@ Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and
 
 ## Release Notes
 
+- [Alpha 6](./docs/releases/alpha-6.md) (latest)
 - [Alpha 5](./docs/releases/alpha-5.md)
 
 ## Supported Targets
