@@ -70,6 +70,30 @@ To install a specific release:
 ```
 
 
+## Coverage Hex Grid
+
+Coverage zones are keyed to a flat-top hexagonal grid anchored at the geographic origin **(lat 0, lng 0)**. Every GPS fix is snapped to the nearest hex cell centre before being stored or displayed.
+
+Key constants (see [lib/src/services/grid.dart](lib/src/services/grid.dart)):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `hexSize` | `0.0007°` | Hex radius in degrees (~78 m at equator) |
+| `rowSpacing` | `hexSize × 1.5` | Latitude distance between row centres |
+| `colSpacing` | `hexSize × √3 × 1.2` | Longitude distance between column centres |
+
+The grid origin is `(snapLat=0, snapLng=0)`. Every cell is identified by a **hex key** — a `"lat:lng"` string of the snapped centre coordinates (6 decimal places). Example: `"37.771550:-122.419000"`.
+
+To find which hex cell a position belongs to:
+
+```dart
+import 'package:mesh_utility/src/services/grid.dart';
+
+final key = hexKey(latitude, longitude); // e.g. "37.771550:-122.419000"
+```
+
+Dead zones (no node heard) and live zones both use this key as their unique ID, so querying `coverageZones.firstWhere((z) => z.id == hexKey(lat, lng))` tells you everything known about that cell.
+
 ## Contributing Docs
 
 - Contribution guide: [CONTRIBUTING.md](./CONTRIBUTING.md)

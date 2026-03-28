@@ -12,6 +12,7 @@ import 'package:mesh_utility/src/pages/not_found_page.dart';
 import 'package:mesh_utility/src/pages/nodes_page.dart';
 import 'package:mesh_utility/src/pages/privacy_page.dart';
 import 'package:mesh_utility/src/pages/settings_page.dart';
+import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
@@ -1403,6 +1404,8 @@ class _MeshHomePageState extends State<MeshHomePage>
         );
       case 6:
         return const PrivacyPage();
+      case 7:
+        return ContactsPage(contacts: _appState.currentRadioContacts);
       default:
         return const NotFoundPage();
     }
@@ -1604,6 +1607,12 @@ class _AppSidebar extends StatelessWidget {
                     icon: Icons.help_outline,
                     selected: selectedIndex == 4,
                     onTap: () => onSelect(4),
+                  ),
+                  _NavButton(
+                    label: 'Contacts',
+                    icon: Icons.contacts_outlined,
+                    selected: selectedIndex == 7,
+                    onTap: () => onSelect(7),
                   ),
                   _NavButton(
                     label: 'Discord',

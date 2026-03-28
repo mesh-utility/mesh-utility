@@ -4,6 +4,14 @@ import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 
+/// Converts an untyped [Map] to `Map<String, dynamic>` without throwing on
+/// non-string keys — unknown key types are stringified.
+Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
+  return {
+    for (final e in m.entries) e.key.toString(): e.value,
+  };
+}
+
 class WorkerApi {
   WorkerApi(this.baseUrl, {String? fallbackBaseUrl})
     : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl);
@@ -176,7 +184,7 @@ class WorkerApi {
               results.add(scan);
             }
           } else if (decoded is Map) {
-            final scan = RawScan.fromJson(decoded.cast<String, dynamic>());
+            final scan = RawScan.fromJson(_safeMap(decoded));
             if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
               results.add(scan);
             }
@@ -223,7 +231,7 @@ class WorkerApi {
         .map(
           (e) => e is Map<String, dynamic>
               ? CoverageZone.fromJson(e)
-              : CoverageZone.fromJson((e as Map).cast<String, dynamic>()),
+              : CoverageZone.fromJson(_safeMap(e as Map)),
         )
         .toList();
   }

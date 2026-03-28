@@ -66,6 +66,9 @@ class TileCacheService {
       final minLng = centerLng - lngDelta;
       final maxLng = centerLng + lngDelta;
 
+      // Collect all tile URLs up to the limit first.
+      final tileUrls = <String>[];
+      outer:
       for (final template in urlTemplates) {
         for (var zoom = minZoom; zoom <= maxZoom; zoom++) {
           final xMin = _lngToTileX(minLng, zoom);
@@ -75,36 +78,50 @@ class TileCacheService {
 
           for (var x = xMin; x <= xMax; x++) {
             for (var y = yMin; y <= yMax; y++) {
-              if (downloaded >= maxTiles) return downloaded;
-              final url = template
-                  .replaceAll('{z}', '$zoom')
-                  .replaceAll('{x}', '$x')
-                  .replaceAll('{y}', '$y');
-              try {
-                final response = await client
-                    .get(Uri.parse(url))
-                    .timeout(const Duration(seconds: 8));
-                if (response.statusCode != 200 || response.bodyBytes.isEmpty) {
-                  continue;
-                }
-                await provider.putTile(
-                  url: url,
-                  metadata: CachedMapTileMetadata(
-                    staleAt: DateTime.now().toUtc().add(
-                      const Duration(days: 30),
-                    ),
-                    etag: null,
-                    lastModified: null,
-                  ),
-                  bytes: response.bodyBytes,
-                );
-                downloaded += 1;
-              } catch (_) {
-                // Best-effort prefetch.
-              }
+              if (tileUrls.length >= maxTiles) break outer;
+              tileUrls.add(
+                template
+                    .replaceAll('{z}', '$zoom')
+                    .replaceAll('{x}', '$x')
+                    .replaceAll('{y}', '$y'),
+              );
             }
           }
         }
+      }
+
+      // Download and cache tiles with bounded concurrency.
+      const concurrency = 8;
+      for (var i = 0; i < tileUrls.length; i += concurrency) {
+        final end = (i + concurrency).clamp(0, tileUrls.length);
+        final batch = tileUrls.sublist(i, end);
+        final results = await Future.wait(
+          batch.map((url) async {
+            try {
+              final response = await client
+                  .get(Uri.parse(url))
+                  .timeout(const Duration(seconds: 8));
+              if (response.statusCode != 200 || response.bodyBytes.isEmpty) {
+                return false;
+              }
+              await provider.putTile(
+                url: url,
+                metadata: CachedMapTileMetadata(
+                  staleAt: DateTime.now().toUtc().add(
+                    const Duration(days: 30),
+                  ),
+                  etag: null,
+                  lastModified: null,
+                ),
+                bytes: response.bodyBytes,
+              );
+              return true;
+            } catch (_) {
+              return false;
+            }
+          }),
+        );
+        downloaded += results.where((r) => r).length;
       }
       return downloaded;
     } finally {

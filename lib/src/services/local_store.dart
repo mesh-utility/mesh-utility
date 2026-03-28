@@ -1,6 +1,12 @@
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/services/reax_database.dart';
 
+Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
+  return {
+    for (final e in m.entries) e.key.toString(): e.value,
+  };
+}
+
 class LocalStore {
   static const _rawScansKey = 'scans:raw';
 
@@ -11,7 +17,7 @@ class LocalStore {
 
     return raw
         .whereType<Map>()
-        .map((entry) => RawScan.fromJson(entry.cast<String, dynamic>()))
+        .map((entry) => RawScan.fromJson(_safeMap(entry)))
         .toList();
   }
 

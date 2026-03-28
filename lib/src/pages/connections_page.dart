@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 
 final _deviceIdRegex = RegExp(r'\[([^\]]+)\]$');
 
@@ -198,6 +199,6 @@ class ConnectionsPage extends StatelessWidget {
   }
 
   void _logButton(String action) {
-    debugPrint('[ui_click] $action');
+    AppDebugLogService.instance.debug('ui', action);
   }
 }

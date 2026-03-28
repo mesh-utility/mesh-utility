@@ -320,9 +320,6 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (nodeHexes.isEmpty) {
-      debugPrint(
-        '[map_filter] Node filter requested for $nodeId but found 0 scan hexes',
-      );
       _debugLog.warn(
         'map_filter',
         'Node filter requested for $nodeId but found 0 scan hexes',
@@ -335,10 +332,6 @@ class _MapPageState extends State<MapPage> {
     _debugLog.info(
       'map_filter',
       'Node $nodeKey filter: scansHexes=${nodeHexes.length}, matchedZones=${nodeZones.length}, totalZones=${widget.zones.length}',
-    );
-    debugPrint(
-      '[map_filter] Node $nodeKey filter: scansHexes=${nodeHexes.length}, '
-      'matchedZones=${nodeZones.length}, totalZones=${widget.zones.length}',
     );
     final candidates = nodeZones;
     CoverageZone? target;
@@ -559,11 +552,6 @@ class _MapPageState extends State<MapPage> {
           '$filterLabel|zones:${widget.zones.length}|base:${baseZones.length}|filtered:${filteredZones.length}|radiusBypass:$bypassRadiusForNodeFocus';
       if (signature != _lastNodeFilterDebugSignature) {
         _lastNodeFilterDebugSignature = signature;
-        debugPrint(
-          '[map_filter] Render filter active for $filterLabel: '
-          'base=${baseZones.length}, afterRadius=${filteredZones.length}, '
-          'radiusBypass=$bypassRadiusForNodeFocus',
-        );
         _debugLog.debug(
           'map_filter',
           'Render filter active for $filterLabel: base=${baseZones.length}, afterRadius=${filteredZones.length}, radiusBypass=$bypassRadiusForNodeFocus',
