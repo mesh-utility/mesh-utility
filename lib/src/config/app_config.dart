@@ -10,4 +10,10 @@ class AppConfig {
     'WORKER_FALLBACK_URL',
     defaultValue: _defaultWorkerFallbackUrl,
   );
+  // Optional static data origin (for phased static read migration).
+  // Example: https://mesh-utility.org
+  static const String staticDataUrl = String.fromEnvironment(
+    'STATIC_DATA_URL',
+    defaultValue: '',
+  );
 }

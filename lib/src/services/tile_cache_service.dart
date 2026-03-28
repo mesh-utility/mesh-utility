@@ -17,7 +17,7 @@ class TileCacheService {
 
   static BuiltInMapCachingProvider _providerInstance() {
     return _provider ??= BuiltInMapCachingProvider.getOrCreateInstance(
-      maxCacheSize: 1_500_000_000,
+      maxCacheSize: 200_000_000,
       overrideFreshAge: const Duration(days: 30),
     );
   }
@@ -107,9 +107,7 @@ class TileCacheService {
               await provider.putTile(
                 url: url,
                 metadata: CachedMapTileMetadata(
-                  staleAt: DateTime.now().toUtc().add(
-                    const Duration(days: 30),
-                  ),
+                  staleAt: DateTime.now().toUtc().add(const Duration(days: 30)),
                   etag: null,
                   lastModified: null,
                 ),

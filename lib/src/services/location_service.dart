@@ -95,19 +95,20 @@ class LocationService extends ChangeNotifier {
       await _locationSubscription?.cancel();
       _locationPollTimer?.cancel();
       _lastPreciseLocationAt = null;
-      _locationSubscription = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 5,
-        ),
-      ).listen(
-        (position) => _applyDevicePosition(position, source: 'stream'),
-        onError: (Object e) {
-          deviceLocationStatus = 'Location stream error';
-          _log.error('location', 'Location stream error: $e');
-          notifyListeners();
-        },
-      );
+      _locationSubscription =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 5,
+            ),
+          ).listen(
+            (position) => _applyDevicePosition(position, source: 'stream'),
+            onError: (Object e) {
+              deviceLocationStatus = 'Location stream error';
+              _log.error('location', 'Location stream error: $e');
+              notifyListeners();
+            },
+          );
       deviceLocationStatus = 'Waiting for location fix...';
       notifyListeners();
       _locationPollTimer = Timer.periodic(

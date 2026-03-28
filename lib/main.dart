@@ -1280,6 +1280,12 @@ class _MeshHomePageState extends State<MeshHomePage>
           connectedRadioName: _appState.connectedRadioDisplayName,
           connectedRadioMeshId: _appState.connectedRadioMeshId8,
           bleUiEnabled: true,
+          onClearFocusNodeId: () {
+            if (_mapFocusNodeId == null) return;
+            setState(() {
+              _mapFocusNodeId = null;
+            });
+          },
           onTapNodes: () {
             _debugLog.info('ui_click', 'Stats bar -> Nodes tab');
             _navigateTo(2);

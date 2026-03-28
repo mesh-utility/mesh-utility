@@ -8,6 +8,7 @@ Cloudflare Worker for ingesting scan data, batching writes, and committing scan 
 - Batches commits to GitHub (20 scans or 5 minutes)
 - Appends committed rows into a single master CSV file (`scans.csv`)
 - Serves scan history (`/history`, `/history/:day.ndjson`)
+- Serves static-compatible aliases (`/history/index.json`, `/coverage.json`)
 - Serves pre-aggregated coverage zones for fast map rendering (`/coverage`)
 - Supports signed radio-owned deletion (`POST /delete/challenge`, `POST /delete/:radioId`)
 
@@ -82,6 +83,9 @@ Example response:
 ["2026-02-15", "2026-02-14"]
 ```
 
+### `GET /history/index.json`
+Static-compatible alias for `GET /history`.
+
 ### `GET /history/:day.ndjson`
 Returns newline-delimited scan rows for a day (`YYYY-MM-DD`).
 
@@ -89,6 +93,15 @@ Returns newline-delimited scan rows for a day (`YYYY-MM-DD`).
   - `deadzoneDays`:
     - `1..365` = include dead-zone rows only if the requested day is within the most recent N available scan days
     - `0` (default) = include dead-zone rows for any requested day
+  - `pageSize`:
+    - `1..5000` = maximum rows per response page (default `2000`)
+  - `cursorTimestamp` + `cursorId`:
+    - keyset pagination cursor from previous response headers
+
+Pagination response headers:
+- `X-Has-More`: `1` when another page exists
+- `X-Next-Cursor-Timestamp`: timestamp for next page cursor
+- `X-Next-Cursor-Id`: row id for next page cursor
 
 ### `GET /coverage?days=7`
 Returns aggregated hex coverage zones from D1 for fast map rendering.
@@ -99,6 +112,9 @@ Returns aggregated hex coverage zones from D1 for fast map rendering.
 - `deadzoneDays` (optional, defaults to `days`):
   - `1..365` = dead-zone rows are included from the most recent N available scan days
   - `0` = include dead-zone rows from all available days
+
+### `GET /coverage.json?days=7`
+Static-compatible alias for `GET /coverage`.
 
 ### `POST /delete/challenge`
 Returns a short-lived challenge string for signed ownership verification.

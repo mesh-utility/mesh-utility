@@ -15,6 +15,10 @@ abstract class LinuxBlePairingServiceBase {
     String remoteId, {
     void Function(String message)? onLog,
   });
+  Future<String?> lookupDeviceDisplayName(
+    String remoteId, {
+    void Function(String message)? onLog,
+  });
   Future<void> removeDevice(
     String remoteId, {
     void Function(String message)? onLog,

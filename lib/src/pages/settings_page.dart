@@ -722,7 +722,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                   Text(
-                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} cached locally',
+                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} loaded in this session',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 4),
@@ -740,11 +740,6 @@ class _SettingsPageState extends State<SettingsPage> {
                           ? 'Syncing...'
                           : 'Sync now (${widget.uploadQueueCount})',
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Downloaded scans are marked read-only and excluded from upload queue.',
-                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),
@@ -1098,5 +1093,5 @@ int _toMilesRadius(int displayValue, String unitSystem) {
 String _syncMeta({required int count, required DateTime? at}) {
   if (at == null) return 'No completed sync yet';
   final formatted = DateFormat.yMd().add_jm().format(at.toLocal());
-  return 'Last sync: $formatted • $count scans fetched';
+  return 'Last sync: $formatted • $count scans fetched from network';
 }

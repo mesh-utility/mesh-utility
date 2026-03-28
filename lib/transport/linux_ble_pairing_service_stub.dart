@@ -26,6 +26,12 @@ class _LinuxBlePairingServiceStub implements LinuxBlePairingServiceBase {
   }) async => false;
 
   @override
+  Future<String?> lookupDeviceDisplayName(
+    String remoteId, {
+    void Function(String message)? onLog,
+  }) async => null;
+
+  @override
   Future<void> removeDevice(
     String remoteId, {
     void Function(String message)? onLog,

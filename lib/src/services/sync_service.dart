@@ -86,6 +86,7 @@ class SyncService extends ChangeNotifier {
       final api = WorkerApi(
         AppConfig.deployedWorkerUrl,
         fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+        staticDataBaseUrl: AppConfig.staticDataUrl,
       );
       final serverNow = await api.fetchServerUtcNow();
       captureInternetTimeAnchor(serverNow);

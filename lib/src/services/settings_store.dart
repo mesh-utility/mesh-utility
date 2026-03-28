@@ -153,7 +153,7 @@ class AppSettings {
           (json['privacyAccepted'] as bool?) ?? defaults.privacyAccepted,
       scanIntervalSeconds:
           (json['scanIntervalSeconds'] as num?)?.toInt() ??
-              defaults.scanIntervalSeconds,
+          defaults.scanIntervalSeconds,
       discoverWaitSeconds: _clampDiscoverWaitSeconds(
         (json['discoverWaitSeconds'] as num?)?.toInt() ??
             defaults.discoverWaitSeconds,
@@ -166,14 +166,14 @@ class AppSettings {
       forceOffline: (json['forceOffline'] as bool?) ?? defaults.forceOffline,
       updateRadioPosition:
           (json['updateRadioPosition'] as bool?) ??
-              defaults.updateRadioPosition,
+          defaults.updateRadioPosition,
       tileCachingEnabled:
           (json['tileCachingEnabled'] as bool?) ?? defaults.tileCachingEnabled,
       unitSystem: (json['unitSystem'] as String?) ?? defaults.unitSystem,
       language: (json['language'] as String?) ?? defaults.language,
       statsRadiusMiles:
           (json['statsRadiusMiles'] as num?)?.toInt() ??
-              defaults.statsRadiusMiles,
+          defaults.statsRadiusMiles,
       uploadBatchIntervalMinutes: _clampUploadBatchIntervalMinutes(
         (json['uploadBatchIntervalMinutes'] as num?)?.toInt() ??
             defaults.uploadBatchIntervalMinutes,
@@ -188,25 +188,26 @@ class AppSettings {
               .entries
               .where((entry) => entry.key is String && entry.value is String)
               .fold<Map<String, String>>(<String, String>{}, (next, entry) {
-        final id = (entry.key as String).trim();
-        final name = (entry.value as String).trim();
-        if (id.isNotEmpty && name.isNotEmpty) {
-          next[id] = name;
-        }
-        return next;
-      }),
+                final id = (entry.key as String).trim();
+                final name = (entry.value as String).trim();
+                if (id.isNotEmpty && name.isNotEmpty) {
+                  next[id] = name;
+                }
+                return next;
+              }),
       contactsByRadioId:
           (json['contactsByRadioId'] as Map<String, dynamic>?)?.map(
-                (key, value) => MapEntry(
-                  key,
-                  (value as Map<String, dynamic>).map(
-                    (key, value) => MapEntry(key, value as String),
-                  ),
-                ),
-              ) ??
-              const {},
+            (key, value) => MapEntry(
+              key,
+              (value as Map<String, dynamic>).map(
+                (key, value) => MapEntry(key, value as String),
+              ),
+            ),
+          ) ??
+          const {},
     );
   }
+
   static int _clampDiscoverWaitSeconds(int value) {
     if (value < 5) return 5;
     if (value > 120) return 120;

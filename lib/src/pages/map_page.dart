@@ -56,6 +56,7 @@ class MapPage extends StatefulWidget {
     this.connectedRadioMeshId,
     this.onTapNodes,
     this.onTapScans,
+    this.onClearFocusNodeId,
   });
 
   final List<CoverageZone> zones;
@@ -98,6 +99,7 @@ class MapPage extends StatefulWidget {
   final String? connectedRadioMeshId;
   final VoidCallback? onTapNodes;
   final VoidCallback? onTapScans;
+  final VoidCallback? onClearFocusNodeId;
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -469,6 +471,12 @@ class _MapPageState extends State<MapPage> {
       'map_filter',
       'Node filter updated: count=${result.length} ids=${signatureAfter.join(',')}',
     );
+    // Manual filter changes should override one-shot focus routing from
+    // other pages so "clear filter" truly clears map filtering state.
+    final hadFocusNode = (widget.focusNodeId ?? '').trim().isNotEmpty;
+    if (hadFocusNode) {
+      widget.onClearFocusNodeId?.call();
+    }
     setState(() {
       _selectedNodeFilters = result;
       if (_selectedZone != null &&

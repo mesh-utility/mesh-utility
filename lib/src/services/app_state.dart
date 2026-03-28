@@ -288,10 +288,11 @@ class AppState extends ChangeNotifier {
       _bleDeviceNamesById[deviceId] ?? '',
     );
     final fallback = cleanRadioDisplayName(fallbackName ?? '');
-    final displayName = mappedName.isNotEmpty
-        ? mappedName
-        : (fallback.isNotEmpty ? fallback : _knownBleDeviceFallbackName);
-    return '$displayName [$deviceId]';
+    if (mappedName.isNotEmpty) return '$mappedName [$deviceId]';
+    if (fallback.isNotEmpty) return '$fallback [$deviceId]';
+    // Avoid generic "Known Device" labels; keep rows uniquely identifiable
+    // until the platform provides a friendly BLE name.
+    return '[$deviceId]';
   }
 
   bool _upsertBleScanDevice({required String deviceId, String? deviceName}) {
@@ -329,6 +330,42 @@ class AppState extends ChangeNotifier {
     }
     if (added > 0) {
       _debugLog.info('ble_scan', 'Seeded $added known BLE device(s)');
+    }
+    unawaited(_resolveSeededBleDeviceNames());
+  }
+
+  Future<void> _resolveSeededBleDeviceNames() async {
+    if (_transport is! BleTransport || kIsWeb) return;
+    final ble = _transport;
+    var updated = 0;
+    for (final deviceId in settings.knownBleDeviceIds) {
+      final existing = cleanRadioDisplayName(
+        _bleDeviceNamesById[deviceId] ?? '',
+      );
+      if (existing.isNotEmpty && !_isPlaceholderBleDeviceName(existing)) {
+        continue;
+      }
+      try {
+        final resolved = cleanRadioDisplayName(
+          await ble.resolveDeviceDisplayName(deviceId) ?? '',
+        );
+        if (resolved.isEmpty || _isPlaceholderBleDeviceName(resolved)) {
+          continue;
+        }
+        if (!_upsertBleScanDevice(deviceId: deviceId, deviceName: resolved)) {
+          continue;
+        }
+        updated += 1;
+      } catch (_) {
+        continue;
+      }
+    }
+    if (updated > 0) {
+      _debugLog.info(
+        'ble_scan',
+        'Resolved $updated known BLE device name(s) from system metadata',
+      );
+      notifyListeners();
     }
   }
 
@@ -600,8 +637,9 @@ class AppState extends ChangeNotifier {
   Map<String, String> get currentRadioContacts {
     final radioId = _connectedRadioMeshId8();
     if (radioId == null) return const {};
-    return _contactsByRadioId[radioId] ?? const {};
+    return settings.contactsByRadioId[radioId] ?? const {};
   }
+
   bool get deleteInProgress => _deleteInProgress;
   Map<String, String> get knownContactNames =>
       Map<String, String>.unmodifiable(_radioContactsByPrefix);
@@ -614,10 +652,9 @@ class AppState extends ChangeNotifier {
   bool get periodicSyncEnabled => !settings.forceOffline;
   bool get periodicSyncWaitingForInternetTimeAnchor =>
       periodicSyncEnabled && _syncService.waitingForInternetTimeAnchor;
-  DateTime? get nextPeriodicSyncDueAtUtc =>
-      periodicSyncEnabled
-          ? _syncService.nextPeriodicSyncDueAtUtc(periodicSyncIntervalMinutes)
-          : null;
+  DateTime? get nextPeriodicSyncDueAtUtc => periodicSyncEnabled
+      ? _syncService.nextPeriodicSyncDueAtUtc(periodicSyncIntervalMinutes)
+      : null;
 
   (double, double)? get currentObserverPosition {
     if (deviceLatitude != null && deviceLongitude != null) {
@@ -762,6 +799,7 @@ class AppState extends ChangeNotifier {
       final api = WorkerApi(
         AppConfig.deployedWorkerUrl,
         fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+        staticDataBaseUrl: AppConfig.staticDataUrl,
       );
       final connectedRadioId = _connectedRadioMeshId8();
       final localOnlyBeforeSync = rawScans
@@ -809,9 +847,11 @@ class AppState extends ChangeNotifier {
           } else {
             final workerName = (existing.senderName ?? '').trim();
             final localName = (local.senderName ?? '').trim();
-            final workerIsPlaceholder = workerName.isEmpty ||
+            final workerIsPlaceholder =
+                workerName.isEmpty ||
                 isPlaceholderNodeName(workerName, existing.nodeId ?? '');
-            final localIsPlaceholder = localName.isEmpty ||
+            final localIsPlaceholder =
+                localName.isEmpty ||
                 isPlaceholderNodeName(localName, local.nodeId ?? '');
 
             if (workerIsPlaceholder && !localIsPlaceholder) {
@@ -1229,6 +1269,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     final byPrefix = <String, NodeDiscoverResponse>{};
+    final directDiscoverPrefixes = <String>{};
     late final StreamSubscription<NodeDiscoverResponse> discoverSub;
     late final StreamSubscription<NodeDiscoverAdvertResponse> advertSub;
     late final StreamSubscription<Uint8List> rawSub;
@@ -1242,6 +1283,7 @@ class AppState extends ChangeNotifier {
         nodeId: response.publicKeyPrefix,
         incomingName: response.name,
       );
+      directDiscoverPrefixes.add(response.publicKeyPrefix);
       byPrefix[response.publicKeyPrefix] = resolvedName.isEmpty
           ? response
           : NodeDiscoverResponse(
@@ -1411,7 +1453,12 @@ class AppState extends ChangeNotifier {
         await Future<void>.delayed(Duration(milliseconds: sliceMs));
       }
       _bleCountdownTimer?.cancel();
-      final appended = _appendDiscoverScansWithOsLocation(byPrefix.values);
+      final persistedDiscoverResponses = byPrefix.values.where(
+        (response) => directDiscoverPrefixes.contains(response.publicKeyPrefix),
+      );
+      final appended = _appendDiscoverScansWithOsLocation(
+        persistedDiscoverResponses,
+      );
       if (appended > 0) {
         await _localStore.saveRawScans(rawScans);
         _rebuildDerivedData();
@@ -1527,7 +1574,17 @@ class AppState extends ChangeNotifier {
       return 0;
     }
     final appended = <RawScan>[];
+    var droppedNonZeroHop = 0;
     for (final response in responses) {
+      if (response.nodeType != 0) {
+        droppedNonZeroHop += 1;
+        _debugLog.info(
+          'scan_store',
+          'Dropping non-zero-hop discover response '
+              'node=${response.publicKeyPrefix} nodeType=${response.nodeType}',
+        );
+        continue;
+      }
       final nodeId8 = safePublicRadioId(response.publicKeyPrefix);
       if (nodeId8 == null || nodeId8.isEmpty) {
         _debugLog.warn(
@@ -1580,6 +1637,12 @@ class AppState extends ChangeNotifier {
         'radio=${scan.radioId ?? 'unknown'} node=${scan.nodeId} '
             'lat=${lat.toStringAsFixed(6)} '
             'lng=${lng.toStringAsFixed(6)} rssi=${scan.rssi?.toStringAsFixed(1)}',
+      );
+    }
+    if (droppedNonZeroHop > 0) {
+      _debugLog.info(
+        'scan_store',
+        'Suppressed $droppedNonZeroHop non-zero-hop discover response(s)',
       );
     }
     if (appended.isNotEmpty) {
@@ -1701,8 +1764,9 @@ class AppState extends ChangeNotifier {
 
     final radioId = _connectedRadioMeshId8();
     if (radioId != null && radioId.isNotEmpty) {
-      final nextContactsByRadio =
-          Map<String, Map<String, String>>.from(settings.contactsByRadioId);
+      final nextContactsByRadio = Map<String, Map<String, String>>.from(
+        settings.contactsByRadioId,
+      );
       nextContactsByRadio[radioId] = contacts;
       await updateSettings(
         settings.copyWith(contactsByRadioId: nextContactsByRadio),
@@ -2062,8 +2126,10 @@ class AppState extends ChangeNotifier {
 
   Future<void> _uploadPendingScans(WorkerApi api, List<RawScan> pending) async {
     final backfilledPending = pending.map((scan) {
-      final senderName =
-          _bestContactNameForId(_radioContactsByPrefix, scan.nodeId ?? '');
+      final senderName = _bestContactNameForId(
+        _radioContactsByPrefix,
+        scan.nodeId ?? '',
+      );
       final currentName = (scan.senderName ?? '').trim();
       if (senderName != null &&
           senderName.isNotEmpty &&
@@ -2191,7 +2257,6 @@ class AppState extends ChangeNotifier {
     }
     return '';
   }
-
 
   void _pruneSelfContact(Map<String, String> contacts) {
     if (contacts.isEmpty) return;
@@ -2784,6 +2849,7 @@ class AppState extends ChangeNotifier {
       final api = WorkerApi(
         AppConfig.deployedWorkerUrl,
         fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+        staticDataBaseUrl: AppConfig.staticDataUrl,
       );
       final challengeRes = await api.requestDeleteChallenge(
         radioId: radioId,
@@ -2931,7 +2997,6 @@ class AppState extends ChangeNotifier {
     );
     return frame;
   }
-
 }
 
 class _SmartScanDecision {

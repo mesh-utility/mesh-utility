@@ -53,6 +53,7 @@ type NodeEntry = {
   snrIn?: number;
 };
 type StoredScanRow = {
+  id?: number;
   radioId: string;
   timestamp: number;
   latitude: number;
@@ -72,6 +73,13 @@ function parseDaysLimit(raw: string | null, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(0, Math.min(parsed, 365));
+}
+
+function parsePositiveInt(raw: string | null, fallback: number, max: number): number {
+  if (raw == null) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(parsed, max));
 }
 
 function parseNodeEntries(raw: string): NodeEntry[] {
@@ -177,8 +185,11 @@ export default {
         });
       }
 
-      // List available history days
-      if (url.pathname === '/history' && request.method === 'GET') {
+      // List available history days (JSON index).
+      if (
+        (url.pathname === '/history' || url.pathname === '/history/index.json') &&
+        request.method === 'GET'
+      ) {
         // Get distinct dates from scans
         const result = await env.DB.prepare(`
           SELECT DISTINCT date(timestamp / 1000, 'unixepoch') as day
@@ -189,12 +200,19 @@ export default {
         const days = (result.results as DayRow[]).map((row) => row.day);
 
         return new Response(JSON.stringify(days), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'public, max-age=120, s-maxage=300',
+          },
         });
       }
 
       // Fast aggregated coverage endpoint for map rendering.
-      if (url.pathname === '/coverage' && request.method === 'GET') {
+      if (
+        (url.pathname === '/coverage' || url.pathname === '/coverage.json') &&
+        request.method === 'GET'
+      ) {
         const maxDays = parseDaysLimit(url.searchParams.get('days'), 7);
         const deadzoneMaxDays = parseDaysLimit(
           url.searchParams.get('deadzoneDays'),
@@ -322,7 +340,11 @@ type CoverageAgg = {
         }));
 
         return new Response(JSON.stringify(zones), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'public, max-age=60, s-maxage=180',
+          },
         });
       }
 
@@ -333,6 +355,10 @@ type CoverageAgg = {
           url.searchParams.get('deadzoneDays'),
           0
         );
+        const pageSize = parsePositiveInt(url.searchParams.get('pageSize'), 2000, 5000);
+        const cursorTimestampRaw = Number.parseInt(url.searchParams.get('cursorTimestamp') || '', 10);
+        const cursorIdRaw = Number.parseInt(url.searchParams.get('cursorId') || '', 10);
+        const hasCursor = Number.isFinite(cursorTimestampRaw) && Number.isFinite(cursorIdRaw);
         
         // Validate date format (YYYY-MM-DD)
         if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
@@ -346,14 +372,33 @@ type CoverageAgg = {
         const dayStart = new Date(day + 'T00:00:00Z').getTime();
         const dayEnd = new Date(day + 'T23:59:59Z').getTime();
 
-        const scans = await env.DB.prepare(`
-          SELECT radioId, timestamp, latitude, longitude, altitude, nodes
-          FROM scans
-          WHERE timestamp >= ? AND timestamp <= ?
-          ORDER BY timestamp ASC
-        `)
-          .bind(dayStart, dayEnd)
-          .all();
+        const scans = hasCursor
+          ? await env.DB.prepare(`
+              SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
+              FROM scans
+              WHERE timestamp >= ? AND timestamp <= ?
+                AND (timestamp > ? OR (timestamp = ? AND id > ?))
+              ORDER BY timestamp ASC, id ASC
+              LIMIT ?
+            `)
+              .bind(
+                dayStart,
+                dayEnd,
+                cursorTimestampRaw,
+                cursorTimestampRaw,
+                cursorIdRaw,
+                pageSize + 1
+              )
+              .all()
+          : await env.DB.prepare(`
+              SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
+              FROM scans
+              WHERE timestamp >= ? AND timestamp <= ?
+              ORDER BY timestamp ASC, id ASC
+              LIMIT ?
+            `)
+              .bind(dayStart, dayEnd, pageSize + 1)
+              .all();
 
         let includeDeadzonesForDay = true;
         if (deadzoneMaxDays > 0) {
@@ -367,8 +412,13 @@ type CoverageAgg = {
           includeDeadzonesForDay = selectedDeadzoneDays.includes(day);
         }
 
+        const pageRows = scans.results as StoredScanRow[];
+        const hasMore = pageRows.length > pageSize;
+        const rowsForPage = hasMore ? pageRows.slice(0, pageSize) : pageRows;
+        const lastRow = rowsForPage.length > 0 ? rowsForPage[rowsForPage.length - 1] : null;
+
         // Convert to NDJSON format
-        const ndjsonLines = (scans.results as StoredScanRow[]).flatMap((row) => {
+        const ndjsonLines = rowsForPage.flatMap((row) => {
           const nodes = parseNodeEntries(row.nodes);
 
           if (nodes.length === 0) {
@@ -413,12 +463,19 @@ type CoverageAgg = {
 
         const ndjson = ndjsonLines.join('\n');
 
-        return new Response(ndjson, {
-          headers: { 
-            ...corsHeaders, 
-            'Content-Type': 'application/x-ndjson',
-          },
-        });
+        const historyHeaders: Record<string, string> = {
+          ...corsHeaders,
+          'Content-Type': 'application/x-ndjson',
+          'Cache-Control': 'public, max-age=120, s-maxage=300',
+          'X-Page-Size': `${pageSize}`,
+          'X-Has-More': hasMore ? '1' : '0',
+        };
+        if (hasMore && lastRow != null) {
+          historyHeaders['X-Next-Cursor-Timestamp'] = `${lastRow.timestamp}`;
+          historyHeaders['X-Next-Cursor-Id'] = `${lastRow.id ?? 0}`;
+        }
+
+        return new Response(ndjson, { headers: historyHeaders });
       }
 
       // Request signed deletion challenge

@@ -23,7 +23,7 @@ class ManualPage extends StatelessWidget {
       icon: Icons.bluetooth,
       title: 'Getting Connected',
       content: [
-        'Open Settings, switch to the Connections tab, scan for devices, select your radio, then tap Connect.',
+        'Open the Connections page in the left sidebar, scan for devices, select your radio, then tap Connect.',
         'Only one app can use Bluetooth with your radio at a time. If you have MeshCore or another app connected, close it first.',
         'After connecting, the header shows the connected radio label and current scan status.',
         'If the BLE link drops, the app will attempt reconnect and report status in logs/header.',
@@ -33,8 +33,8 @@ class ManualPage extends StatelessWidget {
       icon: Icons.radar_outlined,
       title: 'Scanning',
       content: [
-        'With your radio connected, flip the Scan switch to start. The app sends out a discovery signal and listens for any repeaters that respond, measuring how strong and clear each signal is.',
-        'Each scan cycle takes about 20 seconds. Your GPS location (and altitude when available) is recorded with each scan so the map knows exactly where you were.',
+        'With your radio connected, use the Play/Pause control on the map overlay to start or stop scan looping. The app sends a discovery signal and listens for repeaters that respond, measuring signal strength and clarity.',
+        'Each scan cycle duration follows your Scan Interval setting (20 to 300 seconds). Your GPS location (and altitude when available) is recorded with each scan so the map knows where you were.',
         "Smart Scan skips areas you've already covered recently (you pick how many days count as \"recent\" in settings). Dead zones are always re-checked regardless. You can also tap Force Scan to override and scan your current spot right away.",
       ],
     ),
@@ -45,7 +45,7 @@ class ManualPage extends StatelessWidget {
         'The main screen is a map covered with hexagonal zones. Each hex represents a small area where scans were taken, colored by signal quality.',
         'Green means excellent signal. Yellow-green is good. Yellow is fair. Orange is marginal. Red is poor. Dark red means no repeater responded at all (a dead zone). Purple means the signal power is okay but clarity is bad, usually from interference.',
         'Tap any hex to see its details: signal readings, how many scans were taken there, altitude, and which repeaters were heard.',
-        'Use the layer control in the top right corner to switch between Dark, Standard, and Satellite map views. The color legend in the upper left shows what each color means (tap it to expand the full scale).',
+        'Use the layer control in the top right corner to switch between Dark, Standard, and Satellite map views. The color legend sits in the lower-right area of the map (tap it to expand the full scale).',
       ],
     ),
     (
@@ -87,7 +87,7 @@ class ManualPage extends StatelessWidget {
       title: 'Scan History',
       content: [
         'The History page shows a timeline of your recent scans. Each entry includes the signal readings, which repeater responded, your location, altitude, and when the scan happened.',
-        'History combines cloud data from the Worker with local cached scans on your device.',
+        'History combines network-fetched Worker data with local upload-queue scans from this device.',
         'Use the Cloud History setting to control how many online days are loaded on the map (from last 7 days up to all days).',
       ],
     ),
@@ -120,8 +120,8 @@ class ManualPage extends StatelessWidget {
       icon: Icons.cloud_off_outlined,
       title: 'Online / Offline',
       content: [
-        'The app works fully offline after your first visit. Scans, nodes, and coverage data are all stored on your device automatically.',
-        'When you lose internet, everything keeps working. Scan results are saved locally and queued up. When connectivity returns, queued items sync to the server automatically.',
+        'The app supports offline scanning and queueing. Network history/coverage data is fetched as needed, while local upload-queue scans are kept on-device.',
+        'When you lose internet, scanning still works. Local results are queued for upload, and queued items sync automatically when connectivity returns.',
         "You can also force offline mode using the toggle in settings. This is handy if you're on a slow or metered connection and want to batch your uploads for later.",
         'Sync behavior is visible in the header and logs, including skipped syncs in offline mode.',
         'If uploads are delayed, keep the app online and use Sync Now from settings to push queued scans immediately.',

@@ -82,10 +82,7 @@ String? extractSelfInfoDisplayName(String text) {
 
 /// Splits [value] into lowercase tokens of at least 3 characters.
 Set<String> nameTokens(String value) {
-  return value
-      .split(RegExp(r'[^a-z0-9]+'))
-      .where((t) => t.length >= 3)
-      .toSet();
+  return value.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length >= 3).toSet();
 }
 
 /// Whether [name] looks like an auto-generated placeholder ("Unknown", hex ID,

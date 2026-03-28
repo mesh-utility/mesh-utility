@@ -1,10 +1,7 @@
 import 'package:flutter/material.dart';
 
 class ContactsPage extends StatelessWidget {
-  const ContactsPage({
-    super.key,
-    required this.contacts,
-  });
+  const ContactsPage({super.key, required this.contacts});
 
   final Map<String, String> contacts;
 
@@ -12,12 +9,8 @@ class ContactsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     if (contacts.isEmpty) {
       return Scaffold(
-        appBar: AppBar(
-          title: const Text('Contacts'),
-        ),
-        body: const Center(
-          child: Text('No contacts found for this radio.'),
-        ),
+        appBar: AppBar(title: const Text('Contacts')),
+        body: const Center(child: Text('No contacts found for this radio.')),
       );
     }
 
@@ -25,17 +18,12 @@ class ContactsPage extends StatelessWidget {
       ..sort((a, b) => a.value.compareTo(b.value));
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Contacts'),
-      ),
+      appBar: AppBar(title: const Text('Contacts')),
       body: ListView.builder(
         itemCount: entries.length,
         itemBuilder: (context, index) {
           final entry = entries[index];
-          return ListTile(
-            title: Text(entry.value),
-            subtitle: Text(entry.key),
-          );
+          return ListTile(title: Text(entry.value), subtitle: Text(entry.key));
         },
       ),
     );

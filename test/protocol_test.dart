@@ -149,7 +149,7 @@ void main() {
       expect(bytes.length, equals(5));
       expect(bytes[0], equals(104)); // h
       expect(bytes[1], equals(105)); // i
-      expect(bytes[2], equals(0));   // null padding
+      expect(bytes[2], equals(0)); // null padding
     });
 
     test('round-trip: write then read UInt32LE', () {

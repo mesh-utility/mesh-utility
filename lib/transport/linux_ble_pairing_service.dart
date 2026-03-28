@@ -106,6 +106,39 @@ class LinuxBlePairingService implements LinuxBlePairingServiceBase {
   }
 
   @override
+  Future<String?> lookupDeviceDisplayName(
+    String remoteId, {
+    void Function(String message)? onLog,
+  }) async {
+    ProcessResult result;
+    try {
+      result = await Process.run('bluetoothctl', <String>['info', remoteId]);
+    } on ProcessException catch (error) {
+      onLog?.call('bluetoothctl unavailable for name lookup: $error');
+      return null;
+    }
+    if (result.exitCode != 0) return null;
+    final output = (result.stdout as String).trim();
+    if (output.isEmpty) return null;
+
+    String? extractField(String key) {
+      final re = RegExp('^\\s*$key:\\s*(.+?)\\s*\$', multiLine: true);
+      final match = re.firstMatch(output);
+      if (match == null) return null;
+      final value = match.group(1)?.trim() ?? '';
+      if (value.isEmpty) return null;
+      return value;
+    }
+
+    final alias = extractField('Alias');
+    final name = extractField('Name');
+    final candidate = (alias ?? name ?? '').trim();
+    if (candidate.isEmpty) return null;
+    if (candidate.toUpperCase() == remoteId.toUpperCase()) return null;
+    return candidate;
+  }
+
+  @override
   Future<bool> isPairedAndTrusted(String remoteId) async {
     ProcessResult result;
     try {

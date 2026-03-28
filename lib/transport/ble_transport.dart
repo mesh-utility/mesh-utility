@@ -41,6 +41,8 @@ class BleTransport extends Transport {
   StreamSubscription<Uint8List>? _valueSubscription;
   StreamSubscription<BleDevice>? _scanSubscription;
   StreamSubscription<bool>? _connectionSubscription;
+  final Set<String> _scanNameLookupPending = <String>{};
+  final Map<String, String> _scanResolvedNames = <String, String>{};
   bool _scanInProgress = false;
   bool _manualDisconnectInProgress = false;
   bool _unexpectedResetInProgress = false;
@@ -571,12 +573,19 @@ class BleTransport extends Transport {
         return 0;
       }
       final seenName = (device.name ?? device.rawName ?? '').trim();
-      onScanResult?.call(device.deviceId, seenName);
-      final key = '${device.deviceId}|$seenName';
+      final cachedResolvedName = _scanResolvedNames[device.deviceId] ?? '';
+      final emittedName = seenName.isNotEmpty ? seenName : cachedResolvedName;
+      if (_isLinuxDesktop &&
+          emittedName.isEmpty &&
+          _scanNameLookupPending.add(device.deviceId)) {
+        unawaited(_resolveLinuxScanDeviceName(device.deviceId));
+      }
+      onScanResult?.call(device.deviceId, emittedName);
+      final key = '${device.deviceId}|$emittedName';
       if (seenSession.add(key)) {
         _debugLog.debug(
           'ble_scan',
-          'Seen meshcore device id=${device.deviceId} name=$seenName',
+          'Seen meshcore device id=${device.deviceId} name=$emittedName',
         );
       }
       return seenMeshcoreIds.add(device.deviceId) ? 1 : 0;
@@ -662,6 +671,27 @@ class BleTransport extends Transport {
     }
   }
 
+  Future<void> _resolveLinuxScanDeviceName(String deviceId) async {
+    try {
+      final resolved = await _linuxPairingService.lookupDeviceDisplayName(
+        deviceId,
+        onLog: (m) => _debugLog.debug('linux_ble_pairing', m),
+      );
+      final name = (resolved ?? '').trim();
+      if (name.isEmpty) return;
+      _scanResolvedNames[deviceId] = name;
+      onScanResult?.call(deviceId, name);
+      _debugLog.debug(
+        'ble_scan',
+        'Resolved Linux BLE name id=$deviceId name=$name',
+      );
+    } catch (e) {
+      _debugLog.debug('ble_scan', 'Linux BLE name resolution failed: $e');
+    } finally {
+      _scanNameLookupPending.remove(deviceId);
+    }
+  }
+
   bool _hasMeshCoreService(BleDevice device) {
     if (kIsWeb) {
       // Web picker already applies service filters in requestDevice().
@@ -714,6 +744,15 @@ class BleTransport extends Transport {
     return _linuxPairingService.connectDevice(
       deviceId,
       onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+    );
+  }
+
+  Future<String?> resolveDeviceDisplayName(String deviceId) async {
+    final id = deviceId.trim();
+    if (id.isEmpty || !_isLinuxDesktop) return null;
+    return _linuxPairingService.lookupDeviceDisplayName(
+      id,
+      onLog: (m) => _debugLog.debug('linux_ble_pairing', m),
     );
   }
 

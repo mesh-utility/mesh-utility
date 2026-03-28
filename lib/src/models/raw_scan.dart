@@ -34,7 +34,7 @@ class RawScan {
   DateTime get effectiveTimestamp => receivedAt ?? timestamp ?? DateTime.now();
   bool get uploadEligible => !downloadedFromWorker;
 
-  RawScan copyWith({bool? downloadedFromWorker}) {
+  RawScan copyWith({String? senderName, bool? downloadedFromWorker}) {
     return RawScan(
       observerId: observerId,
       nodeId: nodeId,
@@ -46,7 +46,7 @@ class RawScan {
       altitude: altitude,
       timestamp: timestamp,
       receivedAt: receivedAt,
-      senderName: senderName,
+      senderName: senderName ?? this.senderName,
       receiverName: receiverName,
       radioId: radioId,
       downloadedFromWorker: downloadedFromWorker ?? this.downloadedFromWorker,

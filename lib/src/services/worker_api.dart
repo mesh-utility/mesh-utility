@@ -7,17 +7,19 @@ import 'package:mesh_utility/src/models/raw_scan.dart';
 /// Converts an untyped [Map] to `Map<String, dynamic>` without throwing on
 /// non-string keys — unknown key types are stringified.
 Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
-  return {
-    for (final e in m.entries) e.key.toString(): e.value,
-  };
+  return {for (final e in m.entries) e.key.toString(): e.value};
 }
 
 class WorkerApi {
-  WorkerApi(this.baseUrl, {String? fallbackBaseUrl})
-    : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl);
+  WorkerApi(this.baseUrl, {String? fallbackBaseUrl, String? staticDataBaseUrl})
+    : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl),
+      _staticDataBaseUrl = _normalizeStaticBaseUrl(staticDataBaseUrl);
 
   final String baseUrl;
   final List<String> _baseUrls;
+  final String? _staticDataBaseUrl;
+  static const int _historyPageSize = 2000;
+  bool _staticHistoryReady = false;
   DateTime? _lastServerDateUtc;
   DateTime? get lastServerDateUtc => _lastServerDateUtc;
 
@@ -34,11 +36,25 @@ class WorkerApi {
     return values.toList(growable: false);
   }
 
+  static String? _normalizeStaticBaseUrl(String? value) {
+    final trimmed = (value ?? '').trim();
+    if (trimmed.isEmpty) return null;
+    return trimmed.endsWith('/')
+        ? trimmed.substring(0, trimmed.length - 1)
+        : trimmed;
+  }
+
   Uri _uri(String base, String path, [Map<String, String>? query]) {
     final normalized = base.endsWith('/')
         ? base.substring(0, base.length - 1)
         : base;
     return Uri.parse('$normalized$path').replace(queryParameters: query);
+  }
+
+  Uri? _staticUri(String path, [Map<String, String>? query]) {
+    final base = _staticDataBaseUrl;
+    if (base == null) return null;
+    return Uri.parse('$base$path').replace(queryParameters: query);
   }
 
   String _decodeUtf8(http.Response response) {
@@ -93,6 +109,27 @@ class WorkerApi {
     throw Exception('Failed request $path: $lastError');
   }
 
+  Future<http.Response> _getStatic(
+    String path, {
+    Map<String, String>? query,
+    required bool Function(http.Response response) accept,
+  }) async {
+    final uri = _staticUri(path, query);
+    if (uri == null) {
+      throw Exception('Static data URL not configured');
+    }
+    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+    _captureServerDate(response);
+    if (!accept(response)) {
+      throw Exception(
+        'Static request $path rejected: '
+        'status=${response.statusCode} '
+        'contentType=${response.headers['content-type'] ?? 'unknown'}',
+      );
+    }
+    return response;
+  }
+
   Future<http.Response> _postWithFallback(
     String path, {
     Map<String, String>? query,
@@ -127,6 +164,30 @@ class WorkerApi {
   }
 
   Future<List<String>> fetchHistoryDays() async {
+    if (_staticDataBaseUrl != null) {
+      try {
+        final staticResponse = await _getStatic(
+          '/history/index.json',
+          accept: (response) =>
+              response.statusCode == 200 && _looksLikeJsonResponse(response),
+        );
+        final decoded = jsonDecode(_decodeUtf8(staticResponse));
+        if (decoded is List) {
+          _staticHistoryReady = true;
+          return decoded.map((e) => e.toString()).toList(growable: false);
+        }
+        if (decoded is Map && decoded['days'] is List) {
+          _staticHistoryReady = true;
+          return (decoded['days'] as List)
+              .map((e) => e.toString())
+              .toList(growable: false);
+        }
+      } catch (_) {
+        _staticHistoryReady = false;
+      }
+    }
+    _staticHistoryReady = false;
+
     final response = await _getWithFallback(
       '/history',
       accept: (response) =>
@@ -152,7 +213,7 @@ class WorkerApi {
         ? historyLimit
         : deadzoneLimit;
     final selectedDays = days.take(fetchCount).toList(growable: false);
-    final viewerRadioId = _normalizeRadioId8(connectedRadioId);
+    _normalizeRadioId8(connectedRadioId);
 
     final results = <RawScan>[];
     for (var i = 0; i < selectedDays.length; i++) {
@@ -160,34 +221,13 @@ class WorkerApi {
       final keepHistory = i < historyLimit;
       final keepDeadzones = i < deadzoneLimit;
       try {
-        final query = <String, String>{
-          if (deadzoneDays >= 0) 'deadzoneDays': '$deadzoneDays',
-        };
-        if (viewerRadioId != null) {
-          query['viewerRadioId'] = viewerRadioId;
-        }
-        final response = await _getWithFallback(
-          '/history/$day.ndjson',
-          query: query,
-          accept: (response) =>
-              response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
+        final dayScans = await _fetchRawScansForDay(
+          day: day,
+          deadzoneDays: deadzoneDays,
         );
-        if (response.statusCode != 200) continue;
-
-        final lines = const LineSplitter().convert(_decodeUtf8(response));
-        for (final line in lines) {
-          if (line.trim().isEmpty) continue;
-          final decoded = jsonDecode(line);
-          if (decoded is Map<String, dynamic>) {
-            final scan = RawScan.fromJson(decoded);
-            if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
-              results.add(scan);
-            }
-          } else if (decoded is Map) {
-            final scan = RawScan.fromJson(_safeMap(decoded));
-            if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
-              results.add(scan);
-            }
+        for (final scan in dayScans) {
+          if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
+            results.add(scan);
           }
         }
       } catch (_) {
@@ -203,14 +243,34 @@ class WorkerApi {
     required int deadzoneDays,
     String? connectedRadioId,
   }) async {
-    final viewerRadioId = _normalizeRadioId8(connectedRadioId);
+    _normalizeRadioId8(connectedRadioId);
     final query = <String, String>{
       'days': historyDays.toString(),
       'deadzoneDays': deadzoneDays.toString(),
     };
-    if (viewerRadioId != null) {
-      query['viewerRadioId'] = viewerRadioId;
+    if (_staticHistoryReady) {
+      try {
+        final staticResponse = await _getStatic(
+          '/coverage.json',
+          query: query,
+          accept: (response) =>
+              response.statusCode == 200 && _looksLikeJsonResponse(response),
+        );
+        final decoded = jsonDecode(_decodeUtf8(staticResponse));
+        if (decoded is List) {
+          return decoded
+              .map(
+                (e) => e is Map<String, dynamic>
+                    ? CoverageZone.fromJson(e)
+                    : CoverageZone.fromJson(_safeMap(e as Map)),
+              )
+              .toList(growable: false);
+        }
+      } catch (_) {
+        // Fall through to dynamic API.
+      }
     }
+
     final response = await _getWithFallback(
       '/coverage',
       query: query,
@@ -246,6 +306,100 @@ class WorkerApi {
   bool _isDeadLikeScan(RawScan scan) {
     final nodeId = (scan.nodeId ?? '').trim();
     return nodeId.isEmpty || scan.rssi == null;
+  }
+
+  Future<List<RawScan>> _fetchRawScansForDay({
+    required String day,
+    required int deadzoneDays,
+  }) async {
+    if (_staticDataBaseUrl != null) {
+      try {
+        final staticResponse = await _getStatic(
+          '/history/$day.ndjson',
+          accept: (response) =>
+              response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
+        );
+        return _parseRawScansNdjson(_decodeUtf8(staticResponse));
+      } catch (_) {
+        // Fall through to dynamic API for this day.
+      }
+    }
+
+    final query = <String, String>{
+      if (deadzoneDays >= 0) 'deadzoneDays': '$deadzoneDays',
+    };
+    final all = <RawScan>[];
+    int? cursorTimestamp;
+    int? cursorId;
+    for (var page = 0; page < 200; page++) {
+      final pagedQuery = <String, String>{
+        ...query,
+        'pageSize': '$_historyPageSize',
+      };
+      if (cursorTimestamp != null && cursorId != null) {
+        pagedQuery['cursorTimestamp'] = '$cursorTimestamp';
+        pagedQuery['cursorId'] = '$cursorId';
+      }
+      final response = await _getWithFallback(
+        '/history/$day.ndjson',
+        query: pagedQuery,
+        accept: (response) =>
+            response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
+      );
+      if (response.statusCode != 200) break;
+      all.addAll(_parseRawScansNdjson(_decodeUtf8(response)));
+      final hasMore = (response.headers['x-has-more'] ?? '').trim() == '1';
+      if (!hasMore) break;
+      cursorTimestamp = int.tryParse(
+        (response.headers['x-next-cursor-timestamp'] ?? '').trim(),
+      );
+      cursorId = int.tryParse(
+        (response.headers['x-next-cursor-id'] ?? '').trim(),
+      );
+      if (cursorTimestamp == null || cursorId == null) break;
+    }
+    return all;
+  }
+
+  List<RawScan> _parseRawScansNdjson(String payload) {
+    final parsed = <RawScan>[];
+    final trimmed = payload.trim();
+    if (trimmed.isEmpty) return parsed;
+
+    // Accept both NDJSON and JSON array payloads for compatibility.
+    if (trimmed.startsWith('[')) {
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is List) {
+          for (final row in decoded) {
+            if (row is Map<String, dynamic>) {
+              parsed.add(RawScan.fromJson(row));
+            } else if (row is Map) {
+              parsed.add(RawScan.fromJson(_safeMap(row)));
+            }
+          }
+          return parsed;
+        }
+      } catch (_) {
+        return parsed;
+      }
+    }
+
+    final lines = const LineSplitter().convert(payload);
+    for (final line in lines) {
+      if (line.trim().isEmpty) continue;
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is Map<String, dynamic>) {
+          parsed.add(RawScan.fromJson(decoded));
+        } else if (decoded is Map) {
+          parsed.add(RawScan.fromJson(_safeMap(decoded)));
+        }
+      } catch (_) {
+        // Skip malformed rows instead of failing full sync.
+      }
+    }
+    return parsed;
   }
 
   Future<int> uploadScans(List<Map<String, dynamic>> scans) async {
