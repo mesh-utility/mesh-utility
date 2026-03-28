@@ -4,6 +4,14 @@ import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 
+typedef HttpGetFn = Future<http.Response> Function(Uri uri);
+typedef HttpPostFn =
+    Future<http.Response> Function(
+      Uri uri, {
+      Map<String, String>? headers,
+      Object? body,
+    });
+
 /// Converts an untyped [Map] to `Map<String, dynamic>` without throwing on
 /// non-string keys — unknown key types are stringified.
 Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
@@ -11,13 +19,22 @@ Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
 }
 
 class WorkerApi {
-  WorkerApi(this.baseUrl, {String? fallbackBaseUrl, String? staticDataBaseUrl})
-    : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl),
-      _staticDataBaseUrl = _normalizeStaticBaseUrl(staticDataBaseUrl);
+  WorkerApi(
+    this.baseUrl, {
+    String? fallbackBaseUrl,
+    String? staticDataBaseUrl,
+    HttpGetFn? httpGet,
+    HttpPostFn? httpPost,
+  }) : _baseUrls = _buildBaseUrls(baseUrl, fallbackBaseUrl),
+       _staticDataBaseUrl = _normalizeStaticBaseUrl(staticDataBaseUrl),
+       _httpGet = httpGet ?? http.get,
+       _httpPost = httpPost ?? http.post;
 
   final String baseUrl;
   final List<String> _baseUrls;
   final String? _staticDataBaseUrl;
+  final HttpGetFn _httpGet;
+  final HttpPostFn _httpPost;
   static const int _historyPageSize = 2000;
   bool _staticHistoryReady = false;
   DateTime? _lastServerDateUtc;
@@ -91,7 +108,7 @@ class WorkerApi {
     http.Response? lastResponse;
     for (final base in _baseUrls) {
       try {
-        final response = await http.get(_uri(base, path, query));
+        final response = await _httpGet(_uri(base, path, query));
         _captureServerDate(response);
         if (accept(response)) return response;
         lastResponse = response;
@@ -118,7 +135,7 @@ class WorkerApi {
     if (uri == null) {
       throw Exception('Static data URL not configured');
     }
-    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+    final response = await _httpGet(uri).timeout(const Duration(seconds: 5));
     _captureServerDate(response);
     if (!accept(response)) {
       throw Exception(
@@ -141,7 +158,7 @@ class WorkerApi {
     http.Response? lastResponse;
     for (final base in _baseUrls) {
       try {
-        final response = await http.post(
+        final response = await _httpPost(
           _uri(base, path, query),
           headers: headers,
           body: body,

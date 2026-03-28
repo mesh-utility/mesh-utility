@@ -173,4 +173,90 @@ void main() {
       expect(r.readUInt16LE(), equals(1000));
     });
   });
+
+  group('Node discover parsing', () {
+    test('parseNodeDiscoverResponse parses control frame fields', () {
+      final frame = Uint8List.fromList([
+        pushCodeControlData,
+        0xF4, // snr=-3.0
+        0xC1, // rssi=-63
+        0x00, // reserved
+        controlNodeDiscoverRespMask | 0x02, // payload type + nodeType
+        0x30, // snrIn=12.0
+        0x71,
+        0x8D,
+        0x34,
+        0x9F, // tag
+        // pubkey prefix (first 8)
+        0x10,
+        0x52,
+        0xA9,
+        0x30,
+        0xAA,
+        0xBB,
+        0xCC,
+        0xDD,
+      ]);
+
+      final parsed = parseNodeDiscoverResponse(frame);
+      expect(parsed, isNotNull);
+      expect(parsed!.rssi, equals(-63));
+      expect(parsed.snr, equals(-3.0));
+      expect(parsed.snrIn, equals(12.0));
+      expect(parsed.nodeType, equals(2));
+      expect(parsed.tagHex, equals('718d349f'));
+      expect(parsed.publicKeyPrefix, equals('1052A930AABBCCDD'));
+    });
+
+    test('parseNodeDiscoverAdvertResponse parses compact advert (0x8F)', () {
+      final payload = <int>[0x10, 0x52, 0xA9, 0x30, 0xAA, 0xBB, 0xCC, 0xDD];
+      final frame = Uint8List.fromList([
+        pushCodeAdvertCompact,
+        0x00,
+        0x00,
+        payload.length,
+        ...payload,
+      ]);
+
+      final parsed = parseNodeDiscoverAdvertResponse(frame);
+      expect(parsed, isNotNull);
+      expect(parsed!.publicKeyPrefix, equals('1052A930AABBCCDD'));
+      expect(parsed.name, equals(''));
+      expect(parsed.nodeType, equals(0));
+    });
+
+    test('parseNodeDiscoverAdvertResponse parses advert name from payload', () {
+      final payload = Uint8List(132);
+      payload.setAll(0, const [0x10, 0x52, 0xA9, 0x30, 0xAA, 0xBB, 0xCC, 0xDD]);
+      payload[32] = advTypeRepeater;
+      payload.setAll(99, 'KD3CGK TDECK'.codeUnits);
+
+      final frame = Uint8List.fromList([
+        pushCodeNewAdvert,
+        0x00,
+        0x00,
+        payload.length,
+        ...payload,
+      ]);
+
+      final parsed = parseNodeDiscoverAdvertResponse(frame);
+      expect(parsed, isNotNull);
+      expect(parsed!.publicKeyPrefix, equals('1052A930AABBCCDD'));
+      expect(parsed.name, equals('KD3CGK TDECK'));
+      expect(parsed.nodeType, equals(advTypeRepeater));
+    });
+
+    test('parseNodeDiscoverAdvertResponse ignores RX log frame (0x88)', () {
+      final frame = Uint8List.fromList([
+        pushCodeLogRxData,
+        0x30,
+        0xBF,
+        0x2E,
+        0x00,
+        0x92,
+      ]);
+
+      expect(parseNodeDiscoverAdvertResponse(frame), isNull);
+    });
+  });
 }
