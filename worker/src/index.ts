@@ -478,6 +478,32 @@ type CoverageAgg = {
         return new Response(ndjson, { headers: historyHeaders });
       }
 
+      if (url.pathname === '/maintenance/deadzones/cleanup' && request.method === 'POST') {
+        const body = await request.json() as { hexes?: unknown };
+        if (!Array.isArray(body.hexes)) {
+          return new Response(JSON.stringify({ error: 'hexes array required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const requestedHexes = body.hexes
+          .map((value) => typeof value === 'string' ? value.trim() : '')
+          .filter((value) => value.length > 0);
+        const uniqueHexes = Array.from(new Set(requestedHexes));
+        if (uniqueHexes.length === 0) {
+          return new Response(JSON.stringify({ deleted: 0, hexes: 0 }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const deleted = await cleanupDeadzonesForHexes(env.DB, uniqueHexes);
+        return new Response(
+          JSON.stringify({ deleted, hexes: uniqueHexes.length }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+      }
+
       // Request signed deletion challenge
       if (url.pathname === '/delete/challenge' && request.method === 'POST') {
         const body = await request.json() as { radioId?: string; publicKey?: string };
@@ -691,6 +717,93 @@ function getHexVertices(centerLat: number, centerLng: number): [number, number][
     vertices.push([lat, lng]);
   }
   return vertices;
+}
+
+type CleanupRow = {
+  id?: number;
+  latitude: number;
+  longitude: number;
+  nodes: string;
+};
+
+async function cleanupDeadzonesForHexes(
+  db: D1Database,
+  hexes: string[]
+): Promise<number> {
+  let totalDeleted = 0;
+  const searchRange = 0.01;
+  for (const key of hexes) {
+    const parsed = parseHexKey(key);
+    if (!parsed) continue;
+    const rows = await db.prepare(`
+      SELECT id, latitude, longitude, nodes
+      FROM scans
+      WHERE latitude BETWEEN ? AND ?
+        AND longitude BETWEEN ? AND ?
+    `)
+      .bind(
+        parsed.lat - searchRange,
+        parsed.lat + searchRange,
+        parsed.lng - searchRange,
+        parsed.lng + searchRange
+      )
+      .all();
+    const candidates = rows.results as CleanupRow[];
+    let hasSuccess = false;
+    const deadzoneRowIds: number[] = [];
+    for (const row of candidates) {
+      const rowHex = snappedHexKey(row.latitude, row.longitude);
+      if (rowHex !== key) continue;
+      const nodes = parseNodeEntries(row.nodes);
+      if (hasSuccessfulNodes(nodes)) {
+        hasSuccess = true;
+        continue;
+      }
+      if (typeof row.id === 'number') {
+        deadzoneRowIds.push(row.id);
+      }
+    }
+    if (!hasSuccess || deadzoneRowIds.length === 0) {
+      continue;
+    }
+    for (const id of deadzoneRowIds) {
+      const deleteRes = await db.prepare('DELETE FROM scans WHERE id = ?')
+        .bind(id)
+        .run();
+      totalDeleted += Number((deleteRes as D1RunResultLike)?.meta?.changes || 0);
+    }
+  }
+  return totalDeleted;
+}
+
+function parseHexKey(value: string): { lat: number; lng: number } | null {
+  const parts = value.split(':');
+  if (parts.length !== 2) return null;
+  const lat = Number(parts[0]);
+  const lng = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  return { lat, lng };
+}
+
+function snappedHexKey(lat: number, lng: number): string {
+  const { snapLat, snapLng } = snapToHexGrid(lat, lng);
+  return `${snapLat.toFixed(6)}:${snapLng.toFixed(6)}`;
+}
+
+function hasSuccessfulNodes(nodes: NodeEntry[]): boolean {
+  for (const node of nodes) {
+    if (!node) continue;
+    if (typeof node.nodeId !== 'string' || node.nodeId.trim().length === 0) {
+      continue;
+    }
+    if (typeof node.rssi !== 'number' || !Number.isFinite(node.rssi)) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function bytesToHex(bytes: Uint8Array): string {

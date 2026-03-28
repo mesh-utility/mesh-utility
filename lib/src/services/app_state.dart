@@ -500,6 +500,83 @@ class AppState extends ChangeNotifier {
     return parts.join(' · ');
   }
 
+  String _frameCodeName(int code) {
+    switch (code) {
+      case respCodeOk:
+        return 'respCodeOk';
+      case respCodeErr:
+        return 'respCodeErr';
+      case respCodeContactsStart:
+        return 'respCodeContactsStart';
+      case respCodeContact:
+        return 'respCodeContact';
+      case respCodeEndOfContacts:
+        return 'respCodeEndOfContacts';
+      case respCodeSelfInfo:
+        return 'respCodeSelfInfo';
+      case respCodeSent:
+        return 'respCodeSent';
+      case respCodeContactMsgRecv:
+        return 'respCodeContactMsgRecv';
+      case respCodeChannelMsgRecv:
+        return 'respCodeChannelMsgRecv';
+      case respCodeCurrTime:
+        return 'respCodeCurrTime';
+      case respCodeNoMoreMessages:
+        return 'respCodeNoMoreMessages';
+      case respCodeExportContact:
+        return 'respCodeExportContact';
+      case respCodeBattAndStorage:
+        return 'respCodeBattAndStorage';
+      case respCodeDeviceInfo:
+        return 'respCodeDeviceInfo';
+      case respCodeContactMsgRecvV3:
+        return 'respCodeContactMsgRecvV3';
+      case respCodeChannelMsgRecvV3:
+        return 'respCodeChannelMsgRecvV3';
+      case respCodeChannelInfo:
+        return 'respCodeChannelInfo';
+      case respCodeSignStart:
+        return 'respCodeSignStart';
+      case respCodeSignature:
+        return 'respCodeSignature';
+      case respCodeCustomVars:
+        return 'respCodeCustomVars';
+      case respCodeAutoAddConfig:
+        return 'respCodeAutoAddConfig';
+      case pushCodeAdvert:
+        return 'pushCodeAdvert';
+      case pushCodePathUpdated:
+        return 'pushCodePathUpdated';
+      case pushCodeSendConfirmed:
+        return 'pushCodeSendConfirmed';
+      case pushCodeMsgWaiting:
+        return 'pushCodeMsgWaiting';
+      case pushCodeLoginSuccess:
+        return 'pushCodeLoginSuccess';
+      case pushCodeLoginFail:
+        return 'pushCodeLoginFail';
+      case pushCodeStatusResponse:
+        return 'pushCodeStatusResponse';
+      case pushCodeLogRxData:
+        return 'pushCodeLogRxData';
+      case pushCodeTraceData:
+        return 'pushCodeTraceData';
+      case pushCodeNewAdvert:
+        return 'pushCodeNewAdvert';
+      case pushCodeTelemetryResponse:
+        return 'pushCodeTelemetryResponse';
+      case pushCodeBinaryResponse:
+        return 'pushCodeBinaryResponse';
+      case pushCodeControlData:
+        return 'pushCodeControlData';
+      case pushCodeAdvertCompact:
+        return 'pushCodeAdvertCompact';
+      default:
+        return code < 0 ? 'empty_frame' : 'unknown';
+    }
+  }
+
   bool _cacheAdvertName({
     required String nodeId,
     required String name,
@@ -822,10 +899,14 @@ class AppState extends ChangeNotifier {
       final normalizedWorkerScans = normalizeRawScans(
         sanitizeDeadzoneRadioIds(workerScans, connectedRadioId),
       );
-      final workerScansWithPrecedence = _applyDeadzoneSuccessPrecedence(
+      final workerPrecedence = _applyDeadzoneSuccessPrecedenceDetailed(
         normalizedWorkerScans,
         source: 'worker',
       );
+      final workerScansWithPrecedence = workerPrecedence.scans;
+      if (workerPrecedence.suppressedHexes.isNotEmpty) {
+        await _cleanupWorkerDeadzoneRows(api, workerPrecedence.suppressedHexes);
+      }
 
       if (workerScansWithPrecedence.isNotEmpty) {
         _debugLog.info(
@@ -1273,7 +1354,6 @@ class AppState extends ChangeNotifier {
     late final StreamSubscription<NodeDiscoverResponse> discoverSub;
     late final StreamSubscription<NodeDiscoverAdvertResponse> advertSub;
     late final StreamSubscription<Uint8List> rawSub;
-    var unknownFrameLogs = 0;
     DateTime? firstResponseAt;
     DateTime? lastResponseAt;
     const autoScanQuietWindow = Duration(milliseconds: 1800);
@@ -1366,17 +1446,26 @@ class AppState extends ChangeNotifier {
       if (parsedControl != null || parsedAdvert != null) {
         return;
       }
-      if (unknownFrameLogs >= 20) return;
-      unknownFrameLogs += 1;
       final code = frame.isNotEmpty ? frame.first : -1;
+      final codeName = _frameCodeName(code);
+      if (code == respCodeOk) {
+        _debugLog.debug(
+          'ble_discover_diag',
+          'node_discover ack received ($codeName)',
+        );
+        return;
+      }
       final headBytes = frame.length > 12 ? frame.sublist(0, 12) : frame;
       final headHex = headBytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
       _debugLog.debug(
         'ble_discover_diag',
-        'non-node-discover frame code=0x${code.toRadixString(16)} '
-            '(unnamed) len=${frame.length} head=$headHex',
+        code == pushCodeLogRxData
+            ? 'RX frame code=0x${code.toRadixString(16)} '
+                  '($codeName) len=${frame.length} head=$headHex'
+            : 'RX activity frame code=0x${code.toRadixString(16)} '
+                  '($codeName) len=${frame.length} head=$headHex',
       );
     });
 
@@ -1409,7 +1498,7 @@ class AppState extends ChangeNotifier {
         if (byPrefix.isEmpty && !now.isBefore(initialWaitDeadline)) {
           _debugLog.info(
             'ble_discover',
-            'No responses after initial 10s wait; assuming dead zone and finishing early',
+            'No responses after initial 10s wait; finishing early',
           );
           break;
         }
@@ -1574,17 +1663,7 @@ class AppState extends ChangeNotifier {
       return 0;
     }
     final appended = <RawScan>[];
-    var droppedNonZeroHop = 0;
     for (final response in responses) {
-      if (response.nodeType != 0) {
-        droppedNonZeroHop += 1;
-        _debugLog.info(
-          'scan_store',
-          'Dropping non-zero-hop discover response '
-              'node=${response.publicKeyPrefix} nodeType=${response.nodeType}',
-        );
-        continue;
-      }
       final nodeId8 = safePublicRadioId(response.publicKeyPrefix);
       if (nodeId8 == null || nodeId8.isEmpty) {
         _debugLog.warn(
@@ -1639,12 +1718,6 @@ class AppState extends ChangeNotifier {
             'lng=${lng.toStringAsFixed(6)} rssi=${scan.rssi?.toStringAsFixed(1)}',
       );
     }
-    if (droppedNonZeroHop > 0) {
-      _debugLog.info(
-        'scan_store',
-        'Suppressed $droppedNonZeroHop non-zero-hop discover response(s)',
-      );
-    }
     if (appended.isNotEmpty) {
       rawScans = [...appended, ...rawScans];
       final beforeDelete = rawScans.length;
@@ -1672,6 +1745,13 @@ class AppState extends ChangeNotifier {
       _debugLog.warn(
         'dead_zone',
         'No OS location fix; skipping dead-zone scan',
+      );
+      return false;
+    }
+    if (_hexHasSuccessfulCoverage(lat, lng)) {
+      _debugLog.info(
+        'dead_zone',
+        'Skipping dead-zone scan; hex already has successful coverage',
       );
       return false;
     }
@@ -1704,27 +1784,21 @@ class AppState extends ChangeNotifier {
       ),
     );
     rawScans = [scan, ...rawScans];
-    // Suppress the new dead-zone row if a successful scan already covers
-    // the same hex (e.g. from a previous discover cycle).
-    final beforeDelete = rawScans.length;
-    rawScans = _applyDeadzoneSuccessPrecedence(
-      rawScans,
-      source: 'dead_zone_local',
-    );
-    final deleted = beforeDelete - rawScans.length;
-    if (deleted > 0) {
-      _debugLog.info(
-        'dead_zone',
-        'Suppressed dead-zone scan; hex already has successful coverage',
-      );
-      return false;
-    }
     _debugLog.info(
       'dead_zone',
       'Recorded dead-zone scan radio=$connectedMeshId8 '
           'lat=${lat.toStringAsFixed(6)} lng=${lng.toStringAsFixed(6)}',
     );
     return true;
+  }
+
+  bool _hexHasSuccessfulCoverage(double lat, double lng) {
+    final zoneId = hexKey(lat, lng);
+    for (final scan in rawScans) {
+      if (hexKey(scan.latitude, scan.longitude) != zoneId) continue;
+      if (!isDeadLikeScan(scan)) return true;
+    }
+    return false;
   }
 
   Future<void> _syncContactsAndBackfillNames() async {
@@ -2058,25 +2132,27 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  List<RawScan> _applyDeadzoneSuccessPrecedence(
+  _DeadzonePrecedenceResult _applyDeadzoneSuccessPrecedenceDetailed(
     List<RawScan> scans, {
     required String source,
   }) {
-    if (scans.isEmpty) return scans;
+    if (scans.isEmpty) return const _DeadzonePrecedenceResult([]);
     final hexesWithSuccess = <String>{};
     for (final scan in scans) {
       if (isSuccessfulScan(scan)) {
         hexesWithSuccess.add(hexKey(scan.latitude, scan.longitude));
       }
     }
-    if (hexesWithSuccess.isEmpty) return scans;
+    if (hexesWithSuccess.isEmpty) return _DeadzonePrecedenceResult(scans);
 
     var suppressed = 0;
+    final suppressedHexes = <String>{};
     final filtered = <RawScan>[];
     for (final scan in scans) {
       final hex = hexKey(scan.latitude, scan.longitude);
       if (isDeadLikeScan(scan) && hexesWithSuccess.contains(hex)) {
         suppressed += 1;
+        suppressedHexes.add(hex);
         continue;
       }
       filtered.add(scan);
@@ -2087,7 +2163,34 @@ class AppState extends ChangeNotifier {
         'Suppressed $suppressed deadzone row(s) in hexes with successful scans ($source)',
       );
     }
-    return filtered;
+    return _DeadzonePrecedenceResult(
+      filtered,
+      suppressedHexes: suppressedHexes,
+    );
+  }
+
+  List<RawScan> _applyDeadzoneSuccessPrecedence(
+    List<RawScan> scans, {
+    required String source,
+  }) {
+    return _applyDeadzoneSuccessPrecedenceDetailed(scans, source: source).scans;
+  }
+
+  Future<void> _cleanupWorkerDeadzoneRows(
+    WorkerApi api,
+    Set<String> hexes,
+  ) async {
+    try {
+      final deleted = await api.cleanupDeadzoneRows(hexes);
+      if (deleted > 0) {
+        _debugLog.info(
+          'sync',
+          'Deleted $deleted worker deadzone row(s) for ${hexes.length} successful hex(es)',
+        );
+      }
+    } catch (e) {
+      _debugLog.warn('sync', 'Worker deadzone cleanup failed: $e');
+    }
   }
 
   List<CoverageZone> _applyZoneDeadzonePrecedence(
@@ -3009,4 +3112,12 @@ class _SmartScanDecision {
   final bool skip;
   final String reason;
   final String? zoneId;
+}
+
+class _DeadzonePrecedenceResult {
+  const _DeadzonePrecedenceResult(this.scans, {Set<String>? suppressedHexes})
+    : suppressedHexes = suppressedHexes ?? const <String>{};
+
+  final List<RawScan> scans;
+  final Set<String> suppressedHexes;
 }

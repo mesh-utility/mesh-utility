@@ -262,6 +262,7 @@ const int pushCodeNewAdvert = 0x8A;
 const int pushCodeTelemetryResponse = 0x8B;
 const int pushCodeBinaryResponse = 0x8C;
 const int pushCodeControlData = 0x8E;
+const int pushCodeAdvertCompact = 0x8F;
 
 // Contact/advertisement types
 const int advTypeChat = 1;
@@ -1153,16 +1154,28 @@ NodeDiscoverResponse? parseNodeDiscoverResponse(Uint8List frame) {
 
 NodeDiscoverAdvertResponse? parseNodeDiscoverAdvertResponse(Uint8List frame) {
   if (frame.length < 5 ||
-      (frame[0] != pushCodeNewAdvert && frame[0] != pushCodeAdvert)) {
+      (frame[0] != pushCodeNewAdvert &&
+          frame[0] != pushCodeAdvert &&
+          frame[0] != pushCodeAdvertCompact)) {
     return null;
   }
+  final code = frame[0];
   final candidates = <Uint8List>[];
-  final expectedLen = 4 + frame[3];
-  if (expectedLen > 4 && expectedLen <= frame.length) {
-    candidates.add(Uint8List.fromList(frame.sublist(4, expectedLen)));
-  }
-  if (frame.length > 4) {
-    candidates.add(Uint8List.fromList(frame.sublist(4)));
+  if (code == pushCodeAdvertCompact) {
+    if (frame.length > 4) {
+      candidates.add(Uint8List.fromList(frame.sublist(4)));
+    }
+    if (frame.isNotEmpty) {
+      candidates.add(Uint8List.fromList(frame));
+    }
+  } else {
+    final expectedLen = 4 + frame[3];
+    if (expectedLen > 4 && expectedLen <= frame.length) {
+      candidates.add(Uint8List.fromList(frame.sublist(4, expectedLen)));
+    }
+    if (frame.length > 4) {
+      candidates.add(Uint8List.fromList(frame.sublist(4)));
+    }
   }
   if (frame.length > 1) {
     candidates.add(Uint8List.fromList(frame.sublist(1)));
@@ -1171,7 +1184,10 @@ NodeDiscoverAdvertResponse? parseNodeDiscoverAdvertResponse(Uint8List frame) {
   NodeDiscoverAdvertResponse? best;
   var bestScore = 0;
   for (final payload in candidates) {
-    final parsed = _parseNodeDiscoverAdvertPayload(payload);
+    final parsed = _parseNodeDiscoverAdvertPayload(
+      payload,
+      allowEmptyName: code == pushCodeAdvertCompact,
+    );
     if (parsed == null) continue;
     final score =
         _contactNameScore(parsed.name) + parsed.publicKeyPrefix.length;
@@ -1183,8 +1199,11 @@ NodeDiscoverAdvertResponse? parseNodeDiscoverAdvertResponse(Uint8List frame) {
   return best;
 }
 
-NodeDiscoverAdvertResponse? _parseNodeDiscoverAdvertPayload(Uint8List payload) {
-  if (payload.length < 12) return null;
+NodeDiscoverAdvertResponse? _parseNodeDiscoverAdvertPayload(
+  Uint8List payload, {
+  bool allowEmptyName = false,
+}) {
+  if (payload.length < (allowEmptyName ? 8 : 12)) return null;
   final publicKey = payload.sublist(
     0,
     payload.length >= 8 ? 8 : payload.length,
@@ -1199,7 +1218,7 @@ NodeDiscoverAdvertResponse? _parseNodeDiscoverAdvertPayload(Uint8List payload) {
 
   final type = payload.length > 32 ? payload[32] : 0;
   final name = _extractBestAdvertName(payload);
-  if (name.isEmpty) return null;
+  if (!allowEmptyName && name.isEmpty) return null;
 
   return NodeDiscoverAdvertResponse(
     publicKeyPrefix: publicKeyPrefix,

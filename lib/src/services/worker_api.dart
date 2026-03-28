@@ -163,6 +163,27 @@ class WorkerApi {
     throw Exception('Failed request $path: $lastError');
   }
 
+  Future<int> cleanupDeadzoneRows(Iterable<String> hexes) async {
+    final normalized = hexes
+        .map((hex) => hex.trim())
+        .where((hex) => hex.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (normalized.isEmpty) return 0;
+    final response = await _postWithFallback(
+      '/maintenance/deadzones/cleanup',
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({'hexes': normalized}),
+      accept: (response) =>
+          response.statusCode == 200 && _looksLikeJsonResponse(response),
+    );
+    final decoded = jsonDecode(_decodeUtf8(response));
+    if (decoded is Map && decoded['deleted'] is num) {
+      return (decoded['deleted'] as num).toInt();
+    }
+    return 0;
+  }
+
   Future<List<String>> fetchHistoryDays() async {
     if (_staticDataBaseUrl != null) {
       try {
