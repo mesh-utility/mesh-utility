@@ -120,5 +120,43 @@ void main() {
         );
       },
     );
+
+    test('passes radius scope to history requests when provided', () async {
+      final calls = <Uri>[];
+
+      Future<http.Response> onGet(Uri uri) async {
+        calls.add(uri);
+        if (uri.path == '/history') {
+          return http.Response(
+            jsonEncode(['2026-03-27']),
+            200,
+            headers: const {'content-type': 'application/json'},
+          );
+        }
+        if (uri.path == '/history/2026-03-27.ndjson') {
+          return http.Response(
+            '{"nodeId":"718D349F","rssi":-64,"latitude":40.89,"longitude":-77.47}\n',
+            200,
+            headers: const {'content-type': 'text/plain'},
+          );
+        }
+        return http.Response('not found', 404);
+      }
+
+      final api = WorkerApi('https://worker.example', httpGet: onGet);
+
+      await api.fetchRawScans(
+        historyDays: 1,
+        deadzoneDays: 1,
+        centerLat: 36.1699,
+        centerLng: -115.1398,
+        radiusMiles: 50,
+      );
+
+      final dayCall = calls.singleWhere((u) => u.path.endsWith('.ndjson'));
+      expect(dayCall.queryParameters['lat'], equals('36.169900'));
+      expect(dayCall.queryParameters['lng'], equals('-115.139800'));
+      expect(dayCall.queryParameters['radiusMiles'], equals('50'));
+    });
   });
 }

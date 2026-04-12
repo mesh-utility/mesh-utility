@@ -48,13 +48,21 @@ void main() {
       expect(zones.first.isDeadZone, isFalse);
     });
 
-    test('best RSSI is selected from multiple scans in same hex', () {
+    test('RSSI is averaged across scans in the same hex', () {
       final zones = aggregateScansToZones([
         _scan(nodeId: 'a', rssi: -90.0),
         _scan(nodeId: 'b', rssi: -70.0),
         _scan(nodeId: 'c', rssi: -80.0),
       ]);
-      expect(zones.first.avgRssi, closeTo(-70.0, 0.01));
+      expect(zones.first.avgRssi, closeTo(-80.0, 0.01));
+    });
+
+    test('SNR is averaged across scans in the same hex', () {
+      final zones = aggregateScansToZones([
+        _scan(nodeId: 'a', snr: 11.8),
+        _scan(nodeId: 'b', snr: -3.3),
+      ]);
+      expect(zones.first.avgSnr, closeTo(4.25, 0.01));
     });
 
     test('scans in different hexes produce separate zones', () {

@@ -6,6 +6,7 @@ class AppSettings {
     required this.workerUrl,
     required this.historyDays,
     required this.deadzoneDays,
+    required this.syncRadiusMiles,
     required this.privacyAccepted,
     required this.scanIntervalSeconds,
     required this.discoverWaitSeconds,
@@ -28,6 +29,7 @@ class AppSettings {
   final String workerUrl;
   final int historyDays;
   final int deadzoneDays;
+  final int syncRadiusMiles;
   final bool privacyAccepted;
   final int scanIntervalSeconds;
   final int discoverWaitSeconds;
@@ -50,6 +52,7 @@ class AppSettings {
     workerUrl: AppConfig.deployedWorkerUrl,
     historyDays: 7,
     deadzoneDays: 7,
+    syncRadiusMiles: 0,
     privacyAccepted: false,
     scanIntervalSeconds: 40,
     discoverWaitSeconds: 40,
@@ -73,6 +76,7 @@ class AppSettings {
     String? workerUrl,
     int? historyDays,
     int? deadzoneDays,
+    int? syncRadiusMiles,
     bool? privacyAccepted,
     int? scanIntervalSeconds,
     int? discoverWaitSeconds,
@@ -95,6 +99,9 @@ class AppSettings {
       workerUrl: workerUrl ?? this.workerUrl,
       historyDays: historyDays ?? this.historyDays,
       deadzoneDays: deadzoneDays ?? this.deadzoneDays,
+      syncRadiusMiles: _clampSyncRadiusMiles(
+        syncRadiusMiles ?? this.syncRadiusMiles,
+      ),
       privacyAccepted: privacyAccepted ?? this.privacyAccepted,
       scanIntervalSeconds: scanIntervalSeconds ?? this.scanIntervalSeconds,
       discoverWaitSeconds: discoverWaitSeconds ?? this.discoverWaitSeconds,
@@ -122,6 +129,7 @@ class AppSettings {
       'workerUrl': workerUrl,
       'historyDays': historyDays,
       'deadzoneDays': deadzoneDays,
+      'syncRadiusMiles': syncRadiusMiles,
       'privacyAccepted': privacyAccepted,
       'scanIntervalSeconds': scanIntervalSeconds,
       'discoverWaitSeconds': discoverWaitSeconds,
@@ -149,6 +157,9 @@ class AppSettings {
           (json['historyDays'] as num?)?.toInt() ?? defaults.historyDays,
       deadzoneDays:
           (json['deadzoneDays'] as num?)?.toInt() ?? defaults.deadzoneDays,
+      syncRadiusMiles: _clampSyncRadiusMiles(
+        (json['syncRadiusMiles'] as num?)?.toInt() ?? defaults.syncRadiusMiles,
+      ),
       privacyAccepted:
           (json['privacyAccepted'] as bool?) ?? defaults.privacyAccepted,
       scanIntervalSeconds:
@@ -212,6 +223,12 @@ class AppSettings {
     if (value < 5) return 5;
     if (value > 120) return 120;
     return value;
+  }
+
+  static int _clampSyncRadiusMiles(int value) {
+    const allowed = <int>{0, 10, 25, 50, 100, 250};
+    if (allowed.contains(value)) return value;
+    return defaults.syncRadiusMiles;
   }
 
   static int _clampUploadBatchIntervalMinutes(int value) {

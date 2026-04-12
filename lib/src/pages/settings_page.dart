@@ -204,9 +204,12 @@ class _SettingsPageState extends State<SettingsPage> {
           color: Theme.of(context).colorScheme.primary,
         );
     final radiusDisplay = _radiusDisplayValue(s.statsRadiusMiles, s.unitSystem);
+    final syncRadiusLabel = _syncRadiusLabel(s.syncRadiusMiles, s.unitSystem);
     final syncMeta = _syncMeta(
       count: widget.lastSyncScanCount,
       at: widget.lastSyncAt,
+      radiusMiles: s.syncRadiusMiles,
+      unitSystem: s.unitSystem,
     );
     return SafeArea(
       top: false,
@@ -694,6 +697,31 @@ class _SettingsPageState extends State<SettingsPage> {
                     'Controls deadzone fetch window without changing successful scan history range.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: '${s.syncRadiusMiles}',
+                    decoration: InputDecoration(
+                      labelText: 'Sync Download Scope',
+                      labelStyle: pickerLabelStyle,
+                      floatingLabelStyle: pickerFloatingLabelStyle,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: _syncRadiusOptions(s.unitSystem),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      widget.onChanged(
+                        s.copyWith(syncRadiusMiles: int.parse(value)),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    s.syncRadiusMiles == 0
+                        ? 'Fetch cloud history globally.'
+                        : 'Fetch cloud history within $syncRadiusLabel of your current location when available.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                   _SectionDivider(),
                   AutoSyncSectionTitle(
                     periodicSyncEnabled: widget.periodicSyncEnabled,
@@ -722,7 +750,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                   Text(
-                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} loaded in this session',
+                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} scans cached locally',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 4),
@@ -1075,6 +1103,25 @@ String _historyDaysValue(int value) {
   return '7';
 }
 
+List<DropdownMenuItem<String>> _syncRadiusOptions(String unitSystem) {
+  const values = <int>[0, 10, 25, 50, 100, 250];
+  return values
+      .map((value) {
+        final label = value == 0
+            ? 'Global'
+            : 'Within ${_syncRadiusLabel(value, unitSystem)}';
+        return DropdownMenuItem(value: '$value', child: Text(label));
+      })
+      .toList(growable: false);
+}
+
+String _syncRadiusLabel(int miles, String unitSystem) {
+  if (miles <= 0) return 'Global';
+  final display = _radiusDisplayValue(miles, unitSystem);
+  final unit = unitSystem == 'metric' ? 'km' : 'miles';
+  return '$display $unit';
+}
+
 int _radiusDisplayValue(int miles, String unitSystem) {
   if (unitSystem == 'metric') {
     return (miles * 1.60934).round();
@@ -1090,8 +1137,16 @@ int _toMilesRadius(int displayValue, String unitSystem) {
   return displayValue;
 }
 
-String _syncMeta({required int count, required DateTime? at}) {
+String _syncMeta({
+  required int count,
+  required DateTime? at,
+  required int radiusMiles,
+  required String unitSystem,
+}) {
   if (at == null) return 'No completed sync yet';
   final formatted = DateFormat.yMd().add_jm().format(at.toLocal());
-  return 'Last sync: $formatted • $count scans fetched from network';
+  final scope = radiusMiles <= 0
+      ? 'global scope'
+      : 'scope ${_syncRadiusLabel(radiusMiles, unitSystem)}';
+  return 'Last sync: $formatted • $count scans fetched from network • $scope';
 }

@@ -18,6 +18,25 @@ Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
   return {for (final e in m.entries) e.key.toString(): e.value};
 }
 
+Map<String, String> _queryWithOptionalArea({
+  Map<String, String>? base,
+  double? centerLat,
+  double? centerLng,
+  int? radiusMiles,
+}) {
+  final query = <String, String>{...?base};
+  if (centerLat == null ||
+      centerLng == null ||
+      radiusMiles == null ||
+      radiusMiles <= 0) {
+    return query;
+  }
+  query['lat'] = centerLat.toStringAsFixed(6);
+  query['lng'] = centerLng.toStringAsFixed(6);
+  query['radiusMiles'] = '$radiusMiles';
+  return query;
+}
+
 class WorkerApi {
   WorkerApi(
     this.baseUrl, {
@@ -243,6 +262,9 @@ class WorkerApi {
     int historyDays = 7,
     int deadzoneDays = 7,
     String? connectedRadioId,
+    double? centerLat,
+    double? centerLng,
+    int? radiusMiles,
   }) async {
     final days = await fetchHistoryDays();
     final historyLimit = historyDays > 0 ? historyDays : days.length;
@@ -262,6 +284,9 @@ class WorkerApi {
         final dayScans = await _fetchRawScansForDay(
           day: day,
           deadzoneDays: deadzoneDays,
+          centerLat: centerLat,
+          centerLng: centerLng,
+          radiusMiles: radiusMiles,
         );
         for (final scan in dayScans) {
           if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
@@ -280,12 +305,20 @@ class WorkerApi {
     required int historyDays,
     required int deadzoneDays,
     String? connectedRadioId,
+    double? centerLat,
+    double? centerLng,
+    int? radiusMiles,
   }) async {
     _normalizeRadioId8(connectedRadioId);
-    final query = <String, String>{
-      'days': historyDays.toString(),
-      'deadzoneDays': deadzoneDays.toString(),
-    };
+    final query = _queryWithOptionalArea(
+      base: <String, String>{
+        'days': historyDays.toString(),
+        'deadzoneDays': deadzoneDays.toString(),
+      },
+      centerLat: centerLat,
+      centerLng: centerLng,
+      radiusMiles: radiusMiles,
+    );
     if (_staticHistoryReady) {
       try {
         final staticResponse = await _getStatic(
@@ -349,6 +382,9 @@ class WorkerApi {
   Future<List<RawScan>> _fetchRawScansForDay({
     required String day,
     required int deadzoneDays,
+    double? centerLat,
+    double? centerLng,
+    int? radiusMiles,
   }) async {
     if (_staticDataBaseUrl != null) {
       try {
@@ -363,9 +399,14 @@ class WorkerApi {
       }
     }
 
-    final query = <String, String>{
-      if (deadzoneDays >= 0) 'deadzoneDays': '$deadzoneDays',
-    };
+    final query = _queryWithOptionalArea(
+      base: <String, String>{
+        if (deadzoneDays >= 0) 'deadzoneDays': '$deadzoneDays',
+      },
+      centerLat: centerLat,
+      centerLng: centerLng,
+      radiusMiles: radiusMiles,
+    );
     final all = <RawScan>[];
     int? cursorTimestamp;
     int? cursorId;

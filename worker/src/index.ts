@@ -82,6 +82,47 @@ function parsePositiveInt(raw: string | null, fallback: number, max: number): nu
   return Math.max(1, Math.min(parsed, max));
 }
 
+function parseFiniteFloat(raw: string | null): number | null {
+  if (raw == null) return null;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRadiusMiles(raw: string | null): number | null {
+  const parsed = parseFiniteFloat(raw);
+  if (parsed == null || parsed <= 0) return null;
+  return Math.min(parsed, 250);
+}
+
+type GeoBounds = {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+};
+
+function buildGeoBounds(
+  latRaw: string | null,
+  lngRaw: string | null,
+  radiusMilesRaw: string | null
+): GeoBounds | null {
+  const lat = parseFiniteFloat(latRaw);
+  const lng = parseFiniteFloat(lngRaw);
+  const radiusMiles = parseRadiusMiles(radiusMilesRaw);
+  if (lat == null || lng == null || radiusMiles == null) return null;
+
+  const latDelta = radiusMiles / 69;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const safeCosLat = Math.max(Math.abs(cosLat), 0.1);
+  const lngDelta = radiusMiles / (69 * safeCosLat);
+  return {
+    minLat: lat - latDelta,
+    maxLat: lat + latDelta,
+    minLng: lng - lngDelta,
+    maxLng: lng + lngDelta,
+  };
+}
+
 function parseNodeEntries(raw: string): NodeEntry[] {
   try {
     const parsed = JSON.parse(raw);
@@ -213,6 +254,11 @@ export default {
         (url.pathname === '/coverage' || url.pathname === '/coverage.json') &&
         request.method === 'GET'
       ) {
+        const geoBounds = buildGeoBounds(
+          url.searchParams.get('lat'),
+          url.searchParams.get('lng'),
+          url.searchParams.get('radiusMiles')
+        );
         const maxDays = parseDaysLimit(url.searchParams.get('days'), 7);
         const deadzoneMaxDays = parseDaysLimit(
           url.searchParams.get('deadzoneDays'),
@@ -240,13 +286,30 @@ export default {
         }
 
         const dayPlaceholders = queryWindowDays.map(() => '?').join(',');
+        const geoWhere = geoBounds == null
+          ? ''
+          : `
+            AND latitude BETWEEN ? AND ?
+            AND longitude BETWEEN ? AND ?
+          `;
         const scans = await env.DB.prepare(`
           SELECT radioId, timestamp, latitude, longitude, nodes
           FROM scans
           WHERE date(timestamp / 1000, 'unixepoch') IN (${dayPlaceholders})
+          ${geoWhere}
           ORDER BY timestamp ASC
         `)
-          .bind(...queryWindowDays)
+          .bind(
+            ...queryWindowDays,
+            ...(geoBounds == null
+              ? []
+              : [
+                  geoBounds.minLat,
+                  geoBounds.maxLat,
+                  geoBounds.minLng,
+                  geoBounds.maxLng,
+                ])
+          )
           .all();
 
         const selectedDaySet = new Set(selectedDays);
@@ -263,7 +326,11 @@ type CoverageAgg = {
   lastScannedTs: number;
   hasNodes: boolean;
   polygon: [number, number][];
-          radioId?: string;
+  radioId?: string;
+  totalRssi: number;
+  rssiCount: number;
+  totalSnr: number;
+  snrCount: number;
         };
 
         const zoneMap = new Map<string, CoverageAgg>();
@@ -301,6 +368,10 @@ type CoverageAgg = {
               hasNodes: false,
               polygon: getHexVertices(snapLat, snapLng),
               radioId: row.radioId,
+              totalRssi: 0,
+              rssiCount: 0,
+              totalSnr: 0,
+              snrCount: 0,
             };
             zoneMap.set(id, agg);
           }
@@ -317,9 +388,13 @@ type CoverageAgg = {
             if (typeof node?.rssi !== 'number') continue;
             const rssi = node.rssi;
             const snr = typeof node?.snr === 'number' ? node.snr : null;
-            agg.avgRssi = agg.avgRssi == null ? rssi : Math.max(agg.avgRssi, rssi);
+            agg.totalRssi += rssi;
+            agg.rssiCount += 1;
+            agg.avgRssi = agg.totalRssi / agg.rssiCount;
             if (snr != null) {
-              agg.avgSnr = agg.avgSnr == null ? snr : Math.max(agg.avgSnr, snr);
+              agg.totalSnr += snr;
+              agg.snrCount += 1;
+              agg.avgSnr = agg.totalSnr / agg.snrCount;
             }
             agg.scanCount += 1;
           }
@@ -351,6 +426,11 @@ type CoverageAgg = {
       // Fetch scans for a specific day (NDJSON format)
       if (url.pathname.startsWith('/history/') && request.method === 'GET') {
         const day = url.pathname.split('/')[2].replace('.ndjson', '');
+        const geoBounds = buildGeoBounds(
+          url.searchParams.get('lat'),
+          url.searchParams.get('lng'),
+          url.searchParams.get('radiusMiles')
+        );
         const deadzoneMaxDays = parseDaysLimit(
           url.searchParams.get('deadzoneDays'),
           0
@@ -372,11 +452,18 @@ type CoverageAgg = {
         const dayStart = new Date(day + 'T00:00:00Z').getTime();
         const dayEnd = new Date(day + 'T23:59:59Z').getTime();
 
+        const geoWhere = geoBounds == null
+          ? ''
+          : `
+                AND latitude BETWEEN ? AND ?
+                AND longitude BETWEEN ? AND ?
+            `;
         const scans = hasCursor
           ? await env.DB.prepare(`
               SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
               FROM scans
               WHERE timestamp >= ? AND timestamp <= ?
+              ${geoWhere}
                 AND (timestamp > ? OR (timestamp = ? AND id > ?))
               ORDER BY timestamp ASC, id ASC
               LIMIT ?
@@ -384,6 +471,14 @@ type CoverageAgg = {
               .bind(
                 dayStart,
                 dayEnd,
+                ...(geoBounds == null
+                  ? []
+                  : [
+                      geoBounds.minLat,
+                      geoBounds.maxLat,
+                      geoBounds.minLng,
+                      geoBounds.maxLng,
+                    ]),
                 cursorTimestampRaw,
                 cursorTimestampRaw,
                 cursorIdRaw,
@@ -394,10 +489,23 @@ type CoverageAgg = {
               SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
               FROM scans
               WHERE timestamp >= ? AND timestamp <= ?
+              ${geoWhere}
               ORDER BY timestamp ASC, id ASC
               LIMIT ?
             `)
-              .bind(dayStart, dayEnd, pageSize + 1)
+              .bind(
+                dayStart,
+                dayEnd,
+                ...(geoBounds == null
+                  ? []
+                  : [
+                      geoBounds.minLat,
+                      geoBounds.maxLat,
+                      geoBounds.minLng,
+                      geoBounds.maxLng,
+                    ]),
+                pageSize + 1
+              )
               .all();
 
         let includeDeadzonesForDay = true;

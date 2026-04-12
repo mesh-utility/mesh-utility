@@ -129,13 +129,10 @@ class AppState extends ChangeNotifier {
     _syncService.addListener(notifyListeners);
     _locationService.addListener(notifyListeners);
     _locationService.onPositionChanged = (lat, lng) {
-      final zoneCheckNow = DateTime.now();
-      final lastCheck = _lastObserverZoneCheckAt;
-      if (lastCheck == null ||
-          zoneCheckNow.difference(lastCheck) >= const Duration(seconds: 10)) {
-        _lastObserverZoneCheckAt = zoneCheckNow;
-        unawaited(_onObserverZoneMaybeChanged());
-      }
+      final zoneId = hexKey(lat, lng);
+      if (zoneId == _lastObservedZoneId) return;
+      _lastObservedZoneId = zoneId;
+      unawaited(_onObserverZoneMaybeChanged());
     };
   }
 
@@ -179,7 +176,7 @@ class AppState extends ChangeNotifier {
   Timer? _bleAutoScanTimer;
   StreamSubscription<Uint8List>? _passiveAdvertSubscription;
   StreamSubscription<AvailabilityState>? _bleAvailabilitySubscription;
-  DateTime? _lastObserverZoneCheckAt;
+  String? _lastObservedZoneId;
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _bleDeviceNamesById = {};
   static const String _knownBleDeviceFallbackName = 'Known Device';
@@ -890,6 +887,9 @@ class AppState extends ChangeNotifier {
             historyDays: settings.historyDays,
             deadzoneDays: settings.deadzoneDays,
             connectedRadioId: connectedRadioId,
+            centerLat: deviceLatitude,
+            centerLng: deviceLongitude,
+            radiusMiles: settings.syncRadiusMiles,
           )
           .then(
             (value) => value
@@ -959,6 +959,9 @@ class AppState extends ChangeNotifier {
           historyDays: settings.historyDays,
           deadzoneDays: settings.deadzoneDays,
           connectedRadioId: connectedRadioId,
+          centerLat: deviceLatitude,
+          centerLng: deviceLongitude,
+          radiusMiles: settings.syncRadiusMiles,
         );
         _debugLog.info(
           'sync',

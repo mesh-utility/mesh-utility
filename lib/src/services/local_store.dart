@@ -43,9 +43,6 @@ class LocalStore {
     final kept = <RawScan>[];
 
     for (final scan in sorted) {
-      // Persist only local outbox data; worker history remains online-only.
-      if (!scan.uploadEligible) continue;
-
       final identity = scanIdentity(scan);
       if (!seen.add(identity)) continue;
       kept.add(scan);

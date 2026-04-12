@@ -10,7 +10,9 @@ Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and
 
 ## Release Notes
 
-- [Alpha 6](./docs/releases/alpha-6.md) (latest)
+- [Alpha 8](./docs/releases/alpha-8.md) (latest)
+- [Alpha 7](./docs/releases/alpha-7.md)
+- [Alpha 6](./docs/releases/alpha-6.md)
 - [Alpha 5](./docs/releases/alpha-5.md)
 
 ## Supported Targets
@@ -66,7 +68,7 @@ chmod +x install_mesh_utility.sh
 To install a specific release:
 
 ```bash
-./install_mesh_utility.sh Alpha-6
+./install_mesh_utility.sh Alpha-8
 ```
 
 

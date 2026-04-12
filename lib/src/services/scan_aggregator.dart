@@ -27,17 +27,18 @@ List<CoverageZone> aggregateScansToZones(List<RawScan> scans) {
 
     final isDeadZone = scansWithNodes.isEmpty;
 
-    double? bestRssi;
+    double? avgRssi;
     if (!isDeadZone) {
-      bestRssi = scansWithNodes
-          .map((s) => s.rssi!)
-          .reduce((a, b) => a > b ? a : b);
+      avgRssi =
+          scansWithNodes.map((s) => s.rssi!).reduce((a, b) => a + b) /
+          scansWithNodes.length;
     }
 
     final snrScans = scansWithNodes.where((s) => s.snr != null).toList();
-    double? bestSnr;
+    double? avgSnr;
     if (!isDeadZone && snrScans.isNotEmpty) {
-      bestSnr = snrScans.map((s) => s.snr!).reduce((a, b) => a > b ? a : b);
+      avgSnr =
+          snrScans.map((s) => s.snr!).reduce((a, b) => a + b) / snrScans.length;
     }
 
     final latestTimestamp = cellScans
@@ -50,8 +51,8 @@ List<CoverageZone> aggregateScansToZones(List<RawScan> scans) {
         centerLat: snapped.snapLat,
         centerLng: snapped.snapLng,
         radiusMeters: 100,
-        avgRssi: bestRssi,
-        avgSnr: bestSnr,
+        avgRssi: avgRssi,
+        avgSnr: avgSnr,
         scanCount: cellScans.length,
         lastScanned: latestTimestamp,
         isDeadZone: isDeadZone,
