@@ -24,3 +24,13 @@ GITHUB_REPO = "just-stuff-tm/mesh-data"
 GITHUB_BRANCH = "main"
 
 # Secrets remain in Cloudflare (GITHUB_TOKEN) — do not put in this file.
+
+# Zone routes: only /api/* hits this Worker; the Flutter SPA stays on Pages for /.
+# workers.dev URLs continue to work without a route.
+[[routes]]
+pattern = "mesh-utility.org/api/*"
+zone_name = "mesh-utility.org"
+
+[[routes]]
+pattern = "www.mesh-utility.org/api/*"
+zone_name = "mesh-utility.org"
