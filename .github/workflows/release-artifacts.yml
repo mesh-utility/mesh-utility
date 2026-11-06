@@ -60,7 +60,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Android APK (release)
-        run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
+        run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
 
       - name: Stage release artifact
         run: |
@@ -112,7 +112,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Linux (release)
-        run: flutter build linux --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
+        run: flutter build linux --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
 
       - name: Stage release artifact
         run: |
@@ -155,7 +155,9 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows (release)
-        run: flutter build windows --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
+        # bash so $WORKER_URL / $BUILD_NAME expand (default pwsh would not).
+        shell: bash
+        run: flutter build windows --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
 
       - name: Stage release artifact
         shell: pwsh

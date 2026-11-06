@@ -513,58 +513,66 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   Future<void> _syncStatusNotification({bool force = false}) async {
     if (!_isAndroidNative || !_notificationsReady) return;
-    final show = _appState.bleConnected || _appState.bleScanning;
-    if (!show) {
-      _lastStatusNotificationKey = '';
-      await _notifications.cancel(_statusNotificationId);
-      return;
+    try {
+      final show = _appState.bleConnected || _appState.bleScanning;
+      if (!show) {
+        _lastStatusNotificationKey = '';
+        await _notifications.cancel(_statusNotificationId);
+        return;
+      }
+
+      final radio =
+          (_appState.connectedRadioDisplayName ?? _appState.connectedRadioName)
+              ?.trim();
+      final title = radio == null || radio.isEmpty
+          ? 'Radio Status'
+          : 'Radio: $radio';
+      final status = _appState.bleStatus.trim().isEmpty
+          ? (_appState.bleScanning ? 'Discovery Sent' : 'Connected')
+          : _appState.bleStatus.trim();
+      final key =
+          '$title|$status|${_appState.bleScanning}|${_appState.bleBusy}|${_appState.bleConnected}';
+      if (!force && key == _lastStatusNotificationKey) return;
+      _lastStatusNotificationKey = key;
+
+      final actions = <AndroidNotificationAction>[
+        AndroidNotificationAction(
+          _actionToggleScan,
+          _appState.bleScanning ? 'Pause Scan' : 'Resume Scan',
+          showsUserInterface: true,
+        ),
+        AndroidNotificationAction(
+          _actionForceScan,
+          'Force Scan',
+          showsUserInterface: true,
+        ),
+      ];
+      final details = AndroidNotificationDetails(
+        _statusChannelId,
+        'Radio Connection Status',
+        channelDescription:
+            'Shows connected radio and scanning status with quick controls',
+        importance: Importance.low,
+        priority: Priority.low,
+        ongoing: true,
+        onlyAlertOnce: true,
+        autoCancel: false,
+        category: AndroidNotificationCategory.service,
+        actions: actions,
+      );
+      await _notifications.show(
+        _statusNotificationId,
+        title,
+        status,
+        NotificationDetails(android: details),
+      );
+    } on PlatformException catch (e) {
+      _notificationsReady = false;
+      _debugLog.warn('notifications', 'Status notification failed: $e');
+    } catch (e) {
+      _notificationsReady = false;
+      _debugLog.warn('notifications', 'Status notification failed: $e');
     }
-
-    final radio =
-        (_appState.connectedRadioDisplayName ?? _appState.connectedRadioName)
-            ?.trim();
-    final title = radio == null || radio.isEmpty
-        ? 'Radio Status'
-        : 'Radio: $radio';
-    final status = _appState.bleStatus.trim().isEmpty
-        ? (_appState.bleScanning ? 'Discovery Sent' : 'Connected')
-        : _appState.bleStatus.trim();
-    final key =
-        '$title|$status|${_appState.bleScanning}|${_appState.bleBusy}|${_appState.bleConnected}';
-    if (!force && key == _lastStatusNotificationKey) return;
-    _lastStatusNotificationKey = key;
-
-    final actions = <AndroidNotificationAction>[
-      AndroidNotificationAction(
-        _actionToggleScan,
-        _appState.bleScanning ? 'Pause Scan' : 'Resume Scan',
-        showsUserInterface: true,
-      ),
-      AndroidNotificationAction(
-        _actionForceScan,
-        'Force Scan',
-        showsUserInterface: true,
-      ),
-    ];
-    final details = AndroidNotificationDetails(
-      _statusChannelId,
-      'Radio Connection Status',
-      channelDescription:
-          'Shows connected radio and scanning status with quick controls',
-      importance: Importance.low,
-      priority: Priority.low,
-      ongoing: true,
-      onlyAlertOnce: true,
-      autoCancel: false,
-      category: AndroidNotificationCategory.service,
-      actions: actions,
-    );
-    await _notifications.show(
-      _statusNotificationId,
-      title,
-      status,
-      NotificationDetails(android: details),
-    );
   }
 
   @override
@@ -751,7 +759,10 @@ class _MeshHomePageState extends State<MeshHomePage>
       switch (action) {
         case _PrivacyDialogAction.accept:
           await _appState.updateSettings(
-            _appState.settings.copyWith(privacyAccepted: true),
+            _appState.settings.copyWith(
+              privacyAccepted: true,
+              forceOffline: false,
+            ),
           );
           _debugLog.info(
             'privacy',

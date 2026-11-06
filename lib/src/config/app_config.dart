@@ -1,7 +1,7 @@
 class AppConfig {
-  // Primary must be the Worker host. mesh-utility.org/api is Pages SPA HTML (no /api proxy).
-  static const String _defaultWorkerUrl =
-      'https://mesh-utility-worker.aaffiliate796.workers.dev';
+  // API is now routed through mesh-utility.org/api to the Worker.
+  // workers.dev stays the fallback when the primary host is unreachable.
+  static const String _defaultWorkerUrl = 'https://mesh-utility.org/api';
   static const String _defaultWorkerFallbackUrl =
       'https://mesh-utility-worker.aaffiliate796.workers.dev';
   static const String deployedWorkerUrl = String.fromEnvironment(

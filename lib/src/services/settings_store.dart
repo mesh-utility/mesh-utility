@@ -14,6 +14,7 @@ class AppSettings {
     required this.smartScanEnabled,
     required this.smartScanDays,
     required this.forceOffline,
+    required this.privacyForceOfflineMigrated,
     required this.updateRadioPosition,
     required this.tileCachingEnabled,
     required this.unitSystem,
@@ -37,6 +38,7 @@ class AppSettings {
   final bool smartScanEnabled;
   final int smartScanDays;
   final bool forceOffline;
+  final bool privacyForceOfflineMigrated;
   final bool updateRadioPosition;
   final bool tileCachingEnabled;
   final String unitSystem;
@@ -60,6 +62,7 @@ class AppSettings {
     smartScanEnabled: true,
     smartScanDays: 5,
     forceOffline: false,
+    privacyForceOfflineMigrated: false,
     updateRadioPosition: false,
     tileCachingEnabled: false,
     unitSystem: 'imperial',
@@ -84,6 +87,7 @@ class AppSettings {
     bool? smartScanEnabled,
     int? smartScanDays,
     bool? forceOffline,
+    bool? privacyForceOfflineMigrated,
     bool? updateRadioPosition,
     bool? tileCachingEnabled,
     String? unitSystem,
@@ -109,6 +113,8 @@ class AppSettings {
       smartScanEnabled: smartScanEnabled ?? this.smartScanEnabled,
       smartScanDays: smartScanDays ?? this.smartScanDays,
       forceOffline: forceOffline ?? this.forceOffline,
+      privacyForceOfflineMigrated:
+          privacyForceOfflineMigrated ?? this.privacyForceOfflineMigrated,
       updateRadioPosition: updateRadioPosition ?? this.updateRadioPosition,
       tileCachingEnabled: tileCachingEnabled ?? this.tileCachingEnabled,
       unitSystem: unitSystem ?? this.unitSystem,
@@ -137,6 +143,7 @@ class AppSettings {
       'smartScanEnabled': smartScanEnabled,
       'smartScanDays': smartScanDays,
       'forceOffline': forceOffline,
+      'privacyForceOfflineMigrated': privacyForceOfflineMigrated,
       'updateRadioPosition': updateRadioPosition,
       'tileCachingEnabled': tileCachingEnabled,
       'unitSystem': unitSystem,
@@ -175,6 +182,9 @@ class AppSettings {
       smartScanDays:
           (json['smartScanDays'] as num?)?.toInt() ?? defaults.smartScanDays,
       forceOffline: (json['forceOffline'] as bool?) ?? defaults.forceOffline,
+      privacyForceOfflineMigrated:
+          (json['privacyForceOfflineMigrated'] as bool?) ??
+          defaults.privacyForceOfflineMigrated,
       updateRadioPosition:
           (json['updateRadioPosition'] as bool?) ??
           defaults.updateRadioPosition,
@@ -240,22 +250,12 @@ class AppSettings {
 
 class SettingsStore {
   static const _settingsKey = 'settings:app';
-  // Hosts/paths that look like a Worker URL but are NOT (Pages SPA). Migrate away from them.
-  static const _brokenWorkerUrlMarkers = {
-    'mesh-utility.org/api',
-    'www.mesh-utility.org/api',
-  };
 
   String _normalizeWorkerUrl(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return AppConfig.deployedWorkerUrl;
-    final lower = trimmed.toLowerCase();
-    for (final marker in _brokenWorkerUrlMarkers) {
-      if (lower.contains(marker)) {
-        // Prefer the real Worker; do NOT "migrate" workers.dev → mesh-utility.org/api.
-        return AppConfig.deployedWorkerUrl;
-      }
-    }
+    // mesh-utility.org/api is the routed Worker API. workers.dev is a valid
+    // fallback or deliberate custom URL; do not rewrite either.
     return trimmed;
   }
 

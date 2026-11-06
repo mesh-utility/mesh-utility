@@ -97,6 +97,7 @@ class AppState extends ChangeNotifier {
             _connectedRadioDisplayName = null;
             _lastSelfInfoHex = null;
             _lastSelfInfoText = null;
+            _sessionRadioContacts.clear();
             _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
             _resumeAutoScanAfterReconnect = wasScanning;
@@ -177,6 +178,7 @@ class AppState extends ChangeNotifier {
   StreamSubscription<AvailabilityState>? _bleAvailabilitySubscription;
   String? _lastObservedZoneId;
   final Map<String, String> _radioContactsByPrefix = {};
+  final Map<String, String> _sessionRadioContacts = {};
   final Map<String, String> _bleDeviceNamesById = {};
   static const String _knownBleDeviceFallbackName = 'Known Device';
   bool _manualBleDisconnectRequested = false;
@@ -708,9 +710,14 @@ class AppState extends ChangeNotifier {
   String? get connectedRadioPublicKeyHex => _connectedRadioPublicKeyHex;
 
   Map<String, String> get currentRadioContacts {
+    if (bleConnected) {
+      return Map<String, String>.unmodifiable(_sessionRadioContacts);
+    }
     final radioId = _connectedRadioMeshId8();
-    if (radioId == null) return const {};
-    return settings.contactsByRadioId[radioId] ?? const {};
+    if (radioId == null || radioId.isEmpty) return const {};
+    return Map<String, String>.unmodifiable(
+      settings.contactsByRadioId[radioId] ?? const <String, String>{},
+    );
   }
 
   bool get deleteInProgress => _deleteInProgress;
@@ -744,8 +751,30 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     settings = await _settingsStore.load();
+    var settingsDirty = false;
     if (!settings.privacyAccepted && !settings.forceOffline) {
       settings = settings.copyWith(forceOffline: true);
+      settingsDirty = true;
+    }
+    // One-time: initial Accept used to leave forceOffline set. Clear that
+    // once, then set the flag for every install so a later deliberate
+    // offline choice is not cleared on the next launch.
+    if (!settings.privacyForceOfflineMigrated) {
+      final clearStuckOffline =
+          settings.privacyAccepted && settings.forceOffline;
+      settings = settings.copyWith(
+        forceOffline: clearStuckOffline ? false : settings.forceOffline,
+        privacyForceOfflineMigrated: true,
+      );
+      settingsDirty = true;
+      if (clearStuckOffline) {
+        _debugLog.info(
+          'privacy',
+          'Cleared stuck offline mode after privacy acceptance',
+        );
+      }
+    }
+    if (settingsDirty) {
       await _settingsStore.save(settings);
     }
     // TODO: Re-enable user-selectable language setting.
@@ -1217,6 +1246,7 @@ class AppState extends ChangeNotifier {
     _connectedRadioDisplayName = null;
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
+    _sessionRadioContacts.clear();
     notifyListeners();
   }
 
@@ -1805,6 +1835,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncContactsAndBackfillNames() async {
     if (!bleConnected) return;
+    _adoptPersistedContactsIntoSession();
     _debugLog.info('contacts', 'Requesting contacts from radio');
 
     final contacts = <String, String>{};
@@ -1838,31 +1869,60 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    _radioContactsByPrefix.addAll(contacts);
+    _updateConnectedRadioMeshIdFromContacts(contacts);
+
+    final sessionContacts = Map<String, String>.from(contacts);
+    _pruneSelfContact(sessionContacts);
+    _pruneSelfContact(_radioContactsByPrefix);
+    final sessionChanged = !mapEquals(_sessionRadioContacts, sessionContacts);
+    if (sessionChanged) {
+      _sessionRadioContacts
+        ..clear()
+        ..addAll(sessionContacts);
+    }
+
     final radioId = _connectedRadioMeshId8();
     if (radioId != null && radioId.isNotEmpty) {
       final nextContactsByRadio = Map<String, Map<String, String>>.from(
         settings.contactsByRadioId,
       );
-      nextContactsByRadio[radioId] = contacts;
+      nextContactsByRadio[radioId] = Map<String, String>.from(contacts);
       await updateSettings(
         settings.copyWith(contactsByRadioId: nextContactsByRadio),
       );
+    } else {
+      _debugLog.info(
+        'contacts',
+        'Radio id unknown; showing ${sessionContacts.length} contact(s) from the session only',
+      );
     }
-
-    _radioContactsByPrefix.addAll(contacts);
-    _updateConnectedRadioMeshIdFromContacts(contacts);
-    _pruneSelfContact(_radioContactsByPrefix);
 
     final updated = _backfillScanNamesFromContacts(_radioContactsByPrefix);
     if (updated > 0) {
       await _localStore.saveRawScans(rawScans);
       _rebuildDerivedData();
+    }
+    if (sessionChanged || updated > 0) {
       notifyListeners();
     }
     _debugLog.info(
       'contacts',
-      'Loaded ${contacts.length} contact(s), updated $updated scan name field(s)',
+      'Loaded ${contacts.length} contact(s), session ${sessionContacts.length}, updated $updated scan name field(s)',
     );
+  }
+
+  void _adoptPersistedContactsIntoSession() {
+    if (_sessionRadioContacts.isNotEmpty) return;
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null || radioId.isEmpty) return;
+    final persisted = settings.contactsByRadioId[radioId];
+    if (persisted == null || persisted.isEmpty) return;
+    final session = Map<String, String>.from(persisted);
+    _pruneSelfContact(session);
+    if (session.isEmpty) return;
+    _sessionRadioContacts.addAll(session);
+    notifyListeners();
   }
 
   Future<void> _requestSelfInfo() async {

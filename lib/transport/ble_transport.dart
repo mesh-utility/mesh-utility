@@ -86,10 +86,10 @@ class BleTransport extends Transport {
     if (targetDeviceId == null || targetDeviceId.isEmpty) {
       throw StateError('No BLE device selected');
     }
-    await _prepareFreshLink(targetDeviceId);
     _debugLog.info('ble_transport', 'Target device selected: $targetDeviceId');
 
     if (_isLinuxDesktop) {
+      await _prepareFreshLink(targetDeviceId);
       await _connectLinux(targetDeviceId);
     } else {
       await _connectNonLinux(targetDeviceId);
@@ -244,22 +244,76 @@ class BleTransport extends Transport {
     await _discoverAndBind(targetDeviceId);
   }
 
-  /// Non-Linux connect (Android, Web, etc.) – original flow with a single
-  /// soft retry for web.
+  /// Non-Linux connect (Android, iOS, Windows, Web).
+  ///
+  /// Drops a stale GATT session before each attempt. On failure, disconnects,
+  /// backs off, and retries twice. A live link to the same device is rebound
+  /// instead of opened a second time.
   Future<void> _connectNonLinux(String targetDeviceId) async {
-    try {
-      await _connectAndBind(targetDeviceId);
-    } catch (e) {
-      if (!kIsWeb) rethrow;
-      _debugLog.warn(
+    if (_connected && _deviceId == targetDeviceId) {
+      _debugLog.info(
         'ble_transport',
-        'Initial web connect/bind attempt failed for $targetDeviceId: $e; '
-            'retrying once',
+        'Already connected to $targetDeviceId; rebinding GATT session',
       );
-      await _prepareFreshLink(targetDeviceId);
-      await Future<void>.delayed(const Duration(milliseconds: 400));
-      await _connectAndBind(targetDeviceId);
+      try {
+        await _discoverAndBind(targetDeviceId);
+        return;
+      } catch (e) {
+        _debugLog.warn(
+          'ble_transport',
+          'Rebind failed for $targetDeviceId: $e; cleaning up and reconnecting',
+        );
+        await _cleanupFailedNonLinuxConnect(targetDeviceId);
+      }
+    } else if (_connected) {
+      await _cleanupFailedNonLinuxConnect(_deviceId ?? targetDeviceId);
     }
+
+    const maxAttempts = 3;
+    Object? lastError;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await _prepareFreshLink(targetDeviceId);
+        await _connectAndBind(targetDeviceId);
+        if (attempt > 1) {
+          _debugLog.info(
+            'ble_transport',
+            'Connect succeeded for $targetDeviceId on attempt $attempt',
+          );
+        }
+        return;
+      } catch (e) {
+        lastError = e;
+        _debugLog.warn(
+          'ble_transport',
+          'Connect attempt $attempt/$maxAttempts failed for $targetDeviceId: $e',
+        );
+        await _cleanupFailedNonLinuxConnect(targetDeviceId);
+        if (attempt >= maxAttempts) break;
+        final backoffMs = attempt == 1 ? 400 : 700;
+        await Future<void>.delayed(Duration(milliseconds: backoffMs));
+      }
+    }
+    throw lastError ?? StateError('BLE connect failed for $targetDeviceId');
+  }
+
+  Future<void> _cleanupFailedNonLinuxConnect(String targetDeviceId) async {
+    if (!kIsWeb) {
+      try {
+        await UniversalBle.disconnect(targetDeviceId);
+      } catch (_) {}
+      final other = _deviceId;
+      if (other != null && other.isNotEmpty && other != targetDeviceId) {
+        try {
+          await UniversalBle.disconnect(other);
+        } catch (_) {}
+      }
+    }
+    await _valueSubscription?.cancel();
+    _valueSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _resetSessionState();
   }
 
   /// Attempt pairing/trust recovery after all connect retries have failed.
