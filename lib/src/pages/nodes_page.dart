@@ -374,18 +374,31 @@ class _NodesPageState extends State<NodesPage> {
     );
   }
 
-  String _nodeTitle(MeshNode node) {
-    final resolved = resolvedNameForNodeId(
-      widget.resolvedNodeNames,
-      node.nodeId,
-    );
-    if (resolved != null && resolved.isNotEmpty) return resolved;
-    final advertised = node.name?.trim() ?? '';
-    if (advertised.isNotEmpty &&
-        !isPlaceholderNodeName(advertised, node.nodeId)) {
-      return advertised;
+  String? _realName(String? name, String nodeId) {
+    final trimmed = (name ?? '').trim();
+    if (trimmed.isEmpty || isPlaceholderNodeName(trimmed, nodeId)) return null;
+    return trimmed;
+  }
+
+  /// Scan sender name when [MeshNode.name] is missing or still the raw id.
+  String? _scanAdvertisedName(String nodeId) {
+    final scans = _scansByNode[nodeId];
+    if (scans == null) return null;
+    for (final scan in scans) {
+      final name = _realName(scan.senderName, nodeId);
+      if (name != null) return name;
     }
-    return node.nodeId;
+    return null;
+  }
+
+  String _nodeTitle(MeshNode node) {
+    final advertised =
+        _realName(node.name, node.nodeId) ?? _scanAdvertisedName(node.nodeId);
+    return titleNameForNode(
+      nodeId: node.nodeId,
+      contactName: resolvedNameForNodeId(widget.resolvedNodeNames, node.nodeId),
+      advertisedName: advertised,
+    );
   }
 
   void _processScans() {

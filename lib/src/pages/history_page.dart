@@ -974,18 +974,14 @@ String _displayNodeLabel(
   String nodeId,
   String? resolvedName,
 ) {
-  final resolved = (resolvedName ?? '').trim();
-  if (resolved.isNotEmpty && !isPlaceholderNodeName(resolved, nodeId)) {
-    return _formatNodeDisplayWithId(resolved, nodeId);
-  }
-  final trimmed = (senderName ?? '').trim();
-  if (trimmed.isNotEmpty && !isPlaceholderNodeName(trimmed, nodeId)) {
-    return _formatNodeDisplayWithId(trimmed, nodeId);
-  }
-  if (resolved.isNotEmpty) {
-    return _formatNodeDisplayWithId(resolved, nodeId);
-  }
-  return _formatNodeDisplayWithId(trimmed.isEmpty ? nodeId : trimmed, nodeId);
+  return _formatNodeDisplayWithId(
+    titleNameForNode(
+      nodeId: nodeId,
+      contactName: resolvedName,
+      advertisedName: senderName,
+    ),
+    nodeId,
+  );
 }
 
 String _formatNodeDisplayWithId(String label, String nodeId) {

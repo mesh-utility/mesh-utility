@@ -85,6 +85,69 @@ Set<String> nameTokens(String value) {
   return value.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length >= 3).toSet();
 }
 
+/// Short public-key prefix used when a node has no real name.
+///
+/// Empty input becomes "Unknown". Non-hex text is returned trimmed. Hex ids
+/// are uppercased and cut to 8 characters.
+String shortNodeId(String nodeId) {
+  final hex = normalizeHexId(nodeId);
+  if (hex.isEmpty) {
+    final raw = nodeId.trim();
+    return raw.isEmpty ? 'Unknown' : raw;
+  }
+  return hex.length >= 8 ? hex.substring(0, 8) : hex;
+}
+
+/// Local UI title for a mesh node.
+///
+/// Prefers [contactName] for every contact type, then a non-placeholder
+/// [advertisedName] (node name or scan sender). The short id is used only
+/// when neither is a real name. Do not use this for upload names; repeater
+/// and room gating stays on the scan-sender path.
+String titleNameForNode({
+  required String nodeId,
+  String? contactName,
+  String? advertisedName,
+}) {
+  final contact = (contactName ?? '').trim();
+  if (contact.isNotEmpty && !isPlaceholderNodeName(contact, nodeId)) {
+    return contact;
+  }
+  final advertised = (advertisedName ?? '').trim();
+  if (advertised.isNotEmpty && !isPlaceholderNodeName(advertised, nodeId)) {
+    return advertised;
+  }
+  return shortNodeId(nodeId);
+}
+
+/// Stores [label] for [id] only when it is a real name.
+///
+/// ID-shaped placeholders are omitted so [resolvedNameForNodeId] is not
+/// polluted by the short-id fallback. Keys are the raw id, its hex form, and
+/// the 8-character prefix.
+void putResolvedNodeLabel(
+  Map<String, String> labels,
+  String? id,
+  String label,
+) {
+  final trimmed = (id ?? '').trim();
+  if (trimmed.isEmpty) return;
+  final cleaned = label.trim();
+  if (cleaned.isEmpty || isPlaceholderNodeName(cleaned, trimmed)) return;
+  final hex = normalizeHexId(trimmed);
+  final short = hex.length >= 8 ? hex.substring(0, 8) : hex;
+  for (final key in <String>{trimmed, hex, short}) {
+    if (key.isEmpty) continue;
+    final existing = labels[key];
+    if (existing != null &&
+        !isPlaceholderNodeName(existing, key) &&
+        isPlaceholderNodeName(cleaned, key)) {
+      continue;
+    }
+    labels[key] = cleaned;
+  }
+}
+
 /// Best human label from a resolved-name map.
 ///
 /// Skips ID-shaped placeholders and, when several keys match the same radio,
@@ -114,8 +177,14 @@ String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
   return best;
 }
 
-/// Whether [name] looks like an auto-generated placeholder ("Unknown", hex ID,
-/// etc.) for [nodeId].
+/// Whether [name] looks like an auto-generated placeholder ("Unknown" or this
+/// node's own hex id) rather than a human name.
+///
+/// The label is ID-shaped only when the whole string is hex (optional
+/// separators) and at least 8 digits, and that id refers to [nodeId]. Human
+/// names that merely contain hex letters stay names. Stripping those letters
+/// and prefix-matching the residue treated names like "TestAbe" as the id
+/// whenever the node id started with the leftover hex.
 bool isPlaceholderNodeName(String name, String nodeId) {
   final trimmed = name.trim();
   if (trimmed.isEmpty) return true;
@@ -124,9 +193,17 @@ bool isPlaceholderNodeName(String name, String nodeId) {
       (lower.startsWith('unknown (') && lower.endsWith(')'))) {
     return true;
   }
+  if (!_isHexIdShapedLabel(trimmed)) return false;
   final nameHex = normalizeHexId(trimmed);
   final nodeHex = normalizeHexId(nodeId);
   return nameHex.isNotEmpty &&
       nodeHex.isNotEmpty &&
       idsLikelySameDevice(nameHex, nodeHex);
+}
+
+/// True when [value] is only a hex id, not a word that happens to use A-F.
+bool _isHexIdShapedLabel(String value) {
+  final compact = value.replaceAll(RegExp(r'[\s:\-_]'), '');
+  if (compact.length < 8) return false;
+  return RegExp(r'^[0-9A-Fa-f]+$').hasMatch(compact);
 }

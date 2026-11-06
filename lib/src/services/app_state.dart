@@ -732,17 +732,64 @@ class AppState extends ChangeNotifier {
   /// written onto scans for upload.
   String displayNameForNode(String nodeId, {String? advertisedName}) {
     final fromSession = _bestContactNameForId(_sessionRadioContacts, nodeId);
-    if (fromSession != null && fromSession.isNotEmpty) return fromSession;
-
     final hinted = (advertisedName ?? '').trim();
-    if (hinted.isNotEmpty && !isPlaceholderNodeName(hinted, nodeId)) {
-      return hinted;
+    final hintedUsable =
+        hinted.isNotEmpty && !isPlaceholderNodeName(hinted, nodeId)
+        ? hinted
+        : null;
+    return titleNameForNode(
+      nodeId: nodeId,
+      contactName: fromSession,
+      advertisedName: hintedUsable ?? _storedAdvertisedName(nodeId),
+    );
+  }
+
+  /// Debug line for title diagnosis. Never includes a contact or advert name.
+  String _contactsMatchLog({
+    required String nodeId,
+    required bool matched,
+    required bool hasAdvertName,
+  }) {
+    final node = shortNodeId(nodeId);
+    return 'contacts_match node=$node matched=${matched ? 'yes' : 'no'} '
+        'has_advert_name=${hasAdvertName ? 'yes' : 'no'}';
+  }
+
+  void _logKnownNodeContactMatches() {
+    final seen = <String>{};
+    final ids = <String>[];
+    void add(String? raw) {
+      final trimmed = (raw ?? '').trim();
+      if (trimmed.isEmpty) return;
+      final node = shortNodeId(trimmed);
+      if (node.isEmpty || node == 'Unknown') return;
+      if (!seen.add(node)) return;
+      ids.add(trimmed);
     }
 
-    final stored = _storedAdvertisedName(nodeId);
-    if (stored != null && stored.isNotEmpty) return stored;
+    for (final node in nodes) {
+      add(node.nodeId);
+    }
+    if (ids.isEmpty) {
+      for (final scan in rawScans) {
+        add(scan.nodeId);
+      }
+    }
+    for (final id in ids) {
+      _debugLog.debug(
+        'contacts',
+        _contactsMatchLog(
+          nodeId: id,
+          matched: _bestContactNameForId(_sessionRadioContacts, id) != null,
+          hasAdvertName: _storedAdvertisedName(id) != null,
+        ),
+      );
+    }
+  }
 
-    return _shortNodeId(nodeId);
+  @visibleForTesting
+  void debugLogKnownNodeContactMatches() {
+    _logKnownNodeContactMatches();
   }
 
   @visibleForTesting
@@ -1778,6 +1825,22 @@ class AppState extends ChangeNotifier {
         nodeId: response.publicKeyPrefix,
         advertisedName: responseName,
       );
+      final hasAdvertName =
+          responseName.isNotEmpty &&
+          !isPlaceholderNodeName(responseName, response.publicKeyPrefix);
+      _debugLog.debug(
+        'contacts',
+        _contactsMatchLog(
+          nodeId: nodeId8,
+          matched:
+              _bestContactNameForId(
+                _sessionRadioContacts,
+                response.publicKeyPrefix,
+              ) !=
+              null,
+          hasAdvertName: hasAdvertName,
+        ),
+      );
       final scan = RawScan(
         observerId: connectedMeshId8,
         nodeId: nodeId8,
@@ -1922,6 +1985,7 @@ class AppState extends ChangeNotifier {
 
     if (contacts.isEmpty) {
       _debugLog.info('contacts', 'No contacts returned from radio');
+      _logKnownNodeContactMatches();
       return;
     }
 
@@ -1965,6 +2029,7 @@ class AppState extends ChangeNotifier {
       'contacts',
       'Loaded ${contacts.length} contact(s), session ${sessionContacts.length}, updated $updated scan name field(s)',
     );
+    _logKnownNodeContactMatches();
   }
 
   void _adoptPersistedContactsIntoSession() {
@@ -2325,14 +2390,7 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  String _shortNodeId(String nodeId) {
-    final hex = normalizeHexId(nodeId);
-    if (hex.isEmpty) {
-      final raw = nodeId.trim();
-      return raw.isEmpty ? 'Unknown' : raw;
-    }
-    return hex.length >= 8 ? hex.substring(0, 8) : hex;
-  }
+  String _shortNodeId(String nodeId) => shortNodeId(nodeId);
 
   _DeadzonePrecedenceResult _applyDeadzoneSuccessPrecedenceDetailed(
     List<RawScan> scans, {

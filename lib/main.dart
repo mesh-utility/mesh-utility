@@ -1427,19 +1427,9 @@ class _MeshHomePageState extends State<MeshHomePage>
         trimmed,
         advertisedName: advertisedName,
       );
-      if (label.isEmpty) return;
-      final hex = normalizeHexId(trimmed);
-      final short = hex.length >= 8 ? hex.substring(0, 8) : hex;
-      for (final key in <String>{trimmed, hex, short}) {
-        if (key.isEmpty) continue;
-        final existing = labels[key];
-        if (existing != null &&
-            !isPlaceholderNodeName(existing, key) &&
-            isPlaceholderNodeName(label, key)) {
-          continue;
-        }
-        labels[key] = label;
-      }
+      // Omit the short-id fallback. Storing it made lookup skip the entry
+      // and the Nodes title fell through to the hex id.
+      putResolvedNodeLabel(labels, trimmed, label);
     }
 
     for (final scan in _appState.scanResults) {
