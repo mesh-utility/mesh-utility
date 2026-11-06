@@ -3,6 +3,8 @@ name = "mesh-utility-worker"
 main = "src/index.ts"
 compatibility_date = "2024-10-01"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+preview_urls = true
 
 [[d1_databases]]
 binding = "DB"

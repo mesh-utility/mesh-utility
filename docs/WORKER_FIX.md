@@ -195,3 +195,10 @@ Deploy workflow keeps `WORKER_URL=https://mesh-utility.org/api`.
 - Worker version before this change: `4c934153-8bb5-4d67-86bf-35047dc5f4c4`
 - Pages deploy before this change: `4bc62c69-890a-4025-9c9e-4eb317ad9e94`
 - Or delete the `/api/*` Worker routes in the zone / revert the PR and redeploy.
+
+## Zone route deploy notes (2026-11-05 America/New_York)
+
+- PR #3 added `[[routes]]` for `mesh-utility.org/api/*` (+ www) and `/api` strip.
+- Wrangler disables `workers.dev` when custom routes exist unless `workers_dev = true` is set; keep it true.
+- GitHub Actions `CLOUDFLARE_API_TOKEN` must include **Zone → Workers Routes → Edit** and **Zone → Zone → Read** (or deploy fails on `/workers/scripts/.../routes`). Until that secret is upgraded, Worker+Pages can be deployed with `CF_AAFFILIATE796_TOKEN` via `wrangler` (Python `env=` — shell export of this token breaks wrangler/curl Authorization headers).
+- Rollback Worker version before this change: `4c934153-8bb5-4d67-86bf-35047dc5f4c4`. Pages: `4bc62c69-890a-4025-9c9e-4eb317ad9e94`. Or delete zone routes `mesh-utility.org/api/*` / `www.../api/*`.
