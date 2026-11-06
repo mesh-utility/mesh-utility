@@ -240,17 +240,21 @@ class AppSettings {
 
 class SettingsStore {
   static const _settingsKey = 'settings:app';
-  static const _legacyWorkerHosts = {
-    'mesh-utility-worker.aaffiliate796.workers.dev',
+  // Hosts/paths that look like a Worker URL but are NOT (Pages SPA). Migrate away from them.
+  static const _brokenWorkerUrlMarkers = {
+    'mesh-utility.org/api',
+    'www.mesh-utility.org/api',
   };
 
   String _normalizeWorkerUrl(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return AppConfig.deployedWorkerUrl;
-    final uri = Uri.tryParse(trimmed);
-    final host = uri?.host.toLowerCase() ?? '';
-    if (_legacyWorkerHosts.contains(host)) {
-      return AppConfig.deployedWorkerUrl;
+    final lower = trimmed.toLowerCase();
+    for (final marker in _brokenWorkerUrlMarkers) {
+      if (lower.contains(marker)) {
+        // Prefer the real Worker; do NOT "migrate" workers.dev → mesh-utility.org/api.
+        return AppConfig.deployedWorkerUrl;
+      }
     }
     return trimmed;
   }

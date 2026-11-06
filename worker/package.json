@@ -12,12 +12,22 @@
     "db:query": "wrangler d1 execute mesh-utility-db --command",
     "secret:github": "wrangler secret put GITHUB_TOKEN"
   },
-  "keywords": ["cloudflare", "worker", "meshcore", "github"],
+  "keywords": [
+    "cloudflare",
+    "worker",
+    "meshcore",
+    "github"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.71.0"
+  },
+  "allowScripts": {
+    "esbuild@0.27.3": true,
+    "sharp@0.34.5": true,
+    "workerd@1.20260301.1": true
   }
 }

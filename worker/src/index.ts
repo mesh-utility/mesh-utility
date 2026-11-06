@@ -5,6 +5,13 @@
 
 import { batchCommitToGitHub, getGitHubFileContent } from './github';
 import { ScanBatcher } from './batch';
+import {
+  listScanDaysDesc,
+  timestampRangeForDays,
+  trackMeta,
+  type RowsReadTracker,
+  type ScanDayRow,
+} from './scan_days';
 
 export interface Env {
   DB: D1Database;
@@ -13,6 +20,8 @@ export interface Env {
   GITHUB_BRANCH: string;
   ALLOWED_ORIGINS: string;
   SCAN_BATCH: DurableObjectNamespace;
+  /** Local/dev only: when "1", expose X-D1-Rows-Read on read endpoints. */
+  DEBUG_ROWS?: string;
 }
 
 export interface ScanPayload {
@@ -81,6 +90,105 @@ function parsePositiveInt(raw: string | null, fallback: number, max: number): nu
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.max(1, Math.min(parsed, max));
 }
+
+/** Max calendar days /coverage will scan even when days=0 (all). Prevents bind storms. */
+const COVERAGE_MAX_DAYS = 90;
+/** NDJSON page size cap (was 5000 — too heavy per request). */
+const HISTORY_PAGE_SIZE_MAX = 1000;
+const HISTORY_PAGE_SIZE_DEFAULT = 1000;
+
+function wantsDebugRows(request: Request, env: Env): boolean {
+  const url = new URL(request.url);
+  return env.DEBUG_ROWS === '1' || url.searchParams.get('_debug') === '1';
+}
+
+function withDebugRows(
+  headers: Record<string, string>,
+  tracker: RowsReadTracker | null,
+  enabled: boolean
+): Record<string, string> {
+  if (enabled && tracker) {
+    headers['X-D1-Rows-Read'] = String(tracker.rowsRead);
+  }
+  return headers;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function cachedJsonResponse(
+  request: Request,
+  corsHeaders: Record<string, string>,
+  body: string,
+  cacheControl: string,
+  extraHeaders: Record<string, string> = {}
+): Promise<Response> {
+  const etag = `"${(await sha256Hex(body)).slice(0, 16)}"`;
+  const inm = request.headers.get('If-None-Match');
+  if (inm && inm === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: { ...corsHeaders, ETag: etag, 'Cache-Control': cacheControl },
+    });
+  }
+  const headers: Record<string, string> = {
+    ...corsHeaders,
+    'Content-Type': 'application/json',
+    'Cache-Control': cacheControl,
+    ETag: etag,
+    ...extraHeaders,
+  };
+  const response = new Response(body, { headers });
+  try {
+    const cache = caches.default;
+    // Cache API requires a GET Request as key; store a clone without debug query noise.
+    const cacheUrl = new URL(request.url);
+    cacheUrl.searchParams.delete('_debug');
+    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+    const toStore = response.clone();
+    // fire-and-forget; ignore failures in local/miniflare without Cache
+    void cache.put(cacheKey, toStore).catch(() => {});
+  } catch {
+    // caches.default may be unavailable in some local contexts
+  }
+  return response;
+}
+
+async function matchCachedGet(
+  request: Request,
+  corsHeaders: Record<string, string>
+): Promise<Response | null> {
+  try {
+    const cache = caches.default;
+    const cacheUrl = new URL(request.url);
+    cacheUrl.searchParams.delete('_debug');
+    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+    const hit = await cache.match(cacheKey);
+    if (!hit) return null;
+    const etag = hit.headers.get('ETag');
+    const inm = request.headers.get('If-None-Match');
+    if (inm && etag && inm === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ...corsHeaders,
+          ETag: etag,
+          'Cache-Control': hit.headers.get('Cache-Control') || 'public, max-age=60',
+        },
+      });
+    }
+    // Re-attach CORS for browser callers
+    const headers = new Headers(hit.headers);
+    for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+    return new Response(hit.body, { status: hit.status, headers });
+  } catch {
+    return null;
+  }
+}
+
 
 function parseFiniteFloat(raw: string | null): number | null {
   if (raw == null) return null;
@@ -231,22 +339,23 @@ export default {
         (url.pathname === '/history' || url.pathname === '/history/index.json') &&
         request.method === 'GET'
       ) {
-        // Get distinct dates from scans
-        const result = await env.DB.prepare(`
-          SELECT DISTINCT date(timestamp / 1000, 'unixepoch') as day
-          FROM scans
-          ORDER BY day DESC
-        `).all();
+        const debug = wantsDebugRows(request, env);
+        const tracker: RowsReadTracker = { rowsRead: 0 };
+        const cached = await matchCachedGet(request, corsHeaders);
+        if (cached && !debug) {
+          return cached;
+        }
 
-        const days = (result.results as DayRow[]).map((row) => row.day);
-
-        return new Response(JSON.stringify(days), {
-          headers: {
-            ...corsHeaders,
-            'Content-Type': 'application/json',
-            'Cache-Control': 'public, max-age=120, s-maxage=300',
-          },
-        });
+        const dayRows = await listScanDaysDesc(env.DB, tracker);
+        const days = dayRows.map((row) => row.day);
+        const body = JSON.stringify(days);
+        return cachedJsonResponse(
+          request,
+          corsHeaders,
+          body,
+          'public, max-age=120, s-maxage=300',
+          withDebugRows({}, tracker, debug)
+        );
       }
 
       // Fast aggregated coverage endpoint for map rendering.
@@ -254,6 +363,13 @@ export default {
         (url.pathname === '/coverage' || url.pathname === '/coverage.json') &&
         request.method === 'GET'
       ) {
+        const debug = wantsDebugRows(request, env);
+        const tracker: RowsReadTracker = { rowsRead: 0 };
+        if (!debug) {
+          const cached = await matchCachedGet(request, corsHeaders);
+          if (cached) return cached;
+        }
+
         const geoBounds = buildGeoBounds(
           url.searchParams.get('lat'),
           url.searchParams.get('lng'),
@@ -265,42 +381,59 @@ export default {
           maxDays
         );
 
-        const dayRows = await env.DB.prepare(`
-          SELECT DISTINCT date(timestamp / 1000, 'unixepoch') as day
-          FROM scans
-          ORDER BY day DESC
-        `).all();
-        const allDays = (dayRows.results as DayRow[]).map((row) => String(row.day));
-        const selectedDays = maxDays === 0 ? allDays : allDays.slice(0, maxDays);
-        const selectedDeadzoneDays =
-          deadzoneMaxDays === 0 ? allDays : allDays.slice(0, deadzoneMaxDays);
-        const queryWindowDays = allDays.slice(
-          0,
-          Math.max(selectedDays.length, selectedDeadzoneDays.length)
-        );
+        const allDayRows = await listScanDaysDesc(env.DB, tracker);
+        // days=0 means "all", but cap to COVERAGE_MAX_DAYS to avoid huge scans / bind storms.
+        const takeDays = (n: number): ScanDayRow[] => {
+          if (n === 0) return allDayRows.slice(0, COVERAGE_MAX_DAYS);
+          return allDayRows.slice(0, n);
+        };
+        const selectedDayRows = takeDays(maxDays);
+        const selectedDeadzoneDayRows = takeDays(deadzoneMaxDays);
+        const selectedDays = selectedDayRows.map((r) => r.day);
+        const selectedDeadzoneDays = selectedDeadzoneDayRows.map((r) => r.day);
 
-        if (queryWindowDays.length === 0) {
-          return new Response(JSON.stringify([]), {
+        // Union of selected days for the SQL window (by day string), then timestamp range.
+        const windowDaySet = new Set<string>([...selectedDays, ...selectedDeadzoneDays]);
+        const queryWindowRows = allDayRows.filter((r) => windowDaySet.has(r.day));
+
+        if (queryWindowRows.length === 0) {
+          const body = JSON.stringify([]);
+          return cachedJsonResponse(
+            request,
+            corsHeaders,
+            body,
+            'public, max-age=60, s-maxage=180',
+            withDebugRows({}, tracker, debug)
+          );
+        }
+
+        const range = timestampRangeForDays(queryWindowRows);
+        if (range == null) {
+          return new Response(JSON.stringify({ error: 'invalid day range' }), {
+            status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
 
-        const dayPlaceholders = queryWindowDays.map(() => '?').join(',');
         const geoWhere = geoBounds == null
           ? ''
           : `
             AND latitude BETWEEN ? AND ?
             AND longitude BETWEEN ? AND ?
           `;
-        const scans = await env.DB.prepare(`
+        // Use timestamp range (index-friendly) instead of date(...) IN (...).
+        const scans = trackMeta(
+          tracker,
+          await env.DB.prepare(`
           SELECT radioId, timestamp, latitude, longitude, nodes
           FROM scans
-          WHERE date(timestamp / 1000, 'unixepoch') IN (${dayPlaceholders})
+          WHERE timestamp >= ? AND timestamp <= ?
           ${geoWhere}
           ORDER BY timestamp ASC
         `)
           .bind(
-            ...queryWindowDays,
+            range.minTs,
+            range.maxTs,
             ...(geoBounds == null
               ? []
               : [
@@ -310,7 +443,8 @@ export default {
                   geoBounds.maxLng,
                 ])
           )
-          .all();
+          .all()
+        );
 
         const selectedDaySet = new Set(selectedDays);
         const selectedDeadzoneDaySet = new Set(selectedDeadzoneDays);
@@ -414,13 +548,14 @@ type CoverageAgg = {
           radioId: agg.radioId ?? null,
         }));
 
-        return new Response(JSON.stringify(zones), {
-          headers: {
-            ...corsHeaders,
-            'Content-Type': 'application/json',
-            'Cache-Control': 'public, max-age=60, s-maxage=180',
-          },
-        });
+        const body = JSON.stringify(zones);
+        return cachedJsonResponse(
+          request,
+          corsHeaders,
+          body,
+          'public, max-age=60, s-maxage=180',
+          withDebugRows({}, tracker, debug)
+        );
       }
 
       // Fetch scans for a specific day (NDJSON format)
@@ -435,7 +570,9 @@ type CoverageAgg = {
           url.searchParams.get('deadzoneDays'),
           0
         );
-        const pageSize = parsePositiveInt(url.searchParams.get('pageSize'), 2000, 5000);
+        const pageSize = parsePositiveInt(url.searchParams.get('pageSize'), HISTORY_PAGE_SIZE_DEFAULT, HISTORY_PAGE_SIZE_MAX);
+        const debug = wantsDebugRows(request, env);
+        const tracker: RowsReadTracker = { rowsRead: 0 };
         const cursorTimestampRaw = Number.parseInt(url.searchParams.get('cursorTimestamp') || '', 10);
         const cursorIdRaw = Number.parseInt(url.searchParams.get('cursorId') || '', 10);
         const hasCursor = Number.isFinite(cursorTimestampRaw) && Number.isFinite(cursorIdRaw);
@@ -448,9 +585,10 @@ type CoverageAgg = {
           });
         }
 
-        // Calculate Unix timestamps for the day range
+        // Calculate Unix timestamps for the day range (full UTC day, ms-inclusive).
+        // BUGFIX: old T23:59:59Z dropped timestamps with ms > 0 in the last second.
         const dayStart = new Date(day + 'T00:00:00Z').getTime();
-        const dayEnd = new Date(day + 'T23:59:59Z').getTime();
+        const dayEnd = dayStart + 86_400_000 - 1;
 
         const geoWhere = geoBounds == null
           ? ''
@@ -458,7 +596,9 @@ type CoverageAgg = {
                 AND latitude BETWEEN ? AND ?
                 AND longitude BETWEEN ? AND ?
             `;
-        const scans = hasCursor
+        const scans = trackMeta(
+          tracker,
+          hasCursor
           ? await env.DB.prepare(`
               SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
               FROM scans
@@ -506,17 +646,15 @@ type CoverageAgg = {
                     ]),
                 pageSize + 1
               )
-              .all();
+              .all()
+        );
 
         let includeDeadzonesForDay = true;
         if (deadzoneMaxDays > 0) {
-          const dayRows = await env.DB.prepare(`
-            SELECT DISTINCT date(timestamp / 1000, 'unixepoch') as day
-            FROM scans
-            ORDER BY day DESC
-          `).all();
-          const allDays = (dayRows.results as DayRow[]).map((row) => String(row.day));
-          const selectedDeadzoneDays = allDays.slice(0, deadzoneMaxDays);
+          const dayRows = await listScanDaysDesc(env.DB, tracker);
+          const selectedDeadzoneDays = dayRows
+            .slice(0, deadzoneMaxDays)
+            .map((row) => row.day);
           includeDeadzonesForDay = selectedDeadzoneDays.includes(day);
         }
 
@@ -571,13 +709,13 @@ type CoverageAgg = {
 
         const ndjson = ndjsonLines.join('\n');
 
-        const historyHeaders: Record<string, string> = {
+        const historyHeaders: Record<string, string> = withDebugRows({
           ...corsHeaders,
           'Content-Type': 'application/x-ndjson',
           'Cache-Control': 'public, max-age=120, s-maxage=300',
           'X-Page-Size': `${pageSize}`,
           'X-Has-More': hasMore ? '1' : '0',
-        };
+        }, tracker, debug);
         if (hasMore && lastRow != null) {
           historyHeaders['X-Next-Cursor-Timestamp'] = `${lastRow.timestamp}`;
           historyHeaders['X-Next-Cursor-Id'] = `${lastRow.id ?? 0}`;

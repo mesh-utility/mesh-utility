@@ -4,6 +4,7 @@
  */
 
 import { batchCommitToGitHub, getGitHubFileContent } from './github';
+import { upsertScanDay, utcDayFromTs } from './scan_days';
 
 interface ScanPayload {
   radioId: string;
@@ -135,6 +136,13 @@ export class ScanBatcher {
                 JSON.stringify(scan.nodes)
               )
               .run();
+
+            // Keep scan_days summary in sync (avoids DISTINCT full scans on /history).
+            try {
+              await upsertScanDay(db, utcDayFromTs(scan.timestamp), scan.timestamp);
+            } catch (e) {
+              console.error('Failed to upsert scan_days:', e);
+            }
           }
 
           await this.backfillNodeNamesInD1(db, newScans);
