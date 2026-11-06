@@ -476,19 +476,44 @@ class BleTransport extends Transport {
     await UniversalBle.connect(targetDeviceId, timeout: connectionTimeout);
     _debugLog.info('ble_transport', 'Connected to device $targetDeviceId');
     _deviceId = targetDeviceId;
-    if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android)) {
-      try {
-        final mtu = await UniversalBle.requestMtu(targetDeviceId, 247);
-        _debugLog.info(
-          'ble_transport',
-          'Requested MTU=247 (${defaultTargetPlatform.name}), negotiated=$mtu',
-        );
-      } catch (e) {
-        _debugLog.warn('ble_transport', 'MTU request failed/ignored: $e');
-      }
-    }
+    await preferHighThroughputLink();
 
     await _discoverAndBind(targetDeviceId);
+  }
+
+  /// Ask Android for a large ATT MTU and CONNECTION_PRIORITY_HIGH.
+  ///
+  /// Slow handsets otherwise stay on a ~30–50 ms interval and a 23-byte MTU,
+  /// so each 148-byte contact becomes many notifications and a large book
+  /// stalls. Other platforms, including web, no-op.
+  Future<void> preferHighThroughputLink() async {
+    final id = _deviceId;
+    if (id == null || id.isEmpty) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      final mtu = await UniversalBle.requestMtu(id, 517);
+      _debugLog.info(
+        'ble_transport',
+        'Requested MTU=517 (${defaultTargetPlatform.name}), negotiated=$mtu',
+      );
+    } catch (e) {
+      _debugLog.warn('ble_transport', 'MTU request failed/ignored: $e');
+    }
+    try {
+      await UniversalBle.requestConnectionPriority(
+        id,
+        BleConnectionPriority.highPerformance,
+      );
+      _debugLog.info(
+        'ble_transport',
+        'Requested CONNECTION_PRIORITY_HIGH for $id',
+      );
+    } catch (e) {
+      _debugLog.warn(
+        'ble_transport',
+        'Connection priority request failed/ignored: $e',
+      );
+    }
   }
 
   /// Discover services and subscribe to inbound notifications.

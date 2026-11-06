@@ -365,6 +365,7 @@ class RadioContact {
     required this.publicKeyPrefix,
     required this.name,
     this.type = 0,
+    this.lastMod = 0,
   });
 
   final String publicKeyPrefix;
@@ -373,6 +374,10 @@ class RadioContact {
   /// Advert type from [contactTypeOffset]: [advTypeChat], [advTypeRepeater],
   /// [advTypeRoom], [advTypeSensor]. `0` means unknown/unset.
   final int type;
+
+  /// Companion-clock unix seconds from [contactLastModOffset]. `0` if absent.
+  /// Used as the CMD_GET_CONTACTS `since` cursor. Never uploaded.
+  final int lastMod;
 }
 
 ParsedContactText? parseContactMessageText(Uint8List frame) {
@@ -435,7 +440,15 @@ RadioContact? parseRadioContact(Uint8List frame) {
   if (name.isEmpty) return null;
 
   final type = frame[contactTypeOffset];
-  return RadioContact(publicKeyPrefix: publicKeyPrefix, name: name, type: type);
+  final lastMod = frame.length >= contactLastModOffset + 4
+      ? readUint32LE(frame, contactLastModOffset)
+      : 0;
+  return RadioContact(
+    publicKeyPrefix: publicKeyPrefix,
+    name: name,
+    type: type,
+    lastMod: lastMod,
+  );
 }
 
 String _extractBestContactName(Uint8List frame) {
@@ -510,6 +523,14 @@ int _contactNameScore(String value) {
 
 bool isEndOfContactsFrame(Uint8List frame) {
   return frame.isNotEmpty && frame[0] == respCodeEndOfContacts;
+}
+
+/// `most_recent_lastmod` from RESP_END_OF_CONTACTS (bytes 1..4 LE uint32).
+///
+/// The companion protocol uses this as the next CMD_GET_CONTACTS `since`.
+int? parseEndOfContactsLastMod(Uint8List frame) {
+  if (frame.length < 5 || !isEndOfContactsFrame(frame)) return null;
+  return readUint32LE(frame, 1);
 }
 
 /// Total contact count from RESP_CONTACTS_START (byte0=2, bytes1..4 LE uint32).

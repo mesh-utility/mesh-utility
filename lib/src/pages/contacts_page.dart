@@ -55,8 +55,7 @@ class _ContactsPageState extends State<ContactsPage> {
     filtered.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
     final countLabel = widget.syncProgress.active
-        ? 'Contacts (${widget.syncProgress.received}'
-            '${widget.syncProgress.expected != null ? '/${widget.syncProgress.expected}' : ''}…)'
+        ? widget.syncProgress.progressLabel
         : (showSearch && _query.trim().isNotEmpty
             ? 'Contacts (${filtered.length}/${widget.contacts.length})'
             : 'Contacts (${widget.contacts.length})');
@@ -70,11 +69,7 @@ class _ContactsPageState extends State<ContactsPage> {
             children: [
               const CircularProgressIndicator(),
               const SizedBox(height: 16),
-              Text(
-                widget.syncProgress.expected == null
-                    ? 'Syncing contacts… ${widget.syncProgress.received}'
-                    : 'Syncing contacts… ${widget.syncProgress.received}/${widget.syncProgress.expected}',
-              ),
+              Text(widget.syncProgress.progressLabel),
             ],
           ),
         ),

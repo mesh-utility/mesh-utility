@@ -1995,26 +1995,90 @@ class AppState extends ChangeNotifier {
   Future<void> _syncContactsAndBackfillNames() async {
     if (!bleConnected) return;
     await _adoptPersistedContactsIntoSession();
+    if (_transport is BleTransport) {
+      await (_transport).preferHighThroughputLink();
+    }
     _debugLog.warn('contacts', 'Requesting contacts from radio');
 
-    contactsSyncProgress = const ContactSyncProgress(active: true, received: 0);
+    final radioId = _connectedRadioMeshId8();
+    var stored = <String, LocalContact>{};
+    if (radioId != null && localContactsSupported) {
+      stored = await _contactStore.loadContacts(radioId);
+    }
+    final initialSince = newestStoredLastMod(stored.values);
+    var lastNotifiedReceived = -1;
+    int? lastNotifiedExpected;
+
+    contactsSyncProgress = ContactSyncProgress(
+      active: true,
+      received: stored.length,
+    );
     notifyListeners();
+
+    Future<void> persistBatch(List<SyncedContact> batch) async {
+      if (batch.isEmpty) return;
+      final names = {for (final c in batch) c.publicKeyPrefix: c.name};
+      _pruneSelfContact(names);
+      final kept = [
+        for (final c in batch)
+          if (names.containsKey(c.publicKeyPrefix)) c,
+      ];
+      if (kept.isEmpty) return;
+      for (final c in kept) {
+        _sessionRadioContacts[c.publicKeyPrefix] = c.name;
+        _sessionRadioContactTypes[c.publicKeyPrefix] = c.type;
+        _radioContactsByPrefix[c.publicKeyPrefix] = c.name;
+      }
+      final id = _connectedRadioMeshId8();
+      // The book stays on device. Only REPEATER/ROOM names are eligible for
+      // upload, and that gating is unchanged.
+      if (id == null || !localContactsSupported) return;
+      final now = DateTime.now().toUtc();
+      try {
+        await _contactStore.mergeContacts(id, [
+          for (final c in kept)
+            LocalContact(
+              publicKeyPrefix: c.publicKeyPrefix,
+              name: c.name,
+              type: c.type,
+              lastHeard: now,
+              lastMod: c.lastMod > 0 ? c.lastMod : null,
+              source: 'sync',
+            ),
+        ]);
+      } catch (e) {
+        _debugLog.warn('contacts', 'Incremental store merge failed: $e');
+      }
+    }
 
     final result = await collectContactsFromInbound(
       inbound: _transport.inbound,
-      sendGetContacts: () => _bleProtocol.run(_protocol.getContacts()),
-      idleTimeout: const Duration(seconds: 45),
-      overallTimeout: const Duration(minutes: 8),
-      maxAttempts: 3,
+      sendGetContacts: (since) =>
+          _bleProtocol.run(_protocol.getContacts(since: since)),
+      initialSince: initialSince,
+      seedContacts: {
+        for (final c in stored.values) c.publicKeyPrefix: c.name,
+      },
+      seedTypes: {for (final c in stored.values) c.publicKeyPrefix: c.type},
+      seedLastMods: {
+        for (final c in stored.values)
+          if (c.lastMod != null && c.lastMod! > 0) c.publicKeyPrefix: c.lastMod!,
+      },
+      idleTimeout: const Duration(seconds: 90),
+      maxAttempts: 4,
+      onContacts: persistBatch,
       onProgress: (progress) {
         contactsSyncProgress = progress;
-        // Throttle UI churn: notify every 25 contacts or on phase change.
-        if (progress.received == 0 ||
-            progress.received % 25 == 0 ||
+        final expectedChanged = progress.expected != lastNotifiedExpected;
+        lastNotifiedExpected = progress.expected;
+        final jumped = lastNotifiedReceived < 0 ||
+            progress.received - lastNotifiedReceived >= 25 ||
+            progress.received < lastNotifiedReceived;
+        if (jumped ||
+            expectedChanged ||
             progress.completed ||
-            progress.timedOut ||
-            (progress.expected != null &&
-                progress.received == progress.expected)) {
+            progress.timedOut) {
+          lastNotifiedReceived = progress.received;
           notifyListeners();
         }
       },
@@ -2032,7 +2096,9 @@ class AppState extends ChangeNotifier {
       'contacts',
       'sync done received=${result.contacts.length} '
       'expected=${result.expectedTotal ?? -1} '
-      'sawEnd=${result.sawEnd} timedOut=${result.timedOut}',
+      'sawEnd=${result.sawEnd} timedOut=${result.timedOut} '
+      'attempts=${result.attempts} since=${initialSince ?? 0} '
+      'newestLastMod=${result.newestLastMod ?? 0}',
     );
 
     if (result.contacts.isEmpty) {
@@ -2064,16 +2130,22 @@ class AppState extends ChangeNotifier {
         ..addAll(sessionTypes);
     }
 
-    // Persist/merge into on-device master store (Android/Linux). Never upload
-    // the full book; REPEATER/ROOM upload gating is unchanged.
-    final radioId = _connectedRadioMeshId8();
-    if (radioId == null) {
+    // Final merge covers anything still buffered and records lastmod for the
+    // next resume. The book never leaves the device.
+    final persistedRadioId = _connectedRadioMeshId8();
+    if (persistedRadioId == null) {
       _debugLog.warn(
         'contacts',
         'Radio id unknown; keeping ${sessionContacts.length} contact(s) in memory only',
       );
     } else if (localContactsSupported) {
       final now = DateTime.now().toUtc();
+      int? keptLastMod(String key) {
+        final value = result.lastMods[key];
+        if (value == null || value <= 0) return null;
+        return value;
+      }
+
       final incoming = <LocalContact>[
         for (final e in sessionContacts.entries)
           LocalContact(
@@ -2081,10 +2153,11 @@ class AppState extends ChangeNotifier {
             name: e.value,
             type: sessionTypes[e.key] ?? 0,
             lastHeard: now,
+            lastMod: keptLastMod(e.key),
             source: 'sync',
           ),
       ];
-      final merged = await _contactStore.mergeContacts(radioId, incoming);
+      final merged = await _contactStore.mergeContacts(persistedRadioId, incoming);
       // Reflect full local book (includes previously heard companions).
       _sessionRadioContacts
         ..clear()

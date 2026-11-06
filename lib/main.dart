@@ -991,6 +991,8 @@ class _MeshHomePageState extends State<MeshHomePage>
                 .clamp(224.0, 280.0)
                 .toDouble();
             String scanHeaderLabel() {
+              final sync = _appState.contactsSyncProgress;
+              if (sync.active) return sync.progressLabel;
               if (!_appState.bleConnected) return 'Idle';
               if (!_appState.bleScanning) return 'Paused';
               final liveStatus = _appState.bleStatus.trim();

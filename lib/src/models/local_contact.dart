@@ -8,6 +8,7 @@ class LocalContact {
     required this.name,
     required this.type,
     required this.lastHeard,
+    this.lastMod,
     this.path,
     this.source = 'sync',
   });
@@ -17,6 +18,11 @@ class LocalContact {
   /// MeshCore advert/contact type: chat=1, repeater=2, room=3, sensor=4.
   final int type;
   final DateTime lastHeard;
+
+  /// Companion-clock unix seconds (contact `lastmod`). Stays on device.
+  /// `null` or `<= 0` means unknown. Resume sync uses the newest value.
+  final int? lastMod;
+
   /// Optional path / out-path hint from discover when known.
   final String? path;
   /// `sync`, `advert`, `discover`, or `push`.
@@ -27,6 +33,7 @@ class LocalContact {
     String? name,
     int? type,
     DateTime? lastHeard,
+    int? lastMod,
     String? path,
     String? source,
   }) {
@@ -35,6 +42,7 @@ class LocalContact {
       name: name ?? this.name,
       type: type ?? this.type,
       lastHeard: lastHeard ?? this.lastHeard,
+      lastMod: lastMod ?? this.lastMod,
       path: path ?? this.path,
       source: source ?? this.source,
     );
@@ -45,6 +53,7 @@ class LocalContact {
         'name': name,
         'type': type,
         'lastHeard': lastHeard.toUtc().toIso8601String(),
+        'lastMod': lastMod,
         'path': path,
         'source': source,
       };
@@ -56,10 +65,22 @@ class LocalContact {
       type: (json['type'] as num?)?.toInt() ?? 0,
       lastHeard: DateTime.tryParse(json['lastHeard']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      lastMod: (json['lastMod'] as num?)?.toInt(),
       path: json['path']?.toString(),
       source: (json['source'] ?? 'sync').toString(),
     );
   }
+}
+
+/// Newest positive companion `lastmod` in [contacts], or null when none.
+int? newestStoredLastMod(Iterable<LocalContact> contacts) {
+  int? newest;
+  for (final contact in contacts) {
+    final value = contact.lastMod;
+    if (value == null || value <= 0) continue;
+    if (newest == null || value > newest) newest = value;
+  }
+  return newest;
 }
 
 /// Case-insensitive substring match on name or public-key prefix.
@@ -90,12 +111,22 @@ LocalContact mergeLocalContact(LocalContact existing, LocalContact incoming) {
   final path = (incoming.path != null && incoming.path!.trim().isNotEmpty)
       ? incoming.path
       : existing.path;
+  final lastMod = _newerLastMod(existing.lastMod, incoming.lastMod);
   return LocalContact(
     publicKeyPrefix: existing.publicKeyPrefix,
     name: name,
     type: type,
     lastHeard: lastHeard,
+    lastMod: lastMod,
     path: path,
     source: incoming.source,
   );
+}
+
+int? _newerLastMod(int? existing, int? incoming) {
+  final a = (existing != null && existing > 0) ? existing : null;
+  final b = (incoming != null && incoming > 0) ? incoming : null;
+  if (a == null) return b;
+  if (b == null) return a;
+  return a > b ? a : b;
 }

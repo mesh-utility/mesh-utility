@@ -288,6 +288,18 @@ void main() {
       expect(parsed.name, equals('TestRep'));
       expect(parsed.type, equals(advTypeRepeater));
       expect(isInfrastructureAdvertType(parsed.type), isTrue);
+      expect(parsed.lastMod, 0);
+    });
+
+    test('parseRadioContact reads little-endian lastmod', () {
+      final frame = contactFrame(type: advTypeRepeater, name: 'TestRep');
+      frame[contactLastModOffset] = 0x78;
+      frame[contactLastModOffset + 1] = 0x56;
+      frame[contactLastModOffset + 2] = 0x34;
+      frame[contactLastModOffset + 3] = 0x12;
+      final parsed = parseRadioContact(frame);
+      expect(parsed, isNotNull);
+      expect(parsed!.lastMod, 0x12345678);
     });
 
     test('parseRadioContact reads room type', () {

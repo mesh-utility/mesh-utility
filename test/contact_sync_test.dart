@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/transport/ble_frame_assembler.dart';
 import 'package:mesh_utility/transport/contact_sync.dart';
 import 'package:mesh_utility/transport/protocol.dart';
@@ -34,6 +36,7 @@ Uint8List buildSyntheticContactFrame({
   required int index,
   required String name,
   int type = advTypeRepeater,
+  int lastMod = 0,
 }) {
   final frame = Uint8List(contactFrameSize);
   frame[0] = respCodeContact;
@@ -54,7 +57,13 @@ Uint8List buildSyntheticContactFrame({
     frame[contactNameOffset + i] = nameBytes[i];
   }
   frame[contactNameOffset + len] = 0;
+  frame.setRange(contactLastModOffset, contactLastModOffset + 4, _le32(lastMod));
   return frame;
+}
+
+String syntheticContactPrefix(int index) {
+  final frame = buildSyntheticContactFrame(index: index, name: 'Rep$index');
+  return parseRadioContact(frame)!.publicKeyPrefix;
 }
 
 /// Minimal PUSH advert-like frame that is not a contact.
@@ -140,41 +149,201 @@ void main() {
   });
 
   group('collectContactsFromInbound', () {
-    test('collects 750 contacts with idle timeout, not a short total timeout', () async {
+    test('collects 900 contacts across stalls and interleaved pushes', () async {
       final controller = StreamController<Uint8List>.broadcast();
       final progressEvents = <ContactSyncProgress>[];
+      final requests = <int?>[];
+      const total = 900;
 
       final future = collectContactsFromInbound(
         inbound: controller.stream,
-        sendGetContacts: () async {
-          // Producer: emit start, contacts with small gaps, then end.
-          // Gaps of 30ms would exceed a 12s/750 model but are fine for idle=2s.
-          controller.add(buildContactsStartFrame(750));
-          for (var i = 0; i < 750; i++) {
+        sendGetContacts: (since) async {
+          requests.add(since);
+          // Gaps of 80ms would trip a short total timeout. A push between
+          // the two halves of a stall must reset the per-frame idle timer.
+          controller.add(buildContactsStartFrame(total));
+          for (var i = 0; i < total; i++) {
             controller.add(
-              buildSyntheticContactFrame(index: i, name: 'Rep$i'),
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                lastMod: 1000 + i,
+              ),
             );
             if (i % 10 == 9) {
               controller.add(buildPushAdvertFrame());
             }
-            if (i % 50 == 49) {
-              await Future<void>.delayed(const Duration(milliseconds: 40));
+            if (i % 100 == 99) {
+              await Future<void>.delayed(const Duration(milliseconds: 80));
+              controller.add(buildPushAdvertFrame());
+              await Future<void>.delayed(const Duration(milliseconds: 80));
             }
           }
-          controller.add(buildEndOfContactsFrame());
+          controller.add(buildEndOfContactsFrame(lastmod: 1000 + total - 1));
         },
         onProgress: progressEvents.add,
-        idleTimeout: const Duration(seconds: 2),
-        overallTimeout: const Duration(minutes: 2),
+        idleTimeout: const Duration(milliseconds: 150),
+        maxAttempts: 2,
+        retryDelay: Duration.zero,
       );
 
-      final result = await future;
+      final result = await future.timeout(const Duration(seconds: 20));
+      expect(requests, [null]);
       expect(result.sawEnd, isTrue);
       expect(result.timedOut, isFalse);
-      expect(result.contacts.length, 750);
-      expect(result.expectedTotal, 750);
+      expect(result.contacts.length, total);
+      expect(result.expectedTotal, total);
+      expect(result.newestLastMod, 1000 + total - 1);
       expect(progressEvents, isNotEmpty);
       expect(progressEvents.last.completed, isTrue);
+      expect(progressEvents.last.progressLabel, 'Contacts $total/$total');
+      final parsed = parseRadioContact(
+        buildSyntheticContactFrame(index: 7, name: 'Rep7', lastMod: 4242),
+      );
+      expect(parsed!.lastMod, 4242);
+      await controller.close();
+    });
+
+    test('resumes a mid-sync stop from the newest stored lastmod', () async {
+      final controller = StreamController<Uint8List>.broadcast();
+      final requests = <int?>[];
+      final store = <String, String>{};
+      final storeLastMods = <String, int>{};
+      final storeSizesAtRequest = <int>[];
+      const total = 900;
+      const firstBatch = 440;
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: (since) async {
+          storeSizesAtRequest.add(store.length);
+          requests.add(since);
+          if (requests.length == 1) {
+            controller.add(buildContactsStartFrame(total));
+            for (var i = 0; i < firstBatch; i++) {
+              controller.add(
+                buildSyntheticContactFrame(
+                  index: i,
+                  name: 'Rep$i',
+                  type: i.isEven ? advTypeRepeater : advTypeChat,
+                  lastMod: 1000 + i,
+                ),
+              );
+              if (i % 10 == 9) controller.add(buildPushAdvertFrame());
+            }
+            return;
+          }
+          final threshold = since ?? 0;
+          for (var i = 0; i < total; i++) {
+            final lastMod = 1000 + i;
+            if (lastMod <= threshold) continue;
+            controller.add(
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                type: i.isEven ? advTypeRepeater : advTypeRoom,
+                lastMod: lastMod,
+              ),
+            );
+            if (i % 17 == 0) controller.add(buildPushAdvertFrame());
+          }
+          controller.add(buildEndOfContactsFrame(lastmod: 1000 + total - 1));
+        },
+        onContacts: (batch) async {
+          for (final contact in batch) {
+            store[contact.publicKeyPrefix] = contact.name;
+            if (contact.lastMod > 0) {
+              storeLastMods[contact.publicKeyPrefix] = contact.lastMod;
+            }
+          }
+        },
+        idleTimeout: const Duration(milliseconds: 200),
+        retryDelay: const Duration(milliseconds: 20),
+        maxAttempts: 3,
+        checkpointEvery: 25,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 10));
+      expect(requests, [null, 1000 + firstBatch - 1]);
+      expect(storeSizesAtRequest, [0, firstBatch]);
+      expect(result.sawEnd, isTrue);
+      expect(result.timedOut, isFalse);
+      expect(result.contacts.length, total);
+      expect(result.expectedTotal, total);
+      expect(store.length, total);
+      expect(storeLastMods.length, total);
+      expect(storeLastMods.values.reduce((a, b) => a > b ? a : b), 1000 + total - 1);
+      // Companion names are stored locally; the sync result keeps their types.
+      final chatPrefix = syntheticContactPrefix(1);
+      expect(result.contactTypes[chatPrefix], advTypeChat);
+      await controller.close();
+    });
+
+    test('full dump follows a since-filter that ends short of the total', () async {
+      final controller = StreamController<Uint8List>.broadcast();
+      final requests = <int?>[];
+      const total = 10;
+      final seedContacts = <String, String>{};
+      final seedTypes = <String, int>{};
+      final seedLastMods = <String, int>{};
+      for (var i = 0; i < 4; i++) {
+        final frame = buildSyntheticContactFrame(
+          index: i,
+          name: 'Rep$i',
+          lastMod: i + 1,
+        );
+        final parsed = parseRadioContact(frame)!;
+        seedContacts[parsed.publicKeyPrefix] = parsed.name;
+        seedTypes[parsed.publicKeyPrefix] = parsed.type;
+        seedLastMods[parsed.publicKeyPrefix] = parsed.lastMod;
+      }
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        initialSince: 4,
+        seedContacts: seedContacts,
+        seedTypes: seedTypes,
+        seedLastMods: seedLastMods,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          if (requests.length == 1) {
+            controller.add(buildContactsStartFrame(total));
+            for (var i = 4; i < 6; i++) {
+              controller.add(
+                buildSyntheticContactFrame(
+                  index: i,
+                  name: 'Rep$i',
+                  lastMod: i + 1,
+                ),
+              );
+            }
+            controller.add(buildEndOfContactsFrame(lastmod: 6));
+            return;
+          }
+          controller.add(buildContactsStartFrame(total));
+          for (var i = 0; i < total; i++) {
+            controller.add(
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                lastMod: i + 1,
+              ),
+            );
+            if (i == 3) controller.add(buildPushAdvertFrame());
+          }
+          controller.add(buildEndOfContactsFrame(lastmod: total));
+        },
+        idleTimeout: const Duration(seconds: 2),
+        retryDelay: Duration.zero,
+        maxAttempts: 3,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 5));
+      expect(requests, [4, null]);
+      expect(result.sawEnd, isTrue);
+      expect(result.timedOut, isFalse);
+      expect(result.contacts.length, total);
+      expect(result.expectedTotal, total);
       await controller.close();
     });
 
@@ -182,7 +351,7 @@ void main() {
       final controller = StreamController<Uint8List>.broadcast();
       final future = collectContactsFromInbound(
         inbound: controller.stream,
-        sendGetContacts: () async {
+        sendGetContacts: (since) async {
           controller.add(buildContactsStartFrame(100));
           for (var i = 0; i < 5; i++) {
             controller.add(buildSyntheticContactFrame(index: i, name: 'Rep$i'));
@@ -190,7 +359,8 @@ void main() {
           // No END frame — wait for idle timeout.
         },
         idleTimeout: const Duration(milliseconds: 200),
-        overallTimeout: const Duration(seconds: 5),
+        retryDelay: const Duration(milliseconds: 20),
+        maxAttempts: 2,
       );
 
       final result = await future.timeout(const Duration(seconds: 3));
@@ -212,12 +382,11 @@ void main() {
       final start = DateTime.now();
       final future = collectContactsFromInbound(
         inbound: controller.stream,
-        sendGetContacts: () async {
+        sendGetContacts: (since) async {
           controller.add(buildContactsStartFrame(2));
           controller.add(buildSyntheticContactFrame(index: 0, name: 'Rep0'));
         },
         idleTimeout: const Duration(milliseconds: 200),
-        overallTimeout: const Duration(seconds: 3),
         maxAttempts: 1,
       );
       await Future<void>.delayed(const Duration(milliseconds: 80));
@@ -234,5 +403,25 @@ void main() {
       expect(DateTime.now().difference(start).inMilliseconds, greaterThan(200));
     });
 
+    test('reads the END frame lastmod', () {
+      expect(parseEndOfContactsLastMod(buildEndOfContactsFrame(lastmod: 99)), 99);
+      expect(parseEndOfContactsLastMod(Uint8List.fromList([4])), isNull);
+    });
+  });
+
+  testWidgets('contacts page shows Contacts n/total while syncing', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ContactsPage(
+          contacts: {'AA': 'Rep'},
+          syncProgress: ContactSyncProgress(
+            active: true,
+            received: 441,
+            expected: 891,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Contacts 441/891'), findsOneWidget);
   });
 }

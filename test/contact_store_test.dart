@@ -49,6 +49,35 @@ void main() {
       expect(m.lastHeard, DateTime.utc(2026, 1, 3));
       expect(m.path, 'path1');
     });
+
+    test('keeps the newer lastMod and ignores unknown values', () {
+      final a = LocalContact(
+        publicKeyPrefix: 'AA',
+        name: 'Rep1',
+        type: 2,
+        lastHeard: DateTime.utc(2026, 1, 1),
+        lastMod: 50,
+      );
+      final older = LocalContact(
+        publicKeyPrefix: 'AA',
+        name: 'Rep1',
+        type: 2,
+        lastHeard: DateTime.utc(2026, 1, 2),
+        lastMod: 10,
+      );
+      final unknown = LocalContact(
+        publicKeyPrefix: 'AA',
+        name: 'Rep1',
+        type: 2,
+        lastHeard: DateTime.utc(2026, 1, 2),
+      );
+      expect(mergeLocalContact(a, older).lastMod, 50);
+      expect(mergeLocalContact(a, unknown).lastMod, 50);
+      expect(
+        newestStoredLastMod([a, older.copyWith(publicKeyPrefix: 'BB', lastMod: 80)]),
+        80,
+      );
+    });
   });
 
   group('ContactStore merge', () {
