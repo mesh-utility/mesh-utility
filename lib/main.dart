@@ -215,6 +215,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   bool _startupNavResolved = false;
   bool _startupRoutedToConnections = false;
   bool _previousBleConnected = false;
+  String _appVersion = kAppVersionLabel;
 
   /// Navigate to a page index, auto-triggering a BLE scan when arriving at
   /// the Connections page (index 1) if not already connected.
@@ -252,11 +253,9 @@ class _MeshHomePageState extends State<MeshHomePage>
       localStore: LocalStore(),
       transport: createDefaultTransport(),
     )..initialize();
-    _updateService = AppUpdateService(currentVersionLabel: kAppVersionLabel);
+    _updateService = AppUpdateService(currentVersionLabel: _appVersion);
     _updateService.addListener(_onAppStateChanged);
-    if (localContactsSupported) {
-      unawaited(_maybeCheckForUpdatesOnLaunch());
-    }
+    unawaited(_resolveVersionAndMaybeCheckUpdates());
     _appState.addListener(_onAppStateChanged);
     _appState.onBlePinRequest = _showBlePinDialog;
     _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
@@ -293,6 +292,24 @@ class _MeshHomePageState extends State<MeshHomePage>
     );
   }
 
+  Future<void> _resolveVersionAndMaybeCheckUpdates() async {
+    final version = await loadAppVersion();
+    if (!mounted) return;
+    if (version != _appVersion) {
+      setState(() {
+        _appVersion = version;
+        _updateService.currentVersionLabel = version;
+      });
+    } else {
+      _updateService.currentVersionLabel = version;
+    }
+    _debugLog.info(
+      'version',
+      'App version $version (${alphaReleaseLabel(version)})',
+    );
+    if (!localContactsSupported) return;
+    await _maybeCheckForUpdatesOnLaunch();
+  }
 
   Future<void> _maybeCheckForUpdatesOnLaunch() async {
     final info = await _updateService.check(force: false);
@@ -332,9 +349,9 @@ class _MeshHomePageState extends State<MeshHomePage>
                 final err = await _updateService.installAvailable();
                 if (!mounted) return;
                 if (err != null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(err)),
-                  );
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(err)));
                 }
               },
               child: const Text('Install update'),
@@ -986,6 +1003,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         return LayoutBuilder(
           builder: (context, constraints) {
             final desktop = constraints.maxWidth >= 860;
+            final versionFooter = meshUtilityFooterLabel(_appVersion);
             final compactHeader = constraints.maxWidth < 520;
             final desktopSidebarWidth = (constraints.maxWidth * 0.22)
                 .clamp(224.0, 280.0)
@@ -1116,6 +1134,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                   ? null
                   : Drawer(
                       child: _AppSidebar(
+                        footerLabel: versionFooter,
                         selectedIndex: _index,
                         onSelect: (i) {
                           _debugLog.info(
@@ -1152,6 +1171,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                     SizedBox(
                       width: desktopSidebarWidth,
                       child: _AppSidebar(
+                        footerLabel: versionFooter,
                         selectedIndex: _index,
                         onSelect: (i) {
                           _debugLog.info(
@@ -1478,11 +1498,13 @@ class _MeshHomePageState extends State<MeshHomePage>
             await _appState.updateSettings(value);
           },
           onSync: _appState.syncFromWorker,
+          // In-app install is Android/Linux only (same gate as contacts).
           onCheckForUpdates: localContactsSupported
               ? _checkForUpdatesFromSettings
               : null,
           updateStatusMessage: _updateService.statusMessage,
           updateChecking: _updateService.checking,
+          currentVersionLabel: alphaReleaseLabel(_appVersion),
         );
       case 6:
         return const PrivacyPage();
@@ -1607,6 +1629,7 @@ class _PromptCard extends StatelessWidget {
 
 class _AppSidebar extends StatelessWidget {
   const _AppSidebar({
+    required this.footerLabel,
     required this.selectedIndex,
     required this.onSelect,
     required this.onDiscord,
@@ -1615,6 +1638,7 @@ class _AppSidebar extends StatelessWidget {
     required this.onPrivacy,
   });
 
+  final String footerLabel;
   final int selectedIndex;
   final ValueChanged<int> onSelect;
   final Future<void> Function() onDiscord;
@@ -1759,10 +1783,10 @@ class _AppSidebar extends StatelessWidget {
                     label: Text(i18n.t('nav.privacyPolicy')),
                   ),
                   const SizedBox(height: 6),
-                  const Center(
+                  Center(
                     child: Text(
-                      'Mesh Utility v1.2',
-                      style: TextStyle(fontSize: 11),
+                      footerLabel,
+                      style: const TextStyle(fontSize: 11),
                     ),
                   ),
                 ],

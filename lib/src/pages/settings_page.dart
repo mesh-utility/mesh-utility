@@ -33,6 +33,7 @@ class SettingsPage extends StatefulWidget {
     required this.connectedRadioId,
     required this.darkMode,
     required this.onToggleTheme,
+    required this.currentVersionLabel,
     this.onCheckForUpdates,
     this.updateStatusMessage,
     this.updateChecking = false,
@@ -62,6 +63,11 @@ class SettingsPage extends StatefulWidget {
   final String? connectedRadioId;
   final bool darkMode;
   final VoidCallback onToggleTheme;
+
+  /// `Alpha-N`, from the same resolved version the update checker uses.
+  final String currentVersionLabel;
+
+  /// When non-null, shows the App updates section (Android and Linux).
   final Future<void> Function()? onCheckForUpdates;
   final String? updateStatusMessage;
   final bool updateChecking;
@@ -775,7 +781,42 @@ class _SettingsPageState extends State<SettingsPage> {
                           : 'Sync now (${widget.uploadQueueCount})',
                     ),
                   ),
-                  if (widget.onCheckForUpdates != null) ...[
+                ],
+              ),
+            ),
+          ),
+          if (widget.onCheckForUpdates != null) ...[
+            const SizedBox(height: 10),
+            Card(
+              elevation: 3,
+              shadowColor: Theme.of(
+                context,
+              ).colorScheme.shadow.withValues(alpha: 0.28),
+              surfaceTintColor: Theme.of(
+                context,
+              ).colorScheme.primary.withValues(alpha: 0.06),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: BorderSide(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const _CardSectionHeader(
+                      title: 'App updates',
+                      icon: Icons.system_update,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Current version: ${widget.currentVersionLabel}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                     const SizedBox(height: 8),
                     OutlinedButton.icon(
                       onPressed: widget.updateChecking
@@ -797,10 +838,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                       ),
                   ],
-                ],
+                ),
               ),
             ),
-          ),
+          ],
           const SizedBox(height: 10),
           Card(
             elevation: 3,

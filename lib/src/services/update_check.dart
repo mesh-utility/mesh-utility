@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
 
 /// Parsed GitHub release used for in-app update checks.
@@ -26,14 +27,6 @@ class AppReleaseInfo {
   final String? linuxArchiveUrl;
 }
 
-/// Extract N from tags like `Alpha-17`, `alpha-17`, `vAlpha-17`.
-int? parseAlphaNumber(String tagOrVersion) {
-  final m = RegExp(r'alpha[^\d]*(\d+)', caseSensitive: false)
-      .firstMatch(tagOrVersion.trim());
-  if (m == null) return null;
-  return int.tryParse(m.group(1)!);
-}
-
 /// True when [latestTag] is a newer Alpha-N than [currentVersion].
 bool isNewerAlphaRelease({
   required String currentVersion,
@@ -54,17 +47,20 @@ Future<AppReleaseInfo?> fetchLatestRelease({
   final httpClient = client ?? http.Client();
   final ownedClient = client == null;
   try {
-    final url = uri ??
+    final url =
+        uri ??
         Uri.parse(
           'https://api.github.com/repos/mesh-utility/mesh-utility/releases/latest',
         );
-    final resp = await httpClient.get(
-      url,
-      headers: const {
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    ).timeout(const Duration(seconds: 12));
+    final resp = await httpClient
+        .get(
+          url,
+          headers: const {
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        )
+        .timeout(const Duration(seconds: 12));
     if (resp.statusCode != 200) return null;
     final json = jsonDecode(resp.body);
     if (json is! Map) return null;
@@ -80,8 +76,7 @@ Future<AppReleaseInfo?> fetchLatestRelease({
         if (a is! Map) continue;
         final name = (a['name'] ?? '').toString();
         final url = (a['browser_download_url'] ?? '').toString();
-        if (name.endsWith('-android.apk') &&
-            name.startsWith('mesh-utility-')) {
+        if (name.endsWith('-android.apk') && name.startsWith('mesh-utility-')) {
           apkUrl = url;
         } else if (name.endsWith('-linux-x64.tar.gz') &&
             name.startsWith('mesh-utility-')) {

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/services/update_check.dart';
 
 void main() {
@@ -14,10 +15,7 @@ void main() {
   group('isNewerAlphaRelease', () {
     test('detects newer tags', () {
       expect(
-        isNewerAlphaRelease(
-          currentVersion: 'Alpha-16',
-          latestTag: 'Alpha-17',
-        ),
+        isNewerAlphaRelease(currentVersion: 'Alpha-16', latestTag: 'Alpha-17'),
         isTrue,
       );
       expect(
@@ -28,10 +26,7 @@ void main() {
         isFalse,
       );
       expect(
-        isNewerAlphaRelease(
-          currentVersion: 'Alpha-17',
-          latestTag: 'Alpha-16',
-        ),
+        isNewerAlphaRelease(currentVersion: 'Alpha-17', latestTag: 'Alpha-16'),
         isFalse,
       );
     });
@@ -43,10 +38,7 @@ void main() {
 aaa mesh-utility-Alpha-17-android.apk
 bbb mesh-utility-Alpha-17-linux-x64.tar.gz
 ''';
-      expect(
-        sha256ForAsset(body, 'mesh-utility-Alpha-17-android.apk'),
-        'aaa',
-      );
+      expect(sha256ForAsset(body, 'mesh-utility-Alpha-17-android.apk'), 'aaa');
       expect(sha256ForAsset(body, 'missing.apk'), isNull);
     });
   });

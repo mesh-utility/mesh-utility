@@ -75,7 +75,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
+        run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
 
       - name: Stage release artifact
         run: |
@@ -127,7 +127,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Linux (release)
-        run: flutter build linux --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
+        run: flutter build linux --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
 
       - name: Stage release artifact
         run: |
@@ -172,7 +172,7 @@ jobs:
       - name: Build Windows (release)
         # bash so $WORKER_URL / $BUILD_NAME expand (default pwsh would not).
         shell: bash
-        run: flutter build windows --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
+        run: flutter build windows --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
 
       - name: Stage release artifact
         shell: pwsh
@@ -215,7 +215,7 @@ jobs:
           echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
 
       - name: Build Web (release)
-        run: flutter build web --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
+        run: flutter build web --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
 
   publish-release-assets:
     name: Publish Release Assets

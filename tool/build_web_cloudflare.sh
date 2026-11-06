@@ -10,15 +10,24 @@ cd "$ROOT_DIR"
 
 WORKER_URL="${WORKER_URL:-https://mesh-utility-worker.aaffiliate796.workers.dev}"
 BASE_HREF="${BASE_HREF:-/}"
+# package_info fetches version.json from the server on web, so bake the
+# pubspec version into the bundle. The side nav reads APP_VERSION first.
+APP_VERSION="$(awk '/^version:/ { print $2; exit }' pubspec.yaml)"
+if [[ -z "${APP_VERSION}" ]]; then
+  echo "Could not read version from pubspec.yaml" >&2
+  exit 1
+fi
 
 echo "Building Flutter web bundle..."
 echo "  WORKER_URL=${WORKER_URL}"
 echo "  BASE_HREF=${BASE_HREF}"
+echo "  APP_VERSION=${APP_VERSION}"
 
 flutter build web \
   --release \
   --base-href "${BASE_HREF}" \
-  --dart-define=WORKER_URL="${WORKER_URL}"
+  --dart-define=WORKER_URL="${WORKER_URL}" \
+  --dart-define=APP_VERSION="${APP_VERSION}"
 
 if [[ ! -f "build/web/_redirects" ]]; then
   cp web/_redirects build/web/_redirects
