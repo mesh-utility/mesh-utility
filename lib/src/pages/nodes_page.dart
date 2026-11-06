@@ -4,6 +4,7 @@ import 'package:mesh_utility/src/models/mesh_node.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 
 class NodesPage extends StatefulWidget {
@@ -12,6 +13,7 @@ class NodesPage extends StatefulWidget {
     required this.nodes,
     required this.scanResults,
     required this.onOpenMapForNode,
+    this.resolvedNodeNames = const {},
     this.statsRadiusMiles = 0,
     this.observerLat,
     this.observerLng,
@@ -20,6 +22,7 @@ class NodesPage extends StatefulWidget {
   final List<MeshNode> nodes;
   final List<ScanResult> scanResults;
   final ValueChanged<String> onOpenMapForNode;
+  final Map<String, String> resolvedNodeNames;
   final int statsRadiusMiles;
   final double? observerLat;
   final double? observerLng;
@@ -62,7 +65,8 @@ class _NodesPageState extends State<NodesPage> {
     final filtered = _sortedNodes.where((n) {
       if (_query.isEmpty) return true;
       final q = _query.toLowerCase();
-      return (n.name ?? '').toLowerCase().contains(q) ||
+      return _nodeTitle(n).toLowerCase().contains(q) ||
+          (n.name ?? '').toLowerCase().contains(q) ||
           n.nodeId.toLowerCase().contains(q);
     }).toList();
 
@@ -213,9 +217,7 @@ class _NodesPageState extends State<NodesPage> {
                                       const SizedBox(width: 6),
                                       Expanded(
                                         child: Text(
-                                          node.name?.isNotEmpty == true
-                                              ? node.name!
-                                              : node.nodeId,
+                                          _nodeTitle(node),
                                           style: const TextStyle(
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -370,6 +372,20 @@ class _NodesPageState extends State<NodesPage> {
         ),
       ),
     );
+  }
+
+  String _nodeTitle(MeshNode node) {
+    final resolved = resolvedNameForNodeId(
+      widget.resolvedNodeNames,
+      node.nodeId,
+    );
+    if (resolved != null && resolved.isNotEmpty) return resolved;
+    final advertised = node.name?.trim() ?? '';
+    if (advertised.isNotEmpty &&
+        !isPlaceholderNodeName(advertised, node.nodeId)) {
+      return advertised;
+    }
+    return node.nodeId;
   }
 
   void _processScans() {

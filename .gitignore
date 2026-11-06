@@ -53,3 +53,9 @@ app.*.map.json
 /.wrangler/
 .env
 .env.*
+
+# Android release signing material (never commit)
+**/key.properties
+*.jks
+*.p12
+*.keystore

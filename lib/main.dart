@@ -17,6 +17,7 @@ import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 import 'package:mesh_utility/transport/transport.dart';
@@ -1225,24 +1226,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       return const Center(child: CircularProgressIndicator());
     }
 
-    final resolvedNodeNames = <String, String>{};
-    for (final node in _appState.nodes) {
-      final name = node.name?.trim();
-      if (name != null && name.isNotEmpty) {
-        resolvedNodeNames[node.nodeId] = name;
-      }
-    }
-    for (final entry in _appState.knownContactNames.entries) {
-      final id = entry.key.trim();
-      final name = entry.value.trim();
-      if (id.isEmpty || name.isEmpty) continue;
-      final existing = (resolvedNodeNames[id] ?? '').trim();
-      if (existing.isEmpty || _looksLikeIdLabel(existing)) {
-        resolvedNodeNames[id] = name;
-      } else {
-        resolvedNodeNames.putIfAbsent(id, () => name);
-      }
-    }
+    final resolvedNodeNames = _buildResolvedNodeNames();
     final observer = _latestObserverPosition();
     switch (index) {
       case 0:
@@ -1330,6 +1314,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         return NodesPage(
           nodes: _appState.nodes,
           scanResults: _appState.scanResults,
+          resolvedNodeNames: resolvedNodeNames,
           statsRadiusMiles: _appState.settings.statsRadiusMiles,
           observerLat: observer?.$1,
           observerLng: observer?.$2,
@@ -1432,12 +1417,45 @@ class _MeshHomePageState extends State<MeshHomePage>
     return _appState.currentObserverPosition;
   }
 
-  bool _looksLikeIdLabel(String value) {
-    final normalized = value.trim().toUpperCase();
-    if (normalized.isEmpty) return false;
-    if (normalized.contains(':')) return true;
-    final hexOnly = normalized.replaceAll(RegExp(r'[^0-9A-F]'), '');
-    return hexOnly.length == normalized.length && hexOnly.length >= 8;
+  Map<String, String> _buildResolvedNodeNames() {
+    final labels = <String, String>{};
+
+    void put(String? id, {String? advertisedName}) {
+      final trimmed = (id ?? '').trim();
+      if (trimmed.isEmpty) return;
+      final label = _appState.displayNameForNode(
+        trimmed,
+        advertisedName: advertisedName,
+      );
+      if (label.isEmpty) return;
+      final hex = normalizeHexId(trimmed);
+      final short = hex.length >= 8 ? hex.substring(0, 8) : hex;
+      for (final key in <String>{trimmed, hex, short}) {
+        if (key.isEmpty) continue;
+        final existing = labels[key];
+        if (existing != null &&
+            !isPlaceholderNodeName(existing, key) &&
+            isPlaceholderNodeName(label, key)) {
+          continue;
+        }
+        labels[key] = label;
+      }
+    }
+
+    for (final scan in _appState.scanResults) {
+      put(scan.nodeId, advertisedName: scan.senderName);
+      put(scan.observerId, advertisedName: scan.receiverName);
+      put(scan.radioId, advertisedName: scan.receiverName);
+    }
+    for (final scan in _appState.rawScans) {
+      put(scan.nodeId, advertisedName: scan.senderName);
+      put(scan.observerId, advertisedName: scan.receiverName);
+      put(scan.radioId, advertisedName: scan.receiverName);
+    }
+    for (final node in _appState.nodes) {
+      put(node.nodeId, advertisedName: node.name);
+    }
+    return labels;
   }
 }
 

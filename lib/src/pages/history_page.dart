@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/history_csv_exporter.dart'
     as csv_export;
 import 'package:mesh_utility/src/services/signal_class.dart';
@@ -109,7 +110,7 @@ class _HistoryPageState extends State<HistoryPage> {
         () => _displayNodeLabel(
           scan.senderName,
           scan.nodeId,
-          widget.resolvedNodeNames[scan.nodeId],
+          resolvedNameForNodeId(widget.resolvedNodeNames, scan.nodeId),
         ),
       );
       final radio = _normalizedRadioId(scan.radioId);
@@ -213,7 +214,7 @@ class _HistoryPageState extends State<HistoryPage> {
         final nodeLabel = _displayNodeLabel(
           scan.senderName,
           scan.nodeId,
-          widget.resolvedNodeNames[scan.nodeId],
+          resolvedNameForNodeId(widget.resolvedNodeNames, scan.nodeId),
         );
         final observerName = _observerName(
           scan,
@@ -540,7 +541,10 @@ class _HistoryPageState extends State<HistoryPage> {
                               nodeLabel: _displayNodeLabel(
                                 scan.senderName,
                                 scan.nodeId,
-                                widget.resolvedNodeNames[scan.nodeId],
+                                resolvedNameForNodeId(
+                                  widget.resolvedNodeNames,
+                                  scan.nodeId,
+                                ),
                               ),
                               onTap: () {
                                 _debugLog.info(
@@ -970,46 +974,18 @@ String _displayNodeLabel(
   String nodeId,
   String? resolvedName,
 ) {
-  String baseLabel;
-  if (senderName == null || senderName.trim().isEmpty) {
-    if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      baseLabel = resolvedName.trim();
-    } else {
-      baseLabel = nodeId;
-    }
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  final resolved = (resolvedName ?? '').trim();
+  if (resolved.isNotEmpty && !isPlaceholderNodeName(resolved, nodeId)) {
+    return _formatNodeDisplayWithId(resolved, nodeId);
   }
-  final trimmed = senderName.trim();
-  if (trimmed == nodeId &&
-      resolvedName != null &&
-      resolvedName.trim().isNotEmpty) {
-    baseLabel = resolvedName.trim();
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  final trimmed = (senderName ?? '').trim();
+  if (trimmed.isNotEmpty && !isPlaceholderNodeName(trimmed, nodeId)) {
+    return _formatNodeDisplayWithId(trimmed, nodeId);
   }
-  if (trimmed.toLowerCase() == 'unknown' &&
-      resolvedName != null &&
-      resolvedName.trim().isNotEmpty) {
-    baseLabel = resolvedName.trim();
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  if (resolved.isNotEmpty) {
+    return _formatNodeDisplayWithId(resolved, nodeId);
   }
-  if (trimmed == 'Unknown ($nodeId)') {
-    if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      baseLabel = resolvedName.trim();
-      return _formatNodeDisplayWithId(baseLabel, nodeId);
-    }
-    baseLabel = nodeId;
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
-  }
-  if (trimmed.startsWith('Unknown (') && trimmed.endsWith(')')) {
-    if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      baseLabel = resolvedName.trim();
-      return _formatNodeDisplayWithId(baseLabel, nodeId);
-    }
-    baseLabel = nodeId;
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
-  }
-  baseLabel = trimmed;
-  return _formatNodeDisplayWithId(baseLabel, nodeId);
+  return _formatNodeDisplayWithId(trimmed.isEmpty ? nodeId : trimmed, nodeId);
 }
 
 String _formatNodeDisplayWithId(String label, String nodeId) {
@@ -1106,19 +1082,7 @@ String? _bestResolvedNameForNode({
   required String nodeId,
   required Map<String, String> resolvedNodeNames,
 }) {
-  final exact = (resolvedNodeNames[nodeId] ?? '').trim();
-  if (exact.isNotEmpty) return exact;
-  final target = _normalizeHexId(nodeId);
-  if (target.isEmpty) return null;
-  for (final entry in resolvedNodeNames.entries) {
-    final key = _normalizeHexId(entry.key);
-    if (key.isEmpty) continue;
-    if (key == target || key.startsWith(target) || target.startsWith(key)) {
-      final name = entry.value.trim();
-      if (name.isNotEmpty) return name;
-    }
-  }
-  return null;
+  return resolvedNameForNodeId(resolvedNodeNames, nodeId);
 }
 
 String? _normalizedRadioId(String? value) {

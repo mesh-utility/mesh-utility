@@ -8,6 +8,7 @@ import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
@@ -1076,7 +1077,10 @@ class _MapPageState extends State<MapPage> {
                               _nodeDisplayName(
                                 latest.senderName,
                                 latest.nodeId,
-                                widget.resolvedNodeNames[latest.nodeId],
+                                resolvedNameForNodeId(
+                                  widget.resolvedNodeNames,
+                                  latest.nodeId,
+                                ),
                               ),
                             )
                           : (latestRaw != null
@@ -1086,9 +1090,12 @@ class _MapPageState extends State<MapPage> {
                                       latestRaw.nodeId ??
                                           latestRaw.observerId ??
                                           '',
-                                      widget.resolvedNodeNames[latestRaw
-                                              .nodeId ??
-                                          ''],
+                                      resolvedNameForNodeId(
+                                        widget.resolvedNodeNames,
+                                        latestRaw.nodeId ??
+                                            latestRaw.observerId ??
+                                            '',
+                                      ),
                                     ),
                                   )
                                 : '');
@@ -1852,42 +1859,18 @@ String _nodeDisplayName(
   String nodeId,
   String? resolvedName,
 ) {
-  String baseLabel;
-  if (senderName == null || senderName.trim().isEmpty) {
-    if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      baseLabel = resolvedName.trim();
-    } else {
-      baseLabel = nodeId;
-    }
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  final resolved = (resolvedName ?? '').trim();
+  if (resolved.isNotEmpty && !isPlaceholderNodeName(resolved, nodeId)) {
+    return _formatNodeDisplayWithId(resolved, nodeId);
   }
-  final trimmed = senderName.trim();
-  if (trimmed == nodeId &&
-      resolvedName != null &&
-      resolvedName.trim().isNotEmpty) {
-    baseLabel = resolvedName.trim();
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  final trimmed = (senderName ?? '').trim();
+  if (trimmed.isNotEmpty && !isPlaceholderNodeName(trimmed, nodeId)) {
+    return _formatNodeDisplayWithId(trimmed, nodeId);
   }
-  if (trimmed.toLowerCase() == 'unknown' &&
-      resolvedName != null &&
-      resolvedName.trim().isNotEmpty) {
-    baseLabel = resolvedName.trim();
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  if (resolved.isNotEmpty) {
+    return _formatNodeDisplayWithId(resolved, nodeId);
   }
-  if (trimmed == 'Unknown ($nodeId)') {
-    baseLabel = nodeId;
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
-  }
-  if (trimmed.startsWith('Unknown (') && trimmed.endsWith(')')) {
-    if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      baseLabel = resolvedName.trim();
-      return _formatNodeDisplayWithId(baseLabel, nodeId);
-    }
-    baseLabel = nodeId;
-    return _formatNodeDisplayWithId(baseLabel, nodeId);
-  }
-  baseLabel = trimmed;
-  return _formatNodeDisplayWithId(baseLabel, nodeId);
+  return _formatNodeDisplayWithId(trimmed.isEmpty ? nodeId : trimmed, nodeId);
 }
 
 String _formatNodeDisplayWithId(String label, String nodeId) {
@@ -2057,17 +2040,7 @@ String _bestResolvedNameForNode({
   required String nodeId,
   required Map<String, String> resolvedNodeNames,
 }) {
-  final exact = (resolvedNodeNames[nodeId] ?? '').trim();
-  if (exact.isNotEmpty) return exact;
-  final key = _nodeFilterKey(nodeId);
-  if (key.isEmpty) return '';
-  for (final entry in resolvedNodeNames.entries) {
-    if (_nodeFilterKey(entry.key) == key) {
-      final name = entry.value.trim();
-      if (name.isNotEmpty) return name;
-    }
-  }
-  return '';
+  return resolvedNameForNodeId(resolvedNodeNames, nodeId) ?? '';
 }
 
 String _formatAltitude(double? altitudeMeters, String unitSystem) {

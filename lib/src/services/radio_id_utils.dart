@@ -85,6 +85,35 @@ Set<String> nameTokens(String value) {
   return value.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length >= 3).toSet();
 }
 
+/// Best human label from a resolved-name map.
+///
+/// Skips ID-shaped placeholders and, when several keys match the same radio,
+/// prefers the longest public-key prefix so a short ID entry cannot hide a
+/// longer contact key.
+String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
+  if (names.isEmpty || nodeId.trim().isEmpty) return null;
+  final target = normalizeHexId(nodeId);
+  String? best;
+  var bestLen = -1;
+  for (final entry in names.entries) {
+    final rawKey = entry.key.trim();
+    if (rawKey.isEmpty) continue;
+    final key = normalizeHexId(rawKey);
+    final same = target.isEmpty
+        ? rawKey == nodeId.trim()
+        : key.isNotEmpty && (key == target || idsLikelySameDevice(key, target));
+    if (!same) continue;
+    final name = entry.value.trim();
+    if (name.isEmpty || isPlaceholderNodeName(name, nodeId)) continue;
+    final rank = key.isEmpty ? rawKey.length : key.length;
+    if (rank > bestLen) {
+      bestLen = rank;
+      best = name;
+    }
+  }
+  return best;
+}
+
 /// Whether [name] looks like an auto-generated placeholder ("Unknown", hex ID,
 /// etc.) for [nodeId].
 bool isPlaceholderNodeName(String name, String nodeId) {
