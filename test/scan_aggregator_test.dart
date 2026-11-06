@@ -48,6 +48,15 @@ void main() {
       expect(zones.first.isDeadZone, isFalse);
     });
 
+    test('very weak RSSI response is not a dead zone', () {
+      final zones = aggregateScansToZones([
+        _scan(nodeId: 'D61F4F45', rssi: -123.0, snr: -6.8),
+      ]);
+      expect(zones.first.isDeadZone, isFalse);
+      expect(zones.first.avgRssi, closeTo(-123.0, 0.01));
+    });
+
+
     test('RSSI is averaged across scans in the same hex', () {
       final zones = aggregateScansToZones([
         _scan(nodeId: 'a', rssi: -90.0),

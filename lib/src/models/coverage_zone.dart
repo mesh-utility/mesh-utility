@@ -1,4 +1,5 @@
 import 'package:latlong2/latlong.dart';
+import 'package:mesh_utility/src/services/signal_class.dart';
 
 class CoverageZone {
   CoverageZone({
@@ -39,18 +40,27 @@ class CoverageZone {
           .toList();
     }
 
+    final avgRssi = (json['avgRssi'] as num?)?.toDouble();
+    final avgSnr = (json['avgSnr'] as num?)?.toDouble();
+    // Reclassify on read: any zone that heard a response is never a dead zone,
+    // even if an older client/API row stored isDeadZone=true.
+    final isDeadZone = deadZoneFromMetrics(
+      avgRssi: avgRssi,
+      avgSnr: avgSnr,
+      storedFlag: json['isDeadZone'] == true,
+    );
     return CoverageZone(
       id: json['id'].toString(),
       centerLat: (json['centerLat'] as num).toDouble(),
       centerLng: (json['centerLng'] as num).toDouble(),
       radiusMeters: ((json['radiusMeters'] ?? 100) as num).toDouble(),
-      avgRssi: (json['avgRssi'] as num?)?.toDouble(),
-      avgSnr: (json['avgSnr'] as num?)?.toDouble(),
+      avgRssi: avgRssi,
+      avgSnr: avgSnr,
       scanCount: (json['scanCount'] as num?)?.toInt() ?? 0,
       lastScanned:
           DateTime.tryParse(json['lastScanned']?.toString() ?? '') ??
           DateTime.now(),
-      isDeadZone: json['isDeadZone'] == true,
+      isDeadZone: isDeadZone,
       polygon: parsePolygon(json['polygon']),
       radioId: json['radioId']?.toString(),
     );

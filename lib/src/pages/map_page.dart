@@ -2082,7 +2082,16 @@ BaseLayer _defaultBaseLayerForBrightness(Brightness brightness) {
 }
 
 Color _zoneColor(CoverageZone zone) {
-  return signalColorForValues(rssi: zone.avgRssi, snr: zone.avgSnr);
+  // Dead Zone color only for zones that truly heard nothing. Weak-but-heard
+  // cells use Poor/Noisy/etc. via RSSI/SNR classification.
+  if (zone.isDeadZone) {
+    return signalColorForValues(rssi: null, snr: null);
+  }
+  return signalColorForValues(
+    rssi: zone.avgRssi,
+    snr: zone.avgSnr,
+    includeDeadZone: false,
+  );
 }
 
 List<CoverageZone> _filterZonesByRadius({

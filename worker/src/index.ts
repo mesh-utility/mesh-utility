@@ -532,9 +532,11 @@ type CoverageAgg = {
             continue;
           }
 
-          agg.hasNodes = true;
+          // Dead zone = no response at all. Only mark hasNodes when a
+          // repeater entry carries a numeric RSSI (a real hearing).
           for (const node of repeaterNodes) {
             if (typeof node?.rssi !== 'number') continue;
+            agg.hasNodes = true;
             const rssi = node.rssi;
             const snr = typeof node?.snr === 'number' ? node.snr : null;
             agg.totalRssi += rssi;

@@ -8,6 +8,14 @@ class SignalClass {
   final int level;
 }
 
+/// Purple used by the map legend for Noisy (good RSSI, bad SNR).
+const Color kNoisySignalColor = Color(0xFFA855F7);
+
+/// Combined RSSI/SNR quality level.
+///
+/// Returns `0` only when there is **no response at all** (both [rssi] and
+/// [snr] are null). Any hearing of a repeater floors at `1` (Poor) — weak
+/// readings must never be classified as a dead zone.
 int signalLevelForValues({
   required double? rssi,
   required double? snr,
@@ -22,8 +30,8 @@ int signalLevelForValues({
     if (rssi > -100) return 4;
     if (rssi > -110) return 3;
     if (rssi > -115) return 2;
-    if (rssi > -120) return 1;
-    return 0;
+    // Response heard, even if very weak (e.g. -123 dBm).
+    return 1;
   }
 
   int snrLevel() {
@@ -32,7 +40,8 @@ int signalLevelForValues({
     if (snr > 0) return 4;
     if (snr > -7) return 3;
     if (snr > -13) return 2;
-    return 0;
+    // Response heard with very poor SNR — still not a dead zone.
+    return 1;
   }
 
   final rssiScore = rssiLevel();
@@ -40,12 +49,33 @@ int signalLevelForValues({
   return rssiScore < snrScore ? rssiScore : snrScore;
 }
 
+/// True when power looks usable but clarity is bad (legend: Noisy).
+bool isNoisySignal({required double? rssi, required double? snr}) {
+  if (rssi == null || snr == null) return false;
+  // "Good signal, bad SNR": RSSI in the Good-or-better band, SNR at/below
+  // the Marginal floor.
+  return rssi > -100 && snr <= -13;
+}
+
 SignalClass signalClassForValues({
   required double? rssi,
   required double? snr,
   bool includeDeadZone = true,
 }) {
+  if (rssi == null && snr == null) {
+    if (!includeDeadZone) {
+      return const SignalClass('Poor', Color(0xFFEF4444), 1);
+    }
+    return const SignalClass('Dead Zone', Color(0xFF991B1B), 0);
+  }
+
+  if (isNoisySignal(rssi: rssi, snr: snr)) {
+    return const SignalClass('Noisy', kNoisySignalColor, 1);
+  }
+
   var level = signalLevelForValues(rssi: rssi, snr: snr);
+  // Belt-and-suspenders: never emit Dead Zone when any metric is present.
+  if (level < 1) level = 1;
   if (!includeDeadZone && level < 1) {
     level = 1;
   }
@@ -59,9 +89,8 @@ SignalClass signalClassForValues({
     case 2:
       return const SignalClass('Marginal', Color(0xFFF97316), 2);
     case 1:
-      return const SignalClass('Poor', Color(0xFFEF4444), 1);
     default:
-      return const SignalClass('Dead Zone', Color(0xFF991B1B), 0);
+      return const SignalClass('Poor', Color(0xFFEF4444), 1);
   }
 }
 
@@ -74,3 +103,18 @@ Color signalColorForValues({
   snr: snr,
   includeDeadZone: includeDeadZone,
 ).color;
+
+/// Recompute [isDeadZone] from metrics so stored/API rows that had a real
+/// response are never treated as dead on read.
+bool deadZoneFromMetrics({
+  required double? avgRssi,
+  required double? avgSnr,
+  bool? storedFlag,
+}) {
+  final heardResponse = avgRssi != null || avgSnr != null;
+  if (heardResponse) return false;
+  // No metrics: trust a stored true flag, otherwise treat as dead when both
+  // averages are missing (no response aggregated).
+  if (storedFlag != null) return storedFlag;
+  return true;
+}
