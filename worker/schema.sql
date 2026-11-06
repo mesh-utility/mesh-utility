@@ -1,5 +1,4 @@
--- Mesh Utility D1 Database Schema
--- Stores scan data temporarily before committing to GitHub
+-- Mesh Utility D1 Database Schema (local / fresh installs)
 
 CREATE TABLE IF NOT EXISTS scans (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8,8 +7,8 @@ CREATE TABLE IF NOT EXISTS scans (
   latitude REAL NOT NULL,
   longitude REAL NOT NULL,
   altitude REAL,
-  nodes TEXT NOT NULL, -- JSON array of detected nodes
-  committed INTEGER DEFAULT 0, -- 0 = pending, 1 = committed to GitHub
+  nodes TEXT NOT NULL,
+  committed INTEGER DEFAULT 0,
   createdAt INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
@@ -24,3 +23,12 @@ CREATE TABLE IF NOT EXISTS commits (
   scanCount INTEGER NOT NULL,
   committedAt INTEGER DEFAULT (strftime('%s', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS scan_days (
+  day TEXT PRIMARY KEY,
+  scan_count INTEGER NOT NULL DEFAULT 0,
+  min_ts INTEGER,
+  max_ts INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_days_max_ts ON scan_days(max_ts DESC);

@@ -4,6 +4,7 @@
  */
 
 import { batchCommitToGitHub, getGitHubFileContent } from './github';
+import { upsertScanDay, utcDayFromTs } from './scan_days';
 
 interface ScanPayload {
   radioId: string;
@@ -116,7 +117,7 @@ export class ScanBatcher {
       if (db) {
         try {
           for (const scan of newScans) {
-            if (scan.nodes.length > 0) {
+            if (this.hasSuccessfulNodes(scan.nodes)) {
               await this.deleteDeadZonesForHex(scan.location.lat, scan.location.lon);
             }
 
@@ -135,6 +136,13 @@ export class ScanBatcher {
                 JSON.stringify(scan.nodes)
               )
               .run();
+
+            // Keep scan_days summary in sync (avoids DISTINCT full scans on /history).
+            try {
+              await upsertScanDay(db, utcDayFromTs(scan.timestamp), scan.timestamp);
+            } catch (e) {
+              console.error('Failed to upsert scan_days:', e);
+            }
           }
 
           await this.backfillNodeNamesInD1(db, newScans);
@@ -513,21 +521,53 @@ export class ScanBatcher {
     const targetHex = this.hexKey(lat, lon);
     const range = 0.01;
     const result = await db.prepare(`
-      SELECT id, latitude, longitude
+      SELECT id, latitude, longitude, nodes
       FROM scans
-      WHERE nodes = '[]'
-        AND latitude BETWEEN ? AND ?
+      WHERE latitude BETWEEN ? AND ?
         AND longitude BETWEEN ? AND ?
     `)
       .bind(lat - range, lat + range, lon - range, lon + range)
       .all();
 
-    for (const row of result.results as Array<{ id: number; latitude: number; longitude: number }>) {
+    let deleted = 0;
+    for (const row of result.results as Array<{ id: number; latitude: number; longitude: number; nodes: string }>) {
       if (this.hexKey(row.latitude, row.longitude) !== targetHex) {
         continue;
       }
+      let parsedNodes: StoredNode[] = [];
+      try {
+        const parsed = JSON.parse(row.nodes);
+        if (Array.isArray(parsed)) {
+          parsedNodes = parsed;
+        }
+      } catch {
+        parsedNodes = [];
+      }
+      if (this.hasSuccessfulNodes(parsedNodes)) {
+        continue;
+      }
       await db.prepare(`DELETE FROM scans WHERE id = ?`).bind(row.id).run();
+      deleted += 1;
     }
+    if (deleted > 0) {
+      console.log(`[scan_batch] Deleted ${deleted} deadzone row(s) for hex ${targetHex}`);
+    }
+  }
+
+  private hasSuccessfulNodes(
+    nodes: Array<{ nodeId?: unknown; rssi?: unknown }>
+  ): boolean {
+    for (const node of nodes) {
+      if (!node) continue;
+      const nodeId =
+        typeof node.nodeId === 'string' ? this.normalizeHexId(node.nodeId) : '';
+      if (!nodeId) continue;
+      if (typeof node.rssi !== 'number' || !Number.isFinite(node.rssi)) {
+        continue;
+      }
+      return true;
+    }
+    return false;
   }
 
   private snapToHexGrid(lat: number, lon: number): { snapLat: number; snapLon: number } {
