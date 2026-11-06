@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/transport/linux_ble_error_classifier.dart';
 import 'package:mesh_utility/transport/linux_ble_pairing_service_base.dart';
-import 'package:mesh_utility/transport/protocol.dart';
+import 'package:mesh_utility/transport/ble_frame_assembler.dart';
 import 'package:mesh_utility/transport/transport_core.dart';
 import 'package:universal_ble/universal_ble.dart';
 import 'package:mesh_utility/transport/linux_ble_pairing_service_stub.dart'
@@ -53,10 +53,9 @@ class BleTransport extends Transport {
   String? _notifyCharacteristicUuid;
   bool _writeWithoutResponse = false;
   bool _connected = false;
-  final List<int> _rxAssembleBuffer = <int>[];
-  int? _rxAssembleCode;
-  int? _rxAssembleExpectedLength;
-  bool _contactStripChunkHeader = false;
+  late final BleFrameAssembler _rxAssembler = BleFrameAssembler(
+    onWarn: (message) => _debugLog.warn('ble_transport_rx', message),
+  );
 
   String? get deviceId => _deviceId;
   String? get boundServiceUuid => _serviceUuid;
@@ -965,130 +964,11 @@ class BleTransport extends Transport {
 
   void _handleInboundChunk(Uint8List chunk) {
     if (chunk.isEmpty) return;
-    _appendInboundBytes(chunk);
-  }
-
-  void _appendInboundBytes(Uint8List bytes) {
-    if (_rxAssembleCode != null &&
-        _canFlushPartialOnBoundary(
-          _rxAssembleCode!,
-          _rxAssembleBuffer,
-          bytes,
-        )) {
-      _inboundController.add(Uint8List.fromList(_rxAssembleBuffer));
-      _clearRxAssembly();
-    }
-
-    if (_rxAssembleCode == null) {
-      final code = bytes[0];
-      if (!_isChunkProneCode(code)) {
-        _inboundController.add(bytes);
-        return;
-      }
-      _rxAssembleCode = code;
-      _rxAssembleBuffer.clear();
-      _contactStripChunkHeader = false;
-      if (code == respCodeContact) {
-        _appendContactChunk(bytes);
-      } else {
-        _rxAssembleBuffer.addAll(bytes);
-      }
-    } else {
-      if (_rxAssembleCode == respCodeContact) {
-        _appendContactChunk(bytes);
-      } else {
-        _rxAssembleBuffer.addAll(bytes);
+    for (final frame in _rxAssembler.push(chunk)) {
+      if (!_inboundController.isClosed) {
+        _inboundController.add(frame);
       }
     }
-
-    _rxAssembleExpectedLength = _expectedLengthForCode(
-      _rxAssembleCode!,
-      _rxAssembleBuffer,
-    );
-
-    if (_rxAssembleExpectedLength == null) {
-      // Control frames expose payload length in header byte 3; wait for header.
-      if (_rxAssembleBuffer.length > maxFrameSize * 3) {
-        _debugLog.warn(
-          'ble_transport_rx',
-          'Dropping oversized partial frame code=$_rxAssembleCode bytes=${_rxAssembleBuffer.length}',
-        );
-        _clearRxAssembly();
-      }
-      return;
-    }
-
-    final expected = _rxAssembleExpectedLength!;
-    if (_rxAssembleBuffer.length < expected) return;
-
-    final frame = Uint8List.fromList(_rxAssembleBuffer.sublist(0, expected));
-    _inboundController.add(frame);
-
-    if (_rxAssembleBuffer.length == expected) {
-      _clearRxAssembly();
-      return;
-    }
-
-    final trailing = Uint8List.fromList(_rxAssembleBuffer.sublist(expected));
-    _clearRxAssembly();
-    _appendInboundBytes(trailing);
-  }
-
-  bool _isChunkProneCode(int code) {
-    return code == respCodeContact ||
-        code == pushCodeControlData ||
-        code == pushCodeNewAdvert ||
-        code == pushCodeAdvert;
-  }
-
-  int? _expectedLengthForCode(int code, List<int> bytes) {
-    if (code == respCodeContact) return contactFrameSize;
-    if (code == pushCodeControlData) {
-      if (bytes.length < 4) return null;
-      final declaredLen = bytes[3];
-      if (declaredLen == 0 && bytes.length > 4) {
-        // Some firmware sends control-data frames without a populated length
-        // byte and streams payload inline in the same notification.
-        return bytes.length;
-      }
-      return 4 + declaredLen;
-    }
-    if (code == pushCodeNewAdvert || code == pushCodeAdvert) {
-      if (bytes.length < 4) return null;
-      return 4 + bytes[3];
-    }
-    return null;
-  }
-
-  bool _canFlushPartialOnBoundary(
-    int code,
-    List<int> current,
-    Uint8List incoming,
-  ) {
-    if (incoming.isEmpty) return false;
-    if (code != respCodeSelfInfo && code != respCodeDeviceInfo) return false;
-    if (current.length < 20) return false;
-    return _looksLikeFrameStart(incoming[0]);
-  }
-
-  bool _looksLikeFrameStart(int code) {
-    return code == respCodeOk ||
-        code == respCodeErr ||
-        code == respCodeContactsStart ||
-        code == respCodeContact ||
-        code == respCodeEndOfContacts ||
-        code == respCodeSelfInfo ||
-        code == respCodeDeviceInfo ||
-        code == pushCodeControlData ||
-        code == pushCodeAdvert ||
-        code == pushCodeNewAdvert;
-  }
-
-  void _clearRxAssembly() {
-    _rxAssembleBuffer.clear();
-    _rxAssembleCode = null;
-    _rxAssembleExpectedLength = null;
-    _contactStripChunkHeader = false;
   }
 
   Future<void> _handleUnexpectedDisconnect(String reason) async {
@@ -1123,25 +1003,6 @@ class BleTransport extends Transport {
     _writeCharacteristicUuid = null;
     _notifyCharacteristicUuid = null;
     _writeWithoutResponse = false;
-    _clearRxAssembly();
-  }
-
-  void _appendContactChunk(Uint8List bytes) {
-    if (_rxAssembleBuffer.isEmpty) {
-      _rxAssembleBuffer.addAll(bytes);
-      return;
-    }
-    if (!_contactStripChunkHeader &&
-        bytes.length > 1 &&
-        bytes[0] == respCodeContact) {
-      // Android continuation notifications may repeat a 1-byte 0x03 marker.
-      // Detect this on first continuation and strip for the remainder.
-      _contactStripChunkHeader = true;
-    }
-    if (_contactStripChunkHeader && bytes.length > 1) {
-      _rxAssembleBuffer.addAll(bytes.sublist(1));
-      return;
-    }
-    _rxAssembleBuffer.addAll(bytes);
+    _rxAssembler.clear();
   }
 }

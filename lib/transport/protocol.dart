@@ -512,6 +512,12 @@ bool isEndOfContactsFrame(Uint8List frame) {
   return frame.isNotEmpty && frame[0] == respCodeEndOfContacts;
 }
 
+/// Total contact count from RESP_CONTACTS_START (byte0=2, bytes1..4 LE uint32).
+int? parseContactsStartTotal(Uint8List frame) {
+  if (frame.length < 5 || frame[0] != respCodeContactsStart) return null;
+  return readUint32LE(frame, 1);
+}
+
 int readUint32LE(Uint8List data, int offset) {
   return data[offset] |
       (data[offset + 1] << 8) |
@@ -1304,5 +1310,12 @@ class TransportProtocol {
 
   Stream<void> endOfContactsResponses() {
     return transport.inbound.where(isEndOfContactsFrame).map((_) {});
+  }
+
+  Stream<int> contactsStartTotals() {
+    return transport.inbound
+        .map(parseContactsStartTotal)
+        .where((total) => total != null)
+        .cast<int>();
   }
 }

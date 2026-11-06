@@ -1407,7 +1407,10 @@ class _MeshHomePageState extends State<MeshHomePage>
       case 6:
         return const PrivacyPage();
       case 7:
-        return ContactsPage(contacts: _appState.currentRadioContacts);
+        return ContactsPage(
+          contacts: _appState.currentRadioContacts,
+          syncProgress: _appState.contactsSyncProgress,
+        );
       default:
         return const NotFoundPage();
     }

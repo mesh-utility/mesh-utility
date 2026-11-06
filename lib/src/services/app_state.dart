@@ -20,6 +20,7 @@ import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/services/worker_api.dart';
 import 'package:mesh_utility/transport/ble_transport.dart';
+import 'package:mesh_utility/transport/contact_sync.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 import 'package:mesh_utility/transport/transport.dart';
 import 'package:universal_ble/universal_ble.dart';
@@ -99,6 +100,7 @@ class AppState extends ChangeNotifier {
             _lastSelfInfoText = null;
             _sessionRadioContacts.clear();
             _sessionRadioContactTypes.clear();
+            contactsSyncProgress = ContactSyncProgress.idle;
             _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
             _resumeAutoScanAfterReconnect = wasScanning;
@@ -181,6 +183,8 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _sessionRadioContacts = {};
   final Map<String, int> _sessionRadioContactTypes = {};
+  ContactSyncProgress contactsSyncProgress = ContactSyncProgress.idle;
+
   final Map<String, String> _bleDeviceNamesById = {};
   static const String _knownBleDeviceFallbackName = 'Known Device';
   bool _manualBleDisconnectRequested = false;
@@ -1354,6 +1358,7 @@ class AppState extends ChangeNotifier {
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
     _sessionRadioContacts.clear();
+    contactsSyncProgress = ContactSyncProgress.idle;
     _sessionRadioContactTypes.clear();
     notifyListeners();
   }
@@ -1953,41 +1958,54 @@ class AppState extends ChangeNotifier {
   Future<void> _syncContactsAndBackfillNames() async {
     if (!bleConnected) return;
     _adoptPersistedContactsIntoSession();
-    _debugLog.info('contacts', 'Requesting contacts from radio');
+    _debugLog.warn('contacts', 'Requesting contacts from radio');
 
-    final contacts = <String, String>{};
-    final contactTypes = <String, int>{};
-    final done = Completer<void>();
-    late final StreamSubscription<RadioContact> contactSub;
-    late final StreamSubscription<void> endSub;
+    contactsSyncProgress = const ContactSyncProgress(active: true, received: 0);
+    notifyListeners();
 
-    contactSub = _bleProtocol.contactResponses().listen((contact) {
-      final prefix = contact.publicKeyPrefix.trim().toUpperCase();
-      final name = contact.name.trim();
-      if (prefix.isEmpty || name.isEmpty) return;
-      contacts[prefix] = name;
-      contactTypes[prefix] = contact.type;
-    });
-    endSub = _bleProtocol.endOfContactsResponses().listen((_) {
-      if (!done.isCompleted) done.complete();
-    });
+    final result = await collectContactsFromInbound(
+      inbound: _transport.inbound,
+      sendGetContacts: () => _bleProtocol.run(_protocol.getContacts()),
+      idleTimeout: const Duration(seconds: 25),
+      overallTimeout: const Duration(minutes: 6),
+      onProgress: (progress) {
+        contactsSyncProgress = progress;
+        // Throttle UI churn: notify every 25 contacts or on phase change.
+        if (progress.received == 0 ||
+            progress.received % 25 == 0 ||
+            progress.completed ||
+            progress.timedOut ||
+            (progress.expected != null &&
+                progress.received == progress.expected)) {
+          notifyListeners();
+        }
+      },
+    );
 
-    try {
-      await _bleProtocol.run(_protocol.getContacts());
-      await Future.any([
-        done.future,
-        Future<void>.delayed(const Duration(seconds: 12)),
-      ]);
-    } finally {
-      await contactSub.cancel();
-      await endSub.cancel();
-    }
+    contactsSyncProgress = ContactSyncProgress(
+      active: false,
+      received: result.contacts.length,
+      expected: result.expectedTotal,
+      timedOut: result.timedOut,
+      completed: true,
+    );
 
-    if (contacts.isEmpty) {
-      _debugLog.info('contacts', 'No contacts returned from radio');
+    _debugLog.warn(
+      'contacts',
+      'sync done received=${result.contacts.length} '
+      'expected=${result.expectedTotal ?? -1} '
+      'sawEnd=${result.sawEnd} timedOut=${result.timedOut}',
+    );
+
+    if (result.contacts.isEmpty) {
+      _debugLog.warn('contacts', 'No contacts returned from radio');
+      notifyListeners();
       _logKnownNodeContactMatches();
       return;
     }
+
+    final contacts = result.contacts;
+    final contactTypes = result.contactTypes;
 
     _radioContactsByPrefix.addAll(contacts);
     _updateConnectedRadioMeshIdFromContacts(contacts);
@@ -2011,7 +2029,7 @@ class AppState extends ChangeNotifier {
     // Contact maps stay in memory for this connection. They are not written
     // to settings, SharedPreferences, or the worker.
     if (_connectedRadioMeshId8() == null) {
-      _debugLog.info(
+      _debugLog.warn(
         'contacts',
         'Radio id unknown; keeping ${sessionContacts.length} contact(s) in memory only',
       );
@@ -2022,10 +2040,8 @@ class AppState extends ChangeNotifier {
       await _localStore.saveRawScans(rawScans);
       _rebuildDerivedData();
     }
-    if (sessionChanged || typesChanged || updated > 0) {
-      notifyListeners();
-    }
-    _debugLog.info(
+    notifyListeners();
+    _debugLog.warn(
       'contacts',
       'Loaded ${contacts.length} contact(s), session ${sessionContacts.length}, updated $updated scan name field(s)',
     );
