@@ -137,3 +137,44 @@ node scripts/bench-endpoints.mjs
 # or: npx wrangler dev --local --port 8787
 # curl -D- 'http://127.0.0.1:8787/history?_debug=1'
 ```
+
+
+---
+
+## Deployed (live)
+
+| Field | Value |
+|---|---|
+| **When** | 2026-11-05 19:39:09 EST (America/New_York) |
+| **Worker version id** | `3aa0796d-2278-470d-ac81-5d573389b485` |
+| **Previous deployment** | `b927577b-cad6-4581-9c3c-b36748fd04c1` (2026-04-12); script backup `backup/worker-2026-11-05/index.js` |
+| **Account** | aaffiliate796 |
+| **PR** | https://github.com/mesh-utility/mesh-utility/pull/2 → merge commit `e935bb461cc01d4bd67ef14f8131e856846fbe0f` |
+| **D1 0001** | rows_read 3, rows_written 4 |
+| **D1 0002 backfill** | rows_read 294904, rows_written 360 → 120 scan_days |
+| **Pages** | Not Git-connected (`source={}`); prod still `c6490ef1` on branch `mesh-utility`. Merge to `main` did not auto-deploy Pages. |
+
+### Live smoke (post-deploy)
+
+| Check | Result |
+|---|---|
+| `/health` | 200 ok |
+| `/history` | 200, 120 days, same set as pre |
+| `/history/{day}.ndjson` | 200, shape OK |
+| `/coverage?days=7` | 200, 644 zones, keys match |
+| ETag 304 | OK |
+| `/coverage?days=0` | **200**, 9149 zones (pre **500** too many SQL variables) |
+
+### Rollback (Worker)
+
+```bash
+export CLOUDFLARE_API_TOKEN=…   # aaffiliate796
+export CLOUDFLARE_ACCOUNT_ID=fd2b7856d928fbd1c7c3c190d16858ad
+# Cloudflare Dashboard → Workers → mesh-utility-worker → Deployments → rollback to b927577b…
+# Or redeploy backup bundle at /workspace/mesh-utility/backup/worker-2026-11-05/index.js
+# Optional drop scan_days:
+# npx wrangler d1 execute mesh-utility-db --remote --file worker/migrations/0001_scan_days_rollback.sql
+```
+
+Pages rollback: N/A (no Pages deploy). Current prod deployment id: `c6490ef1-39c6-4e5e-9203-e9f2703d336f`.
+
