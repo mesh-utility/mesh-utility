@@ -6,6 +6,7 @@ class AppSettings {
     required this.workerUrl,
     required this.historyDays,
     required this.deadzoneDays,
+    required this.syncRadiusMiles,
     required this.privacyAccepted,
     required this.scanIntervalSeconds,
     required this.discoverWaitSeconds,
@@ -21,11 +22,14 @@ class AppSettings {
     required this.uploadBatchIntervalMinutes,
     required this.bleAutoConnect,
     required this.knownBleDeviceIds,
+    required this.knownBleDeviceNames,
+    required this.contactsByRadioId,
   });
 
   final String workerUrl;
   final int historyDays;
   final int deadzoneDays;
+  final int syncRadiusMiles;
   final bool privacyAccepted;
   final int scanIntervalSeconds;
   final int discoverWaitSeconds;
@@ -41,11 +45,14 @@ class AppSettings {
   final int uploadBatchIntervalMinutes;
   final bool bleAutoConnect;
   final List<String> knownBleDeviceIds;
+  final Map<String, String> knownBleDeviceNames;
+  final Map<String, Map<String, String>> contactsByRadioId;
 
   static const defaults = AppSettings(
     workerUrl: AppConfig.deployedWorkerUrl,
     historyDays: 7,
     deadzoneDays: 7,
+    syncRadiusMiles: 0,
     privacyAccepted: false,
     scanIntervalSeconds: 40,
     discoverWaitSeconds: 40,
@@ -61,12 +68,15 @@ class AppSettings {
     uploadBatchIntervalMinutes: 30,
     bleAutoConnect: false,
     knownBleDeviceIds: <String>[],
+    knownBleDeviceNames: <String, String>{},
+    contactsByRadioId: <String, Map<String, String>>{},
   );
 
   AppSettings copyWith({
     String? workerUrl,
     int? historyDays,
     int? deadzoneDays,
+    int? syncRadiusMiles,
     bool? privacyAccepted,
     int? scanIntervalSeconds,
     int? discoverWaitSeconds,
@@ -82,11 +92,16 @@ class AppSettings {
     int? uploadBatchIntervalMinutes,
     bool? bleAutoConnect,
     List<String>? knownBleDeviceIds,
+    Map<String, String>? knownBleDeviceNames,
+    Map<String, Map<String, String>>? contactsByRadioId,
   }) {
     return AppSettings(
       workerUrl: workerUrl ?? this.workerUrl,
       historyDays: historyDays ?? this.historyDays,
       deadzoneDays: deadzoneDays ?? this.deadzoneDays,
+      syncRadiusMiles: _clampSyncRadiusMiles(
+        syncRadiusMiles ?? this.syncRadiusMiles,
+      ),
       privacyAccepted: privacyAccepted ?? this.privacyAccepted,
       scanIntervalSeconds: scanIntervalSeconds ?? this.scanIntervalSeconds,
       discoverWaitSeconds: discoverWaitSeconds ?? this.discoverWaitSeconds,
@@ -104,6 +119,8 @@ class AppSettings {
       ),
       bleAutoConnect: bleAutoConnect ?? this.bleAutoConnect,
       knownBleDeviceIds: knownBleDeviceIds ?? this.knownBleDeviceIds,
+      knownBleDeviceNames: knownBleDeviceNames ?? this.knownBleDeviceNames,
+      contactsByRadioId: contactsByRadioId ?? this.contactsByRadioId,
     );
   }
 
@@ -112,6 +129,7 @@ class AppSettings {
       'workerUrl': workerUrl,
       'historyDays': historyDays,
       'deadzoneDays': deadzoneDays,
+      'syncRadiusMiles': syncRadiusMiles,
       'privacyAccepted': privacyAccepted,
       'scanIntervalSeconds': scanIntervalSeconds,
       'discoverWaitSeconds': discoverWaitSeconds,
@@ -127,6 +145,8 @@ class AppSettings {
       'uploadBatchIntervalMinutes': uploadBatchIntervalMinutes,
       'bleAutoConnect': bleAutoConnect,
       'knownBleDeviceIds': knownBleDeviceIds,
+      'knownBleDeviceNames': knownBleDeviceNames,
+      'contactsByRadioId': contactsByRadioId,
     };
   }
 
@@ -137,6 +157,9 @@ class AppSettings {
           (json['historyDays'] as num?)?.toInt() ?? defaults.historyDays,
       deadzoneDays:
           (json['deadzoneDays'] as num?)?.toInt() ?? defaults.deadzoneDays,
+      syncRadiusMiles: _clampSyncRadiusMiles(
+        (json['syncRadiusMiles'] as num?)?.toInt() ?? defaults.syncRadiusMiles,
+      ),
       privacyAccepted:
           (json['privacyAccepted'] as bool?) ?? defaults.privacyAccepted,
       scanIntervalSeconds:
@@ -171,6 +194,28 @@ class AppSettings {
       knownBleDeviceIds: ((json['knownBleDeviceIds'] as List?) ?? const [])
           .whereType<String>()
           .toList(growable: false),
+      knownBleDeviceNames:
+          ((json['knownBleDeviceNames'] as Map?) ?? const <Object?, Object?>{})
+              .entries
+              .where((entry) => entry.key is String && entry.value is String)
+              .fold<Map<String, String>>(<String, String>{}, (next, entry) {
+                final id = (entry.key as String).trim();
+                final name = (entry.value as String).trim();
+                if (id.isNotEmpty && name.isNotEmpty) {
+                  next[id] = name;
+                }
+                return next;
+              }),
+      contactsByRadioId:
+          (json['contactsByRadioId'] as Map<String, dynamic>?)?.map(
+            (key, value) => MapEntry(
+              key,
+              (value as Map<String, dynamic>).map(
+                (key, value) => MapEntry(key, value as String),
+              ),
+            ),
+          ) ??
+          const {},
     );
   }
 
@@ -178,6 +223,12 @@ class AppSettings {
     if (value < 5) return 5;
     if (value > 120) return 120;
     return value;
+  }
+
+  static int _clampSyncRadiusMiles(int value) {
+    const allowed = <int>{0, 10, 25, 50, 100, 250};
+    if (allowed.contains(value)) return value;
+    return defaults.syncRadiusMiles;
   }
 
   static int _clampUploadBatchIntervalMinutes(int value) {
@@ -189,17 +240,21 @@ class AppSettings {
 
 class SettingsStore {
   static const _settingsKey = 'settings:app';
-  static const _legacyWorkerHosts = {
-    'mesh-utility-worker.aaffiliate796.workers.dev',
+  // Hosts/paths that look like a Worker URL but are NOT (Pages SPA). Migrate away from them.
+  static const _brokenWorkerUrlMarkers = {
+    'mesh-utility.org/api',
+    'www.mesh-utility.org/api',
   };
 
   String _normalizeWorkerUrl(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return AppConfig.deployedWorkerUrl;
-    final uri = Uri.tryParse(trimmed);
-    final host = uri?.host.toLowerCase() ?? '';
-    if (_legacyWorkerHosts.contains(host)) {
-      return AppConfig.deployedWorkerUrl;
+    final lower = trimmed.toLowerCase();
+    for (final marker in _brokenWorkerUrlMarkers) {
+      if (lower.contains(marker)) {
+        // Prefer the real Worker; do NOT "migrate" workers.dev → mesh-utility.org/api.
+        return AppConfig.deployedWorkerUrl;
+      }
     }
     return trimmed;
   }
