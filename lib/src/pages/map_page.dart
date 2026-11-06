@@ -653,6 +653,9 @@ class _MapPageState extends State<MapPage> {
                     userAgentPackageName: 'mesh_utility',
                     tileProvider: _tileProvider,
                     maxZoom: 19,
+                    tileBuilder: _baseLayer == BaseLayer.dark
+                        ? darkModeTileBuilder
+                        : null,
                   ),
                   if (widget.observerLat != null && widget.observerLng != null)
                     MarkerLayer(
@@ -2097,7 +2100,7 @@ String _stripPopupEntityLabel(String value) {
 String _layerTemplate(BaseLayer layer) {
   switch (layer) {
     case BaseLayer.dark:
-      return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+      return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     case BaseLayer.standard:
       return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     case BaseLayer.satellite:

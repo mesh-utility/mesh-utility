@@ -71,7 +71,7 @@ class PrivacyPage extends StatelessWidget {
                     _PrivacySection(
                       title: 'Third-Party Services',
                       body:
-                          'Map tiles are loaded from providers such as CartoDB/OpenStreetMap/Esri. Those services may log standard network request metadata under their own policies.',
+                          'Map tiles are loaded from providers such as OpenStreetMap/Esri. Those services may log standard network request metadata under their own policies.',
                     ),
                     _PrivacySection(
                       title: 'Policy Updates',

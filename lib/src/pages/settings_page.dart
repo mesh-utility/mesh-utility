@@ -529,7 +529,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Map default follows app theme: Light = Standard, Dark = Carto. '
+                    'Map default follows app theme: Light = Standard, Dark = OSM Dark. '
                     'You can still change map layer manually.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),

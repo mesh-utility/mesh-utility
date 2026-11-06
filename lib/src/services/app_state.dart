@@ -30,7 +30,6 @@ class AppState extends ChangeNotifier {
   static const int _advertLocationPolicyDisabled = 0;
   static const int _advertLocationPolicyCompanion = 1;
   static const List<String> _offlineTileTemplates = [
-    'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
     'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   ];
