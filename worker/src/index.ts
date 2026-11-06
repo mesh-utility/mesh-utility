@@ -276,9 +276,24 @@ function buildCorsHeaders(origin: string, allowedOrigins: string[]): Record<stri
   return headers;
 }
 
+/** Strip a single leading /api so zone route mesh-utility.org/api/* maps to existing handlers. */
+function stripApiPrefix(request: Request): { request: Request; url: URL } {
+  const url = new URL(request.url);
+  if (url.pathname === '/api') {
+    url.pathname = '/';
+  } else if (url.pathname.startsWith('/api/')) {
+    url.pathname = url.pathname.slice(4) || '/';
+  } else {
+    return { request, url };
+  }
+  return { request: new Request(url.toString(), request), url };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    const stripped = stripApiPrefix(request);
+    request = stripped.request;
+    const url = stripped.url;
     const origin = request.headers.get('Origin') || '';
     
     // CORS handling

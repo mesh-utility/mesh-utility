@@ -178,3 +178,20 @@ export CLOUDFLARE_ACCOUNT_ID=fd2b7856d928fbd1c7c3c190d16858ad
 
 Pages rollback: N/A (no Pages deploy). Current prod deployment id: `c6490ef1-39c6-4e5e-9203-e9f2703d336f`.
 
+
+---
+
+## Zone route `/api/*` (follow-up)
+
+Worker accepts `/api/...` by stripping one `/api` prefix (so `/api/coverage` ≡ `/coverage`).
+`worker/wrangler.toml` adds zone routes:
+
+- `mesh-utility.org/api/*`
+- `www.mesh-utility.org/api/*`
+
+Deploy workflow keeps `WORKER_URL=https://mesh-utility.org/api`.
+
+### Rollback
+- Worker version before this change: `4c934153-8bb5-4d67-86bf-35047dc5f4c4`
+- Pages deploy before this change: `4bc62c69-890a-4025-9c9e-4eb317ad9e94`
+- Or delete the `/api/*` Worker routes in the zone / revert the PR and redeploy.

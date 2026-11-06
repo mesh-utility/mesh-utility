@@ -84,7 +84,8 @@ class WorkerApi {
     final normalized = base.endsWith('/')
         ? base.substring(0, base.length - 1)
         : base;
-    return Uri.parse('$normalized$path').replace(queryParameters: query);
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    return Uri.parse('$normalized$normalizedPath').replace(queryParameters: query);
   }
 
   Uri? _staticUri(String path, [Map<String, String>? query]) {
