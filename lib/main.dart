@@ -12,6 +12,7 @@ import 'package:mesh_utility/src/pages/not_found_page.dart';
 import 'package:mesh_utility/src/pages/nodes_page.dart';
 import 'package:mesh_utility/src/pages/privacy_page.dart';
 import 'package:mesh_utility/src/pages/settings_page.dart';
+import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
@@ -200,12 +201,41 @@ class _MeshHomePageState extends State<MeshHomePage>
   String? _mapFocusHexId;
   String? _mapFocusNodeId;
   bool _resumeScanAfterResume = false;
+  bool _enteredBackground = false;
   bool _notificationsReady = false;
   bool _bleUnavailableDialogOpen = false;
   String _lastStatusNotificationKey = '';
   bool? _portraitLockActive;
   static const double _tabletShortestSideDp = 600.0;
   bool _startupNavResolved = false;
+  bool _startupRoutedToConnections = false;
+  bool _previousBleConnected = false;
+
+  /// Navigate to a page index, auto-triggering a BLE scan when arriving at
+  /// the Connections page (index 1) if not already connected.
+  void _navigateTo(int index) {
+    setState(() => _index = index);
+    if (index == 1 && !_appState.bleConnected && !_appState.bleConnecting) {
+      unawaited(_appState.scanBleDevices());
+    }
+  }
+
+  String _formatScanProgressStatus(String base) {
+    final count = _appState.bleDiscoveries.length;
+    if (count <= 0) return base;
+    final countLabel = '$count ${count == 1 ? 'repeater' : 'repeaters'}';
+    return '$base · $countLabel';
+  }
+
+  String? _headerCountdownLabel() {
+    if (_appState.settings.smartScanEnabled) return null;
+    if (!_appState.bleScanning) return null;
+    final seconds = _appState.bleNextScanCountdown;
+    if (seconds == null || seconds < 0) return null;
+    final mm = (seconds ~/ 60).toString().padLeft(2, '0');
+    final ss = (seconds % 60).toString().padLeft(2, '0');
+    return '$mm:$ss';
+  }
 
   @override
   void initState() {
@@ -377,9 +407,25 @@ class _MeshHomePageState extends State<MeshHomePage>
     if (!_startupNavResolved && !_appState.loading) {
       _startupNavResolved = true;
       if (!_appState.bleConnected && _index == 0) {
-        setState(() => _index = 1);
+        _startupRoutedToConnections = true;
+        _navigateTo(1);
       }
     }
+    if (_startupRoutedToConnections && _appState.bleConnected) {
+      _startupRoutedToConnections = false;
+      if (_index != 0) {
+        _debugLog.info(
+          'ui_nav',
+          'Startup BLE connect succeeded; navigating to Coverage Map',
+        );
+        setState(() => _index = 0);
+      }
+      _showConnectedSnackBar();
+    }
+    if (!_previousBleConnected && _appState.bleConnected) {
+      _showConnectedSnackBar();
+    }
+    _previousBleConnected = _appState.bleConnected;
     unawaited(_syncStatusNotification());
   }
 
@@ -481,7 +527,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         ? 'Radio Status'
         : 'Radio: $radio';
     final status = _appState.bleStatus.trim().isEmpty
-        ? (_appState.bleScanning ? 'Scanning' : 'Connected')
+        ? (_appState.bleScanning ? 'Discovery Sent' : 'Connected')
         : _appState.bleStatus.trim();
     final key =
         '$title|$status|${_appState.bleScanning}|${_appState.bleBusy}|${_appState.bleConnected}';
@@ -523,6 +569,17 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final linuxInactiveFocusChange =
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.linux &&
+        state == AppLifecycleState.inactive;
+    if (linuxInactiveFocusChange) {
+      _debugLog.info(
+        'app_lifecycle',
+        'Linux inactive focus change; keeping background activity state unchanged',
+      );
+      return;
+    }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -532,10 +589,26 @@ class _MeshHomePageState extends State<MeshHomePage>
       if (_appState.bleScanning) {
         _resumeScanAfterResume = true;
       }
-      _debugLog.info('app_lifecycle', 'App moved to background state=$state');
+      _enteredBackground = true;
+      if (state == AppLifecycleState.inactive) {
+        _debugLog.info(
+          'app_lifecycle',
+          'App inactive (focus loss or transient system UI), state=$state',
+        );
+      } else {
+        _debugLog.info('app_lifecycle', 'App moved to background state=$state');
+      }
       return;
     }
     if (state == AppLifecycleState.resumed) {
+      if (!_enteredBackground) {
+        _debugLog.info(
+          'app_lifecycle',
+          'App resumed without background transition; keeping active session',
+        );
+        return;
+      }
+      _enteredBackground = false;
       _debugLog.info('app_lifecycle', 'App resumed; validating BLE session');
       unawaited(_recoverBleAfterResume());
     }
@@ -563,6 +636,30 @@ class _MeshHomePageState extends State<MeshHomePage>
       await _appState.toggleBleScan();
     }
     _resumeScanAfterResume = false;
+  }
+
+  void _showConnectedSnackBar() {
+    if (!mounted) return;
+    final name = _appState.bleStatus;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(
+                Icons.bluetooth_connected,
+                color: Colors.white,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: Text(name)),
+            ],
+          ),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   Future<void> _openUrl(String value) async {
@@ -805,55 +902,104 @@ class _MeshHomePageState extends State<MeshHomePage>
           builder: (context, constraints) {
             final desktop = constraints.maxWidth >= 860;
             final compactHeader = constraints.maxWidth < 520;
-            final statusPillWidth =
-                (compactHeader
-                        ? constraints.maxWidth * 0.55
-                        : constraints.maxWidth * 0.36)
-                    .clamp(180.0, 460.0)
-                    .toDouble();
+            final desktopSidebarWidth = (constraints.maxWidth * 0.22)
+                .clamp(224.0, 280.0)
+                .toDouble();
             String scanHeaderLabel() {
               if (!_appState.bleConnected) return 'Idle';
               if (!_appState.bleScanning) return 'Paused';
               final liveStatus = _appState.bleStatus.trim();
+              if (liveStatus.startsWith('Discovery Sent')) {
+                return _formatScanProgressStatus(liveStatus);
+              }
+              if (liveStatus.startsWith('Discovery Complete')) {
+                return liveStatus;
+              }
+              if (liveStatus.startsWith('Discovery Error')) {
+                return liveStatus;
+              }
               if (liveStatus.toLowerCase().contains('smart scan skipped')) {
+                return liveStatus;
+              }
+              final isDiscoverDetailLine = liveStatus.contains(' · ');
+              if (isDiscoverDetailLine &&
+                  !liveStatus.startsWith('node_discover:') &&
+                  !liveStatus.startsWith('Discovering')) {
                 return liveStatus;
               }
               if (_appState.bleBusy) {
                 switch (_appState.bleScanStatus) {
                   case 'advertising':
-                    return 'Advertising';
+                    return _formatScanProgressStatus('Discovery Sent');
                   case 'waiting':
-                    return 'Waiting';
+                    return _formatScanProgressStatus('Discovery Sent');
                   case 'querying':
-                    return 'Querying';
+                    return _formatScanProgressStatus('Discovery Sent');
                   case 'submitting':
-                    return 'Saving';
+                    return _formatScanProgressStatus('Discovery Sent');
                   case 'done':
-                    return 'Scan Complete';
+                    return 'Discovery Complete';
                   case 'error':
-                    return 'Scan Error';
+                    return 'Discovery Error';
                   default:
-                    return 'Scanning';
+                    return _formatScanProgressStatus('Discovery Sent');
                 }
               }
               if (liveStatus.startsWith('node_discover:') ||
                   liveStatus.startsWith('Discovering')) {
-                return liveStatus;
+                return _formatScanProgressStatus('Discovery Sent');
               }
-              return 'Scanning';
+              return _formatScanProgressStatus('Discovery Sent');
             }
 
             final headerStatusText = scanHeaderLabel();
+            final headerCountdownText = _headerCountdownLabel();
+            final hasCountdownBadge = headerCountdownText != null;
             final headerStatusLower = headerStatusText.toLowerCase();
             final headerStatusIsSmartSkip = headerStatusLower.contains(
               'smart scan skipped',
             );
+            final shouldForceMarquee =
+                headerStatusIsSmartSkip || headerStatusText.length >= 24;
             final headerStatusColor = headerStatusIsSmartSkip
                 ? (Theme.of(context).brightness == Brightness.dark
                       ? const Color(0xFFFFEB3B)
                       : const Color(0xFFB45309))
                 : Theme.of(context).textTheme.bodySmall?.color;
             Widget buildHeaderStatusPill() {
+              final statusLineStyle = Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(
+                    color: headerStatusColor,
+                    fontWeight: headerStatusIsSmartSkip
+                        ? FontWeight.w700
+                        : FontWeight.w600,
+                  );
+              return Container(
+                width: double.infinity,
+                margin: EdgeInsets.only(right: hasCountdownBadge ? 6 : 0),
+                padding: EdgeInsets.symmetric(
+                  horizontal: compactHeader ? 8 : 10,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: OverflowMarqueeText(
+                  text: headerStatusText,
+                  pixelsPerSecond: 34,
+                  gapPixels: 56,
+                  alwaysScroll: shouldForceMarquee,
+                  deferTextUpdatesUntilLoopEnd: true,
+                  style: statusLineStyle,
+                ),
+              );
+            }
+
+            Widget? buildHeaderCountdownBadge() {
+              if (headerCountdownText == null) return null;
               return Container(
                 margin: const EdgeInsets.only(right: 6),
                 padding: EdgeInsets.symmetric(
@@ -866,21 +1012,16 @@ class _MeshHomePageState extends State<MeshHomePage>
                   ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: SizedBox(
-                  width: statusPillWidth,
-                  child: OverflowMarqueeText(
-                    text: headerStatusText,
-                    pixelsPerSecond: 34,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: headerStatusColor,
-                      fontWeight: headerStatusIsSmartSkip
-                          ? FontWeight.w700
-                          : FontWeight.w600,
-                    ),
-                  ),
+                child: Text(
+                  headerCountdownText,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700),
                 ),
               );
             }
+
+            final countdownBadge = buildHeaderCountdownBadge();
 
             return Scaffold(
               key: _scaffoldKey,
@@ -894,7 +1035,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                             'ui_click',
                             'Sidebar select index=$i (drawer)',
                           );
-                          setState(() => _index = i);
+                          _navigateTo(i);
                           Navigator.of(context).pop();
                         },
                         onDiscord: () async {
@@ -922,7 +1063,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                 children: [
                   if (desktop)
                     SizedBox(
-                      width: 224,
+                      width: desktopSidebarWidth,
                       child: _AppSidebar(
                         selectedIndex: _index,
                         onSelect: (i) {
@@ -930,7 +1071,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                             'ui_click',
                             'Sidebar select index=$i (desktop)',
                           );
-                          setState(() => _index = i);
+                          _navigateTo(i);
                         },
                         onDiscord: () =>
                             _openUrl('https://discord.gg/Xyhjz7CtuW'),
@@ -1020,12 +1161,8 @@ class _MeshHomePageState extends State<MeshHomePage>
                                             ),
                                           ),
                                         ),
-                                  Expanded(
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: buildHeaderStatusPill(),
-                                    ),
-                                  ),
+                                  Expanded(child: buildHeaderStatusPill()),
+                                  ?countdownBadge,
                                 ],
                               ),
                             ),
@@ -1095,9 +1232,9 @@ class _MeshHomePageState extends State<MeshHomePage>
         resolvedNodeNames.putIfAbsent(id, () => name);
       }
     }
+    final observer = _latestObserverPosition();
     switch (index) {
       case 0:
-        final observer = _latestObserverPosition();
         return MapPage(
           zones: _appState.coverageZones,
           onRefresh: _appState.syncFromWorker,
@@ -1126,8 +1263,8 @@ class _MeshHomePageState extends State<MeshHomePage>
             _debugLog.info('ui_click', 'Map -> History from zone=$zoneId');
             setState(() {
               _historyHexFilter = zoneId;
-              _index = 3;
             });
+            _navigateTo(3);
           },
           focusHexId: _mapFocusHexId,
           focusNodeId: _mapFocusNodeId,
@@ -1143,6 +1280,23 @@ class _MeshHomePageState extends State<MeshHomePage>
           connectedRadioName: _appState.connectedRadioDisplayName,
           connectedRadioMeshId: _appState.connectedRadioMeshId8,
           bleUiEnabled: true,
+          onClearFocusNodeId: () {
+            if (_mapFocusNodeId == null) return;
+            setState(() {
+              _mapFocusNodeId = null;
+            });
+          },
+          onTapNodes: () {
+            _debugLog.info('ui_click', 'Stats bar -> Nodes tab');
+            _navigateTo(2);
+          },
+          onTapScans: () {
+            _debugLog.info('ui_click', 'Stats bar -> History tab');
+            setState(() {
+              _historyHexFilter = null;
+            });
+            _navigateTo(3);
+          },
         );
       case 1:
         return ConnectionsPage(
@@ -1165,6 +1319,9 @@ class _MeshHomePageState extends State<MeshHomePage>
         return NodesPage(
           nodes: _appState.nodes,
           scanResults: _appState.scanResults,
+          statsRadiusMiles: _appState.settings.statsRadiusMiles,
+          observerLat: observer?.$1,
+          observerLng: observer?.$2,
           onOpenMapForNode: (nodeId) {
             _debugLog.info('ui_click', 'Nodes -> Map for node=$nodeId');
             setState(() {
@@ -1182,6 +1339,9 @@ class _MeshHomePageState extends State<MeshHomePage>
           resolvedNodeNames: resolvedNodeNames,
           connectedRadioName: _appState.connectedRadioDisplayName,
           connectedRadioMeshId: _appState.connectedRadioMeshId8,
+          statsRadiusMiles: _appState.settings.statsRadiusMiles,
+          observerLat: observer?.$1,
+          observerLng: observer?.$2,
           onOpenMapFromHex: (hexId) {
             _debugLog.info('ui_click', 'History -> Map for hex=$hexId');
             setState(() {
@@ -1201,6 +1361,10 @@ class _MeshHomePageState extends State<MeshHomePage>
           uploadQueueCount: _appState.uploadQueueCount,
           lastSyncAt: _appState.lastSyncAt,
           lastSyncScanCount: _appState.lastSyncScanCount,
+          periodicSyncEnabled: _appState.periodicSyncEnabled,
+          periodicSyncWaitingForInternetTimeAnchor:
+              _appState.periodicSyncWaitingForInternetTimeAnchor,
+          nextPeriodicSyncDueAtUtc: _appState.nextPeriodicSyncDueAtUtc,
           bleConnected: _appState.bleConnected,
           bleBusy: _appState.bleBusy || _appState.bleConnecting,
           debugLogs: _appState.debugLogs,
@@ -1246,6 +1410,8 @@ class _MeshHomePageState extends State<MeshHomePage>
         );
       case 6:
         return const PrivacyPage();
+      case 7:
+        return ContactsPage(contacts: _appState.currentRadioContacts);
       default:
         return const NotFoundPage();
     }
@@ -1408,59 +1574,71 @@ class _AppSidebar extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            _NavButton(
-              label: i18n.t('nav.coverageMap'),
-              icon: Icons.map_outlined,
-              selected: selectedIndex == 0,
-              onTap: () => onSelect(0),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  _NavButton(
+                    label: i18n.t('nav.coverageMap'),
+                    icon: Icons.map_outlined,
+                    selected: selectedIndex == 0,
+                    onTap: () => onSelect(0),
+                  ),
+                  _NavButton(
+                    label: i18n.t('settings.connections'),
+                    icon: Icons.bluetooth_searching,
+                    selected: selectedIndex == 1,
+                    onTap: () => onSelect(1),
+                  ),
+                  _NavButton(
+                    label: i18n.t('settings.title'),
+                    icon: Icons.settings_outlined,
+                    selected: selectedIndex == 5,
+                    onTap: () => onSelect(5),
+                  ),
+                  _NavButton(
+                    label: i18n.t('nav.nodes'),
+                    icon: Icons.settings_input_antenna,
+                    selected: selectedIndex == 2,
+                    onTap: () => onSelect(2),
+                  ),
+                  _NavButton(
+                    label: i18n.t('nav.scanHistory'),
+                    icon: Icons.radar_outlined,
+                    selected: selectedIndex == 3,
+                    onTap: () => onSelect(3),
+                  ),
+                  _NavButton(
+                    label: i18n.t('nav.howToUse'),
+                    icon: Icons.help_outline,
+                    selected: selectedIndex == 4,
+                    onTap: () => onSelect(4),
+                  ),
+                  _NavButton(
+                    label: 'Contacts',
+                    icon: Icons.contacts_outlined,
+                    selected: selectedIndex == 7,
+                    onTap: () => onSelect(7),
+                  ),
+                  _NavButton(
+                    label: 'Discord',
+                    icon: Icons.forum_outlined,
+                    selected: false,
+                    onTap: () {
+                      onDiscord();
+                    },
+                  ),
+                  _NavButton(
+                    label: 'Support Development',
+                    icon: Icons.coffee_outlined,
+                    selected: false,
+                    onTap: () {
+                      onSupport();
+                    },
+                  ),
+                ],
+              ),
             ),
-            _NavButton(
-              label: i18n.t('settings.connections'),
-              icon: Icons.bluetooth_searching,
-              selected: selectedIndex == 1,
-              onTap: () => onSelect(1),
-            ),
-            _NavButton(
-              label: i18n.t('settings.title'),
-              icon: Icons.settings_outlined,
-              selected: selectedIndex == 5,
-              onTap: () => onSelect(5),
-            ),
-            _NavButton(
-              label: i18n.t('nav.nodes'),
-              icon: Icons.settings_input_antenna,
-              selected: selectedIndex == 2,
-              onTap: () => onSelect(2),
-            ),
-            _NavButton(
-              label: i18n.t('nav.scanHistory'),
-              icon: Icons.radar_outlined,
-              selected: selectedIndex == 3,
-              onTap: () => onSelect(3),
-            ),
-            _NavButton(
-              label: i18n.t('nav.howToUse'),
-              icon: Icons.help_outline,
-              selected: selectedIndex == 4,
-              onTap: () => onSelect(4),
-            ),
-            _NavButton(
-              label: 'Discord',
-              icon: Icons.forum_outlined,
-              selected: false,
-              onTap: () {
-                onDiscord();
-              },
-            ),
-            _NavButton(
-              label: 'Support Development',
-              icon: Icons.coffee_outlined,
-              selected: false,
-              onTap: () {
-                onSupport();
-              },
-            ),
-            const SizedBox(height: 14),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
               child: Column(
@@ -1526,7 +1704,7 @@ class _NavButton extends StatelessWidget {
               children: [
                 Icon(icon, size: 18),
                 const SizedBox(width: 10),
-                Text(label),
+                Expanded(child: Text(label, softWrap: true)),
               ],
             ),
           ),

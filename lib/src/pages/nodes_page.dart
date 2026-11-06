@@ -12,11 +12,17 @@ class NodesPage extends StatefulWidget {
     required this.nodes,
     required this.scanResults,
     required this.onOpenMapForNode,
+    this.statsRadiusMiles = 0,
+    this.observerLat,
+    this.observerLng,
   });
 
   final List<MeshNode> nodes;
   final List<ScanResult> scanResults;
   final ValueChanged<String> onOpenMapForNode;
+  final int statsRadiusMiles;
+  final double? observerLat;
+  final double? observerLng;
 
   @override
   State<NodesPage> createState() => _NodesPageState();
@@ -25,21 +31,40 @@ class NodesPage extends StatefulWidget {
 class _NodesPageState extends State<NodesPage> {
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
   String _query = '';
+  late Map<String, ScanResult> _latestByNode;
+  late Map<String, List<ScanResult>> _scansByNode;
+  List<MeshNode> _sortedNodes = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _processScans();
+    _updateSortedNodes();
+  }
+
+  @override
+  void didUpdateWidget(NodesPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final radiusChanged =
+        widget.statsRadiusMiles != oldWidget.statsRadiusMiles ||
+        widget.observerLat != oldWidget.observerLat ||
+        widget.observerLng != oldWidget.observerLng;
+    if (widget.scanResults != oldWidget.scanResults || radiusChanged) {
+      _processScans();
+    }
+    if (widget.nodes != oldWidget.nodes || radiusChanged) {
+      _updateSortedNodes();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final latestByNode = <String, ScanResult>{};
-    final scansByNode = <String, List<ScanResult>>{};
-    for (final scan in widget.scanResults) {
-      latestByNode.putIfAbsent(scan.nodeId, () => scan);
-      scansByNode.putIfAbsent(scan.nodeId, () => <ScanResult>[]).add(scan);
-    }
-
-    final filtered = widget.nodes.where((n) {
+    final filtered = _sortedNodes.where((n) {
+      if (_query.isEmpty) return true;
       final q = _query.toLowerCase();
       return (n.name ?? '').toLowerCase().contains(q) ||
           n.nodeId.toLowerCase().contains(q);
-    }).toList()..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    }).toList();
 
     return Center(
       child: ConstrainedBox(
@@ -63,7 +88,7 @@ class _NodesPageState extends State<NodesPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Chip(label: Text('${widget.nodes.length} Nodes')),
+                      Chip(label: Text('${_sortedNodes.length} Nodes')),
                     ],
                   ),
                   const SizedBox(height: 10),
@@ -132,11 +157,11 @@ class _NodesPageState extends State<NodesPage> {
                       itemCount: filtered.length,
                       itemBuilder: (context, index) {
                         final node = filtered[index];
-                        final latest = latestByNode[node.nodeId];
+                        final latest = _latestByNode[node.nodeId];
                         final valueTextStyle = Theme.of(
                           context,
                         ).textTheme.bodyMedium;
-                        final nodeScans = scansByNode[node.nodeId] ?? const [];
+                        final nodeScans = _scansByNode[node.nodeId] ?? const [];
                         final nodeHexes = nodeScans
                             .map((s) => hexKey(s.latitude, s.longitude))
                             .toSet();
@@ -345,5 +370,45 @@ class _NodesPageState extends State<NodesPage> {
         ),
       ),
     );
+  }
+
+  void _processScans() {
+    _latestByNode = {};
+    _scansByNode = {};
+    final scans = _filterScansByRadius(widget.scanResults);
+    for (final scan in scans) {
+      _latestByNode.putIfAbsent(scan.nodeId, () => scan);
+      _scansByNode.putIfAbsent(scan.nodeId, () => <ScanResult>[]).add(scan);
+    }
+  }
+
+  void _updateSortedNodes() {
+    final radiusNodeIds = _scansByNode.keys.toSet();
+    _sortedNodes = widget.nodes.where((n) {
+      if (widget.statsRadiusMiles == 0 ||
+          widget.observerLat == null ||
+          widget.observerLng == null) {
+        return true;
+      }
+      return radiusNodeIds.contains(n.nodeId);
+    }).toList();
+    _sortedNodes.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+  }
+
+  List<ScanResult> _filterScansByRadius(List<ScanResult> scans) {
+    if (widget.statsRadiusMiles == 0 ||
+        widget.observerLat == null ||
+        widget.observerLng == null) {
+      return scans;
+    }
+    return scans.where((s) {
+      final d = distanceMiles(
+        widget.observerLat!,
+        widget.observerLng!,
+        s.latitude,
+        s.longitude,
+      );
+      return d <= widget.statsRadiusMiles;
+    }).toList();
   }
 }

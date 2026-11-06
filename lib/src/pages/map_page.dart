@@ -54,6 +54,9 @@ class MapPage extends StatefulWidget {
     this.observerLng,
     this.connectedRadioName,
     this.connectedRadioMeshId,
+    this.onTapNodes,
+    this.onTapScans,
+    this.onClearFocusNodeId,
   });
 
   final List<CoverageZone> zones;
@@ -94,6 +97,9 @@ class MapPage extends StatefulWidget {
   final double? observerLng;
   final String? connectedRadioName;
   final String? connectedRadioMeshId;
+  final VoidCallback? onTapNodes;
+  final VoidCallback? onTapScans;
+  final VoidCallback? onClearFocusNodeId;
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -233,7 +239,7 @@ class _MapPageState extends State<MapPage> {
 
     final target = LatLng(lat, lng);
     if (_lastAutoCenterTarget != null) {
-      final movedMiles = _distanceMiles(
+      final movedMiles = distanceMiles(
         _lastAutoCenterTarget!.latitude,
         _lastAutoCenterTarget!.longitude,
         target.latitude,
@@ -316,9 +322,6 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (nodeHexes.isEmpty) {
-      debugPrint(
-        '[map_filter] Node filter requested for $nodeId but found 0 scan hexes',
-      );
       _debugLog.warn(
         'map_filter',
         'Node filter requested for $nodeId but found 0 scan hexes',
@@ -332,10 +335,6 @@ class _MapPageState extends State<MapPage> {
       'map_filter',
       'Node $nodeKey filter: scansHexes=${nodeHexes.length}, matchedZones=${nodeZones.length}, totalZones=${widget.zones.length}',
     );
-    debugPrint(
-      '[map_filter] Node $nodeKey filter: scansHexes=${nodeHexes.length}, '
-      'matchedZones=${nodeZones.length}, totalZones=${widget.zones.length}',
-    );
     final candidates = nodeZones;
     CoverageZone? target;
     for (final z in candidates) {
@@ -347,6 +346,7 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (target == null || !mounted) return false;
+    _disableAutoCenter('node focus');
     setState(() {
       // Node-focus mode should not auto-open a zone popup.
       _selectedZone = null;
@@ -406,6 +406,7 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (coordinates.isEmpty) return;
+    _disableAutoCenter('node filter focus');
     _mapController.fitCamera(
       CameraFit.coordinates(
         coordinates: coordinates,
@@ -431,20 +432,37 @@ class _MapPageState extends State<MapPage> {
     return <String>{key};
   }
 
+  List<ScanResult> _filterScansByRadius(List<ScanResult> scans) {
+    final radius = widget.statsRadiusMiles;
+    final lat = widget.observerLat;
+    final lng = widget.observerLng;
+    if (radius == 0 || lat == null || lng == null) return scans;
+    return scans.where((s) {
+      return distanceMiles(lat, lng, s.latitude, s.longitude) <= radius;
+    }).toList();
+  }
+
   Future<void> _openNodeFilterDialog() async {
+    // Respect Stats Radius so only nodes with scans inside the radius appear.
+    final radiusScans = _filterScansByRadius(widget.scans);
     final options = _nodeFilterOptions(
-      scans: widget.scans,
+      scans: radiusScans,
       resolvedNodeNames: widget.resolvedNodeNames,
     );
     if (!mounted) return;
-    final selected = Set<String>.from(_selectedNodeFilters);
+    final selected = Set<String>.from(
+      _effectiveNodeFilters(
+        focusNodeId: widget.focusNodeId,
+        selectedNodeFilters: _selectedNodeFilters,
+      ),
+    );
     final result = await showDialog<Set<String>>(
       context: context,
       builder: (context) =>
           _NodeFilterDialog(options: options, initiallySelected: selected),
     );
     if (!mounted || result == null) return;
-    final signatureBefore = _selectedNodeFilters.toList()..sort();
+    final signatureBefore = selected.toList()..sort();
     final signatureAfter = result.toList()..sort();
     if (signatureBefore.join(',') == signatureAfter.join(',')) {
       return;
@@ -453,6 +471,12 @@ class _MapPageState extends State<MapPage> {
       'map_filter',
       'Node filter updated: count=${result.length} ids=${signatureAfter.join(',')}',
     );
+    // Manual filter changes should override one-shot focus routing from
+    // other pages so "clear filter" truly clears map filtering state.
+    final hadFocusNode = (widget.focusNodeId ?? '').trim().isNotEmpty;
+    if (hadFocusNode) {
+      widget.onClearFocusNodeId?.call();
+    }
     setState(() {
       _selectedNodeFilters = result;
       if (_selectedZone != null &&
@@ -536,11 +560,6 @@ class _MapPageState extends State<MapPage> {
           '$filterLabel|zones:${widget.zones.length}|base:${baseZones.length}|filtered:${filteredZones.length}|radiusBypass:$bypassRadiusForNodeFocus';
       if (signature != _lastNodeFilterDebugSignature) {
         _lastNodeFilterDebugSignature = signature;
-        debugPrint(
-          '[map_filter] Render filter active for $filterLabel: '
-          'base=${baseZones.length}, afterRadius=${filteredZones.length}, '
-          'radiusBypass=$bypassRadiusForNodeFocus',
-        );
         _debugLog.debug(
           'map_filter',
           'Render filter active for $filterLabel: base=${baseZones.length}, afterRadius=${filteredZones.length}, radiusBypass=$bypassRadiusForNodeFocus',
@@ -727,7 +746,7 @@ class _MapPageState extends State<MapPage> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
+                          children: const [
                             Align(
                               alignment: Alignment.center,
                               child: Icon(Icons.chevron_right, size: 16),
@@ -838,9 +857,9 @@ class _MapPageState extends State<MapPage> {
                             _openNodeFilterDialog();
                           },
                           icon: const Icon(Icons.filter_alt),
-                          tooltip: 'Filter by nodes',
+                          tooltip: 'Filter repeater hits',
                         ),
-                        if (_selectedNodeFilters.isNotEmpty)
+                        if (effectiveNodeFilters.isNotEmpty)
                           Positioned(
                             right: 6,
                             top: 6,
@@ -990,6 +1009,8 @@ class _MapPageState extends State<MapPage> {
                       hasObserver:
                           widget.observerLat != null &&
                           widget.observerLng != null,
+                      onTapNodes: widget.onTapNodes,
+                      onTapScans: widget.onTapScans,
                     ),
                   );
                 },
@@ -1047,6 +1068,27 @@ class _MapPageState extends State<MapPage> {
                               rssi: _selectedZone!.avgRssi,
                               snr: _selectedZone!.avgSnr,
                             );
+                      final popupNodeLabel = latest != null
+                          ? _stripPopupEntityLabel(
+                              _nodeDisplayName(
+                                latest.senderName,
+                                latest.nodeId,
+                                widget.resolvedNodeNames[latest.nodeId],
+                              ),
+                            )
+                          : (latestRaw != null
+                                ? _stripPopupEntityLabel(
+                                    _nodeDisplayName(
+                                      latestRaw.senderName,
+                                      latestRaw.nodeId ??
+                                          latestRaw.observerId ??
+                                          '',
+                                      widget.resolvedNodeNames[latestRaw
+                                              .nodeId ??
+                                          ''],
+                                    ),
+                                  )
+                                : '');
                       final popupSig = latest != null
                           ? 'zone=${_selectedZone!.id}|ts=${latest.timestamp.toIso8601String()}|node=${latest.nodeId}|obs=${_observerDisplayName(latest, connectedRadioName: widget.connectedRadioName, connectedRadioMeshId: widget.connectedRadioMeshId, resolvedNodeNames: widget.resolvedNodeNames)}|rssi=${latest.rssi.toStringAsFixed(1)}|snrOut=${latest.snr?.toStringAsFixed(1) ?? 'N/A'}|snrIn=${latest.snrIn?.toStringAsFixed(1) ?? 'N/A'}|alt=${latest.altitude?.toStringAsFixed(1) ?? 'N/A'}|scans=${_selectedZone!.scanCount}|dead=$effectiveDead'
                           : (latestRaw != null
@@ -1119,8 +1161,8 @@ class _MapPageState extends State<MapPage> {
                                             const Icon(Icons.radio, size: 14),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: OverflowMarqueeText(
-                                                text: _stripPopupEntityLabel(
+                                              child: Text(
+                                                _stripPopupEntityLabel(
                                                   _observerDisplayNameRaw(
                                                     latestRaw,
                                                     connectedRadioName: widget
@@ -1133,7 +1175,6 @@ class _MapPageState extends State<MapPage> {
                                                         showCoverageTitle,
                                                   ),
                                                 ),
-                                                pixelsPerSecond: 38,
                                                 style: Theme.of(
                                                   context,
                                                 ).textTheme.bodyMedium,
@@ -1172,18 +1213,7 @@ class _MapPageState extends State<MapPage> {
                                             const SizedBox(width: 4),
                                             Expanded(
                                               child: Text(
-                                                _stripPopupEntityLabel(
-                                                  _nodeDisplayName(
-                                                    latestRaw.senderName,
-                                                    latestRaw.nodeId ??
-                                                        latestRaw.observerId ??
-                                                        '',
-                                                    widget
-                                                        .resolvedNodeNames[latestRaw
-                                                            .nodeId ??
-                                                        ''],
-                                                  ),
-                                                ),
+                                                popupNodeLabel,
                                                 maxLines: 1,
                                                 overflow: TextOverflow.ellipsis,
                                               ),
@@ -1262,8 +1292,8 @@ class _MapPageState extends State<MapPage> {
                                         const Icon(Icons.radio, size: 14),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: OverflowMarqueeText(
-                                            text: _stripPopupEntityLabel(
+                                          child: Text(
+                                            _stripPopupEntityLabel(
                                               _observerDisplayName(
                                                 latest,
                                                 connectedRadioName:
@@ -1276,7 +1306,6 @@ class _MapPageState extends State<MapPage> {
                                                     showCoverageTitle,
                                               ),
                                             ),
-                                            pixelsPerSecond: 38,
                                             style: Theme.of(
                                               context,
                                             ).textTheme.bodyMedium,
@@ -1309,16 +1338,8 @@ class _MapPageState extends State<MapPage> {
                                         ),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: OverflowMarqueeText(
-                                            text: _stripPopupEntityLabel(
-                                              _nodeDisplayName(
-                                                latest.senderName,
-                                                latest.nodeId,
-                                                widget.resolvedNodeNames[latest
-                                                    .nodeId],
-                                              ),
-                                            ),
-                                            pixelsPerSecond: 26,
+                                          child: Text(
+                                            popupNodeLabel,
                                             style: Theme.of(
                                               context,
                                             ).textTheme.bodyMedium,
@@ -1517,7 +1538,7 @@ class _MapPageState extends State<MapPage> {
                             alignment: Alignment.center,
                             child: CustomPaint(
                               size: const Size(22, 10),
-                              painter: PopupVPointerPainter(),
+                              painter: const PopupVPointerPainter(),
                             ),
                           ),
                         ],
@@ -1636,17 +1657,17 @@ class _NodeFilterDialogState extends State<_NodeFilterDialog> {
               option.nodeId.toLowerCase().contains(query);
         })
         .toList(growable: false);
-    final ordered = [...filtered]
-      ..sort((a, b) {
-        final aSelected = _selected.contains(a.nodeId);
-        final bSelected = _selected.contains(b.nodeId);
-        if (aSelected != bSelected) {
-          return aSelected ? -1 : 1;
-        }
-        final byLabel = a.label.toLowerCase().compareTo(b.label.toLowerCase());
-        if (byLabel != 0) return byLabel;
-        return a.nodeId.compareTo(b.nodeId);
-      });
+
+    final selectedList = <_NodeFilterOption>[];
+    final unselectedList = <_NodeFilterOption>[];
+    for (final option in filtered) {
+      if (_selected.contains(option.nodeId)) {
+        selectedList.add(option);
+      } else {
+        unselectedList.add(option);
+      }
+    }
+    final ordered = [...selectedList, ...unselectedList];
 
     return AlertDialog(
       title: const Text('Filter Nodes'),
@@ -1828,31 +1849,59 @@ String _nodeDisplayName(
   String nodeId,
   String? resolvedName,
 ) {
+  String baseLabel;
   if (senderName == null || senderName.trim().isEmpty) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+    } else {
+      baseLabel = nodeId;
     }
-    return nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   final trimmed = senderName.trim();
   if (trimmed == nodeId &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
   if (trimmed.toLowerCase() == 'unknown' &&
       resolvedName != null &&
       resolvedName.trim().isNotEmpty) {
-    return resolvedName.trim();
+    baseLabel = resolvedName.trim();
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
-  if (trimmed == 'Unknown ($nodeId)') return nodeId;
+  if (trimmed == 'Unknown ($nodeId)') {
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
+  }
   if (trimmed.startsWith('Unknown (') && trimmed.endsWith(')')) {
     if (resolvedName != null && resolvedName.trim().isNotEmpty) {
-      return resolvedName.trim();
+      baseLabel = resolvedName.trim();
+      return _formatNodeDisplayWithId(baseLabel, nodeId);
     }
-    return nodeId;
+    baseLabel = nodeId;
+    return _formatNodeDisplayWithId(baseLabel, nodeId);
   }
-  return trimmed;
+  baseLabel = trimmed;
+  return _formatNodeDisplayWithId(baseLabel, nodeId);
+}
+
+String _formatNodeDisplayWithId(String label, String nodeId) {
+  final trimmedLabel = label.trim();
+  final shortId = _nodeFilterKey(nodeId);
+  if (shortId.isEmpty) return trimmedLabel;
+  if (trimmedLabel.isEmpty) return shortId;
+  final alreadyTagged = RegExp(
+    '\\(${RegExp.escape(shortId)}\\)\$',
+    caseSensitive: false,
+  ).hasMatch(trimmedLabel);
+  if (alreadyTagged) return trimmedLabel;
+  if (_looksLikeObserverId(trimmedLabel) &&
+      _nodeFilterKey(trimmedLabel) == shortId) {
+    return shortId;
+  }
+  return '$trimmedLabel ($shortId)';
 }
 
 String _observerDisplayName(
@@ -2074,24 +2123,7 @@ List<CoverageZone> _filterZonesByRadius({
     return zones;
   }
   return zones.where((z) {
-    final d = _distanceMiles(
-      observerLat,
-      observerLng,
-      z.centerLat,
-      z.centerLng,
-    );
+    final d = distanceMiles(observerLat, observerLng, z.centerLat, z.centerLng);
     return d <= radiusMiles;
   }).toList();
-}
-
-double _distanceMiles(double lat1, double lng1, double lat2, double lng2) {
-  const r = 3958.8;
-  final dLat = (lat2 - lat1) * (3.141592653589793 / 180.0);
-  final dLng = (lng2 - lng1) * (3.141592653589793 / 180.0);
-  final a =
-      (sin(dLat / 2) * sin(dLat / 2)) +
-      cos(lat1 * (3.141592653589793 / 180.0)) *
-          cos(lat2 * (3.141592653589793 / 180.0)) *
-          (sin(dLng / 2) * sin(dLng / 2));
-  return r * 2 * atan2(sqrt(a), sqrt(1 - a));
 }

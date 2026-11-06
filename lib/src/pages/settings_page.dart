@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
@@ -16,6 +18,9 @@ class SettingsPage extends StatefulWidget {
     required this.uploadQueueCount,
     required this.lastSyncAt,
     required this.lastSyncScanCount,
+    required this.periodicSyncEnabled,
+    required this.periodicSyncWaitingForInternetTimeAnchor,
+    required this.nextPeriodicSyncDueAtUtc,
     required this.bleConnected,
     required this.bleBusy,
     required this.debugLogs,
@@ -38,6 +43,9 @@ class SettingsPage extends StatefulWidget {
   final int uploadQueueCount;
   final DateTime? lastSyncAt;
   final int lastSyncScanCount;
+  final bool periodicSyncEnabled;
+  final bool periodicSyncWaitingForInternetTimeAnchor;
+  final DateTime? nextPeriodicSyncDueAtUtc;
 
   final bool bleConnected;
   final bool bleBusy;
@@ -65,6 +73,11 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _loadTileCacheStats();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 
   Future<void> _loadTileCacheStats() async {
@@ -191,9 +204,12 @@ class _SettingsPageState extends State<SettingsPage> {
           color: Theme.of(context).colorScheme.primary,
         );
     final radiusDisplay = _radiusDisplayValue(s.statsRadiusMiles, s.unitSystem);
+    final syncRadiusLabel = _syncRadiusLabel(s.syncRadiusMiles, s.unitSystem);
     final syncMeta = _syncMeta(
       count: widget.lastSyncScanCount,
       at: widget.lastSyncAt,
+      radiusMiles: s.syncRadiusMiles,
+      unitSystem: s.unitSystem,
     );
     return SafeArea(
       top: false,
@@ -495,28 +511,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     },
                   ),
                   _SectionDivider(),
-                  DropdownButtonFormField<String>(
-                    isExpanded: true,
-                    initialValue: s.language,
-                    decoration: const InputDecoration(
-                      labelText: 'Language',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: 'en', child: Text('English')),
-                      DropdownMenuItem(value: 'es', child: Text('Español')),
-                      DropdownMenuItem(value: 'fr', child: Text('Français')),
-                      DropdownMenuItem(value: 'de', child: Text('Deutsch')),
-                      DropdownMenuItem(value: 'pt', child: Text('Português')),
-                      DropdownMenuItem(value: 'zh', child: Text('中文')),
-                      DropdownMenuItem(value: 'ja', child: Text('日本語')),
-                      DropdownMenuItem(value: 'ko', child: Text('한국어')),
-                    ],
-                    onChanged: (value) {
-                      if (value == null) return;
-                      widget.onChanged(s.copyWith(language: value));
-                    },
-                  ),
+                  // TODO: Re-enable language selector after localization pass.
                   _SectionDivider(),
                   OutlinedButton.icon(
                     onPressed: widget.onToggleTheme,
@@ -702,11 +697,45 @@ class _SettingsPageState extends State<SettingsPage> {
                     'Controls deadzone fetch window without changing successful scan history range.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: '${s.syncRadiusMiles}',
+                    decoration: InputDecoration(
+                      labelText: 'Sync Download Scope',
+                      labelStyle: pickerLabelStyle,
+                      floatingLabelStyle: pickerFloatingLabelStyle,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: _syncRadiusOptions(s.unitSystem),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      widget.onChanged(
+                        s.copyWith(syncRadiusMiles: int.parse(value)),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    s.syncRadiusMiles == 0
+                        ? 'Fetch cloud history globally.'
+                        : 'Fetch cloud history within $syncRadiusLabel of your current location when available.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                   _SectionDivider(),
-                  _SectionTitle(
-                    icon: Icons.sync,
-                    label:
-                        'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
+                  AutoSyncSectionTitle(
+                    periodicSyncEnabled: widget.periodicSyncEnabled,
+                    syncing: widget.syncing,
+                    periodicSyncWaitingForInternetTimeAnchor:
+                        widget.periodicSyncWaitingForInternetTimeAnchor,
+                    nextPeriodicSyncDueAtUtc: widget.nextPeriodicSyncDueAtUtc,
+                    lastSyncAt: widget.lastSyncAt,
+                    uploadBatchIntervalMinutes:
+                        widget.settings.uploadBatchIntervalMinutes,
+                  ),
+                  Text(
+                    'Upload Interval: ${s.uploadBatchIntervalMinutes} min',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                   Slider(
                     value: s.uploadBatchIntervalMinutes.toDouble(),
@@ -721,7 +750,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                   Text(
-                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} cached locally',
+                    '${widget.uploadQueueCount} scans queued for upload • ${widget.localScanCount} scans cached locally',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 4),
@@ -739,11 +768,6 @@ class _SettingsPageState extends State<SettingsPage> {
                           ? 'Syncing...'
                           : 'Sync now (${widget.uploadQueueCount})',
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Downloaded scans are marked read-only and excluded from upload queue.',
-                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),
@@ -854,6 +878,114 @@ class _SectionTitle extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+@visibleForTesting
+class AutoSyncSectionTitle extends StatefulWidget {
+  const AutoSyncSectionTitle({
+    super.key,
+    required this.periodicSyncEnabled,
+    required this.syncing,
+    required this.periodicSyncWaitingForInternetTimeAnchor,
+    required this.nextPeriodicSyncDueAtUtc,
+    required this.lastSyncAt,
+    required this.uploadBatchIntervalMinutes,
+  });
+
+  final bool periodicSyncEnabled;
+  final bool syncing;
+  final bool periodicSyncWaitingForInternetTimeAnchor;
+  final DateTime? nextPeriodicSyncDueAtUtc;
+  final DateTime? lastSyncAt;
+  final int uploadBatchIntervalMinutes;
+
+  @override
+  State<AutoSyncSectionTitle> createState() => _AutoSyncSectionTitleState();
+}
+
+class _AutoSyncSectionTitleState extends State<AutoSyncSectionTitle> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTimer();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _ticker?.cancel();
+    if (widget.periodicSyncEnabled && !widget.syncing) {
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AutoSyncSectionTitle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.periodicSyncEnabled != oldWidget.periodicSyncEnabled ||
+        widget.syncing != oldWidget.syncing) {
+      _startTimer();
+    }
+  }
+
+  String _formatCountdown(Duration remaining) {
+    final totalSeconds = remaining.inSeconds;
+    if (totalSeconds <= 0) return '0s';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    if (hours > 0) return '${hours}h ${minutes}m ${seconds}s';
+    if (minutes > 0) return '${minutes}m ${seconds}s';
+    return '${seconds}s';
+  }
+
+  DateTime? _estimatedDueAtUtcWithoutAnchor() {
+    final last = widget.lastSyncAt;
+    if (last == null) return null;
+    final configured = widget.uploadBatchIntervalMinutes;
+    final intervalMinutes = configured < 30
+        ? 30
+        : (configured > 1440 ? 1440 : configured);
+    return last.toUtc().add(Duration(minutes: intervalMinutes));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String label;
+    if (!widget.periodicSyncEnabled) {
+      label = 'Next Auto Sync: Disabled (Offline Mode)';
+    } else if (widget.syncing) {
+      label = 'Next Auto Sync: Running Now';
+    } else if (widget.periodicSyncWaitingForInternetTimeAnchor) {
+      final estimated = _estimatedDueAtUtcWithoutAnchor();
+      if (estimated != null) {
+        final remaining = estimated.difference(DateTime.now().toUtc());
+        label = remaining > Duration.zero
+            ? 'Next Auto Sync In ${_formatCountdown(remaining)} (Estimated)'
+            : 'Next Auto Sync: Due (Waiting For Internet Time Anchor)';
+      } else {
+        label = 'Next Auto Sync: Waiting For Internet Time Anchor';
+      }
+    } else if (widget.nextPeriodicSyncDueAtUtc == null) {
+      label = 'Next Auto Sync: Waiting For Internet Time Anchor';
+    } else {
+      final remaining = widget.nextPeriodicSyncDueAtUtc!.difference(
+        DateTime.now().toUtc(),
+      );
+      label = remaining <= Duration.zero
+          ? 'Next Auto Sync: Due Now'
+          : 'Next Auto Sync In ${_formatCountdown(remaining)}';
+    }
+    return _SectionTitle(icon: Icons.sync, label: label);
   }
 }
 
@@ -971,6 +1103,25 @@ String _historyDaysValue(int value) {
   return '7';
 }
 
+List<DropdownMenuItem<String>> _syncRadiusOptions(String unitSystem) {
+  const values = <int>[0, 10, 25, 50, 100, 250];
+  return values
+      .map((value) {
+        final label = value == 0
+            ? 'Global'
+            : 'Within ${_syncRadiusLabel(value, unitSystem)}';
+        return DropdownMenuItem(value: '$value', child: Text(label));
+      })
+      .toList(growable: false);
+}
+
+String _syncRadiusLabel(int miles, String unitSystem) {
+  if (miles <= 0) return 'Global';
+  final display = _radiusDisplayValue(miles, unitSystem);
+  final unit = unitSystem == 'metric' ? 'km' : 'miles';
+  return '$display $unit';
+}
+
 int _radiusDisplayValue(int miles, String unitSystem) {
   if (unitSystem == 'metric') {
     return (miles * 1.60934).round();
@@ -986,8 +1137,16 @@ int _toMilesRadius(int displayValue, String unitSystem) {
   return displayValue;
 }
 
-String _syncMeta({required int count, required DateTime? at}) {
+String _syncMeta({
+  required int count,
+  required DateTime? at,
+  required int radiusMiles,
+  required String unitSystem,
+}) {
   if (at == null) return 'No completed sync yet';
   final formatted = DateFormat.yMd().add_jm().format(at.toLocal());
-  return 'Last sync: $formatted • $count scans fetched';
+  final scope = radiusMiles <= 0
+      ? 'global scope'
+      : 'scope ${_syncRadiusLabel(radiusMiles, unitSystem)}';
+  return 'Last sync: $formatted • $count scans fetched from network • $scope';
 }

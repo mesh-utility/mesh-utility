@@ -5,24 +5,44 @@ on:
     types:
       - published
       - prereleased
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Git tag / release tag to build and attach artifacts for
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-artifacts-${{ github.event.release.tag_name }}
+  group: release-artifacts-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 env:
   WORKER_URL: https://mesh-utility.org/api
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
+  # TODO: Re-enable macOS and iOS artifact jobs here once platform
+  # packaging/signing paths are stable. Keep release artifacts under this
+  # single workflow trigger.
   build-android:
     name: Build Android
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Derive version from tag
+        run: |
+          TAG="${RELEASE_TAG#v}"
+          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
+          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
+          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -34,16 +54,16 @@ jobs:
         run: flutter pub get
 
       - name: Build Android APK (release)
-        run: flutter build apk --release
+        run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
 
       - name: Stage release artifact
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-android.apk"
+            "dist/mesh-utility-${RELEASE_TAG}-android.apk"
 
       - name: Upload staged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-release
           path: dist/*
@@ -55,7 +75,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Derive version from tag
+        run: |
+          TAG="${RELEASE_TAG#v}"
+          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
+          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
+          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
 
       - name: Install Linux build dependencies
         run: |
@@ -77,16 +106,16 @@ jobs:
         run: flutter pub get
 
       - name: Build Linux (release)
-        run: flutter build linux --release
+        run: flutter build linux --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
 
       - name: Stage release artifact
         run: |
           mkdir -p dist
           tar -C build/linux/x64/release/bundle -czf \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-linux-x64.tar.gz" .
+            "dist/mesh-utility-${RELEASE_TAG}-linux-x64.tar.gz" .
 
       - name: Upload staged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-release
           path: dist/*
@@ -98,7 +127,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Derive version from tag
+        shell: bash
+        run: |
+          TAG="${RELEASE_TAG#v}"
+          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
+          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
+          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -110,58 +149,19 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows (release)
-        run: flutter build windows --release
+        run: flutter build windows --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
 
       - name: Stage release artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Compress-Archive -Path build/windows/x64/runner/Release/* `
-            -DestinationPath "dist/mesh-utility-${{ github.event.release.tag_name }}-windows-x64.zip"
+            -DestinationPath "dist/mesh-utility-${env:RELEASE_TAG}-windows-x64.zip"
 
       - name: Upload staged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-release
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Install Flutter dependencies
-        run: flutter pub get
-
-      - name: Build macOS (release, unsigned)
-        run: flutter build macos --release --no-codesign
-
-      - name: Stage release artifact
-        run: |
-          mkdir -p dist
-          APP_PATH="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n 1)"
-          if [ -z "$APP_PATH" ]; then
-            echo "No .app bundle found in release output."
-            exit 1
-          fi
-          tar -C "$(dirname "$APP_PATH")" -czf \
-            "dist/mesh-utility-${{ github.event.release.tag_name }}-macos.tar.gz" \
-            "$(basename "$APP_PATH")"
-
-      - name: Upload staged artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-release
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -171,7 +171,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -182,8 +184,15 @@ jobs:
       - name: Install Flutter dependencies
         run: flutter pub get
 
+      - name: Derive version from tag
+        run: |
+          TAG="${RELEASE_TAG#v}"
+          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
+          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
+          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
+
       - name: Build Web (release)
-        run: flutter build web --release --dart-define=WORKER_URL=$WORKER_URL
+        run: flutter build web --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL
 
   publish-release-assets:
     name: Publish Release Assets
@@ -192,11 +201,10 @@ jobs:
       - build-android
       - build-linux
       - build-windows
-      - build-macos
       - build-web
     steps:
       - name: Download staged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -209,10 +217,5 @@ jobs:
       - name: Attach artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: |
-            dist/mesh-utility-${{ github.event.release.tag_name }}-android.apk
-            dist/mesh-utility-${{ github.event.release.tag_name }}-linux-x64.tar.gz
-            dist/mesh-utility-${{ github.event.release.tag_name }}-windows-x64.zip
-            dist/mesh-utility-${{ github.event.release.tag_name }}-macos.tar.gz
-            dist/SHA256SUMS.txt
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: dist/*

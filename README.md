@@ -8,6 +8,13 @@ Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and
 
 - https://mesh-utility.org/
 
+## Release Notes
+
+- [Alpha 8](./docs/releases/alpha-8.md) (latest)
+- [Alpha 7](./docs/releases/alpha-7.md)
+- [Alpha 6](./docs/releases/alpha-6.md)
+- [Alpha 5](./docs/releases/alpha-5.md)
+
 ## Supported Targets
 
 - [x] Android
@@ -50,16 +57,7 @@ flutter run
 
 ## Linux Installer (Latest Release)
 
-```bash
-ASSET_URL="$(curl -fsSL https://api.github.com/repos/mesh-utility/mesh-utility/releases/latest \
-  | jq -r '.assets[] | select(.name=="mesh-utility-install-linux.sh") | .browser_download_url')"
-
-curl -fL -o install_mesh_utility.sh "$ASSET_URL"
-chmod +x install_mesh_utility.sh
-./install_mesh_utility.sh
-```
-
-If `jq` is not installed, use this fallback:
+Downloads the latest release, verifies the checksum, and installs to `~/.local`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mesh-utility/mesh-utility/main/tool/install_linux.sh -o install_mesh_utility.sh
@@ -67,6 +65,36 @@ chmod +x install_mesh_utility.sh
 ./install_mesh_utility.sh
 ```
 
+To install a specific release:
+
+```bash
+./install_mesh_utility.sh Alpha-8
+```
+
+
+## Coverage Hex Grid
+
+Coverage zones are keyed to a flat-top hexagonal grid anchored at the geographic origin **(lat 0, lng 0)**. Every GPS fix is snapped to the nearest hex cell centre before being stored or displayed.
+
+Key constants (see [lib/src/services/grid.dart](lib/src/services/grid.dart)):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `hexSize` | `0.0007°` | Hex radius in degrees (~78 m at equator) |
+| `rowSpacing` | `hexSize × 1.5` | Latitude distance between row centres |
+| `colSpacing` | `hexSize × √3 × 1.2` | Longitude distance between column centres |
+
+The grid origin is `(snapLat=0, snapLng=0)`. Every cell is identified by a **hex key** — a `"lat:lng"` string of the snapped centre coordinates (6 decimal places). Example: `"37.771550:-122.419000"`.
+
+To find which hex cell a position belongs to:
+
+```dart
+import 'package:mesh_utility/src/services/grid.dart';
+
+final key = hexKey(latitude, longitude); // e.g. "37.771550:-122.419000"
+```
+
+Dead zones (no node heard) and live zones both use this key as their unique ID, so querying `coverageZones.firstWhere((z) => z.id == hexKey(lat, lng))` tells you everything known about that cell.
 
 ## Contributing Docs
 

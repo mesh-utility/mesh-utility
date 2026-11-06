@@ -2,14 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/mesh_node.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/config/app_config.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
+import 'package:mesh_utility/src/services/scan_data_utils.dart';
+import 'package:mesh_utility/src/services/location_service.dart';
+import 'package:mesh_utility/src/services/sync_service.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
@@ -20,7 +22,6 @@ import 'package:mesh_utility/src/services/worker_api.dart';
 import 'package:mesh_utility/transport/ble_transport.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 import 'package:mesh_utility/transport/transport.dart';
-import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:universal_ble/universal_ble.dart';
 
 class AppState extends ChangeNotifier {
@@ -54,12 +55,11 @@ class AppState extends ChangeNotifier {
         return onBlePinRequest!(deviceId);
       };
       ble.onScanResult = (deviceId, deviceName) {
-        final name = deviceName.isEmpty ? '(Unnamed)' : deviceName;
-        _bleDeviceNamesById[deviceId] = name;
-        final label = '$name [$deviceId]';
-        final knownLabel = bleScanDevices.contains(label);
-        if (!knownLabel) {
-          bleScanDevices = [...bleScanDevices, label];
+        final changed = _upsertBleScanDevice(
+          deviceId: deviceId,
+          deviceName: deviceName,
+        );
+        if (changed) {
           notifyListeners();
         }
         if (kIsWeb &&
@@ -90,8 +90,7 @@ class AppState extends ChangeNotifier {
             bleScanStatus = 'idle';
             _bleAutoScanTimer?.cancel();
             _bleCountdownTimer?.cancel();
-            bleNextScanCountdown = null;
-            _autoScanRemainingSeconds = 0;
+            _resetAutoScanSchedule();
             _smartScanPausedForRecentCoverage = false;
             _smartScanPausedZoneId = null;
             _connectedRadioMeshIdPrefix = null;
@@ -99,6 +98,7 @@ class AppState extends ChangeNotifier {
             _connectedRadioDisplayName = null;
             _lastSelfInfoHex = null;
             _lastSelfInfoText = null;
+            _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
             _resumeAutoScanAfterReconnect = wasScanning;
             _debugLog.warn(
@@ -126,6 +126,14 @@ class AppState extends ChangeNotifier {
     if (kIsWeb) {
       bleStatus = 'BLE ready (web)';
     }
+    _syncService.addListener(notifyListeners);
+    _locationService.addListener(notifyListeners);
+    _locationService.onPositionChanged = (lat, lng) {
+      final zoneId = hexKey(lat, lng);
+      if (zoneId == _lastObservedZoneId) return;
+      _lastObservedZoneId = zoneId;
+      unawaited(_onObserverZoneMaybeChanged());
+    };
   }
 
   final SettingsStore _settingsStore;
@@ -136,12 +144,13 @@ class AppState extends ChangeNotifier {
   late final TransportProtocol _bleProtocol = TransportProtocol(_transport);
   final ProtocolCommandRegistry _protocol = const ProtocolCommandRegistry();
 
+  final SyncService _syncService = SyncService();
   AppSettings settings = AppSettings.defaults;
   bool loading = true;
-  bool syncing = false;
-  String? error;
-  DateTime? lastSyncAt;
-  int lastSyncScanCount = 0;
+  bool get syncing => _syncService.syncing;
+  String? get error => _syncService.error;
+  DateTime? get lastSyncAt => _syncService.lastSyncAt;
+  int get lastSyncScanCount => _syncService.lastSyncScanCount;
 
   bool bleConnecting = false;
   bool bleConnected = false;
@@ -157,20 +166,20 @@ class AppState extends ChangeNotifier {
   String? bleLastDiscoverError;
   List<String> bleScanDevices = const [];
   String? bleSelectedDeviceId;
-  double? deviceLatitude;
-  double? deviceLongitude;
-  double? deviceAltitude;
-  DateTime? deviceLocationAt;
-  String deviceLocationStatus = 'Location unavailable';
+  final LocationService _locationService = LocationService();
+  double? get deviceLatitude => _locationService.deviceLatitude;
+  double? get deviceLongitude => _locationService.deviceLongitude;
+  double? get deviceAltitude => _locationService.deviceAltitude;
+  DateTime? get deviceLocationAt => _locationService.deviceLocationAt;
+  String get deviceLocationStatus => _locationService.deviceLocationStatus;
   Timer? _bleCountdownTimer;
   Timer? _bleAutoScanTimer;
-  Timer? _periodicSyncTimer;
-  StreamSubscription<Position>? _locationSubscription;
-  Timer? _locationPollTimer;
+  StreamSubscription<Uint8List>? _passiveAdvertSubscription;
   StreamSubscription<AvailabilityState>? _bleAvailabilitySubscription;
-  DateTime? _lastIpFallbackAt;
+  String? _lastObservedZoneId;
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _bleDeviceNamesById = {};
+  static const String _knownBleDeviceFallbackName = 'Known Device';
   bool _manualBleDisconnectRequested = false;
   String? _webAutoConnectAttemptedDeviceId;
 
@@ -181,6 +190,7 @@ class AppState extends ChangeNotifier {
     bleScanning = false;
     bleDeviceScanInProgress = false;
     bleScanStatus = 'idle';
+    _stopPassiveAdvertListener();
     bleStatus = _bleUnavailableStatusMessage();
     _debugLog.info(context, bleStatus);
     notifyListeners();
@@ -234,6 +244,165 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
+  bool _isPlaceholderBleDeviceName(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized.isEmpty ||
+        normalized == '(unnamed)' ||
+        normalized == _knownBleDeviceFallbackName.toLowerCase() ||
+        normalized == 'device';
+  }
+
+  String? _extractDeviceIdFromBleLabel(String label) {
+    final trimmed = label.trim();
+    if (trimmed.isEmpty) return null;
+    final open = trimmed.lastIndexOf('[');
+    final close = trimmed.lastIndexOf(']');
+    if (open < 0 || close != trimmed.length - 1 || open + 1 >= close) {
+      return null;
+    }
+    final id = trimmed.substring(open + 1, close).trim();
+    return id.isEmpty ? null : id;
+  }
+
+  String _extractDeviceNameFromBleLabel(String label) {
+    final trimmed = label.trim();
+    final open = trimmed.lastIndexOf('[');
+    if (open <= 0) return trimmed;
+    return trimmed.substring(0, open).trim();
+  }
+
+  int _bleScanIndexByDeviceId(String deviceId) {
+    if (deviceId.isEmpty) return -1;
+    for (var i = 0; i < bleScanDevices.length; i++) {
+      final entryId = _extractDeviceIdFromBleLabel(bleScanDevices[i]);
+      if (entryId == deviceId) return i;
+    }
+    return -1;
+  }
+
+  String _bleDeviceLabel({required String deviceId, String? fallbackName}) {
+    final mappedName = cleanRadioDisplayName(
+      _bleDeviceNamesById[deviceId] ?? '',
+    );
+    final fallback = cleanRadioDisplayName(fallbackName ?? '');
+    if (mappedName.isNotEmpty) return '$mappedName [$deviceId]';
+    if (fallback.isNotEmpty) return '$fallback [$deviceId]';
+    // Avoid generic "Known Device" labels; keep rows uniquely identifiable
+    // until the platform provides a friendly BLE name.
+    return '[$deviceId]';
+  }
+
+  bool _upsertBleScanDevice({required String deviceId, String? deviceName}) {
+    final id = deviceId.trim();
+    if (id.isEmpty) return false;
+    final cleanedName = cleanRadioDisplayName(deviceName ?? '');
+    if (cleanedName.isNotEmpty && !_isPlaceholderBleDeviceName(cleanedName)) {
+      _bleDeviceNamesById[id] = cleanedName;
+      if (settings.knownBleDeviceIds.contains(id) ||
+          bleSelectedDeviceId == id) {
+        unawaited(
+          _persistKnownBleDeviceName(deviceId: id, deviceName: cleanedName),
+        );
+      }
+    }
+    final label = _bleDeviceLabel(deviceId: id, fallbackName: cleanedName);
+    final index = _bleScanIndexByDeviceId(id);
+    if (index < 0) {
+      bleScanDevices = [...bleScanDevices, label];
+      return true;
+    }
+    if (bleScanDevices[index] == label) return false;
+    final updated = [...bleScanDevices];
+    updated[index] = label;
+    bleScanDevices = updated;
+    return true;
+  }
+
+  void _seedKnownBleScanDevices() {
+    var added = 0;
+    for (final knownId in settings.knownBleDeviceIds) {
+      if (_upsertBleScanDevice(deviceId: knownId)) {
+        added += 1;
+      }
+    }
+    if (added > 0) {
+      _debugLog.info('ble_scan', 'Seeded $added known BLE device(s)');
+    }
+    unawaited(_resolveSeededBleDeviceNames());
+  }
+
+  Future<void> _resolveSeededBleDeviceNames() async {
+    if (_transport is! BleTransport || kIsWeb) return;
+    final ble = _transport;
+    var updated = 0;
+    for (final deviceId in settings.knownBleDeviceIds) {
+      final existing = cleanRadioDisplayName(
+        _bleDeviceNamesById[deviceId] ?? '',
+      );
+      if (existing.isNotEmpty && !_isPlaceholderBleDeviceName(existing)) {
+        continue;
+      }
+      try {
+        final resolved = cleanRadioDisplayName(
+          await ble.resolveDeviceDisplayName(deviceId) ?? '',
+        );
+        if (resolved.isEmpty || _isPlaceholderBleDeviceName(resolved)) {
+          continue;
+        }
+        if (!_upsertBleScanDevice(deviceId: deviceId, deviceName: resolved)) {
+          continue;
+        }
+        updated += 1;
+      } catch (_) {
+        continue;
+      }
+    }
+    if (updated > 0) {
+      _debugLog.info(
+        'ble_scan',
+        'Resolved $updated known BLE device name(s) from system metadata',
+      );
+      notifyListeners();
+    }
+  }
+
+  void _restoreKnownBleDeviceNames() {
+    if (settings.knownBleDeviceNames.isEmpty) return;
+    for (final entry in settings.knownBleDeviceNames.entries) {
+      final id = entry.key.trim();
+      final name = cleanRadioDisplayName(entry.value);
+      if (id.isEmpty || _isPlaceholderBleDeviceName(name)) continue;
+      _bleDeviceNamesById[id] = name;
+    }
+  }
+
+  Future<void> _persistKnownBleDeviceName({
+    required String deviceId,
+    required String deviceName,
+  }) async {
+    final id = deviceId.trim();
+    final name = cleanRadioDisplayName(deviceName);
+    if (id.isEmpty || _isPlaceholderBleDeviceName(name)) return;
+    final current = settings.knownBleDeviceNames[id];
+    if (current == name) return;
+    final nextNames = Map<String, String>.from(settings.knownBleDeviceNames);
+    nextNames[id] = name;
+    settings = settings.copyWith(knownBleDeviceNames: nextNames);
+    await _settingsStore.save(settings);
+  }
+
+  void _primePreferredBleDeviceForScan() {
+    if (_transport is! BleTransport) return;
+    final selected = (bleSelectedDeviceId ?? '').trim();
+    if (selected.isNotEmpty) {
+      (_transport).preferredDeviceId = selected;
+      return;
+    }
+    if (settings.knownBleDeviceIds.isNotEmpty) {
+      (_transport).preferredDeviceId = settings.knownBleDeviceIds.first;
+    }
+  }
+
   Future<void> _handleBleUnavailableState({
     required AvailabilityState state,
     required String context,
@@ -251,8 +420,8 @@ class AppState extends ChangeNotifier {
     bleScanStatus = 'idle';
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
-    bleNextScanCountdown = null;
-    _autoScanRemainingSeconds = 0;
+    _stopPassiveAdvertListener();
+    _resetAutoScanSchedule();
     _smartScanPausedForRecentCoverage = false;
     _smartScanPausedZoneId = null;
     bleStatus = _bleUnavailableStateMessage(state);
@@ -283,14 +452,226 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  String _resolveDiscoverName({
+    required String nodeId,
+    required String incomingName,
+  }) {
+    final trimmed = incomingName.trim();
+    if (!isPlaceholderNodeName(trimmed, nodeId)) {
+      return trimmed;
+    }
+    final fallback = _bestContactNameForId(_radioContactsByPrefix, nodeId);
+    return (fallback ?? '').trim();
+  }
+
+  String _discoverResponderLabel({
+    required String nodeId,
+    required String name,
+  }) {
+    final resolved = cleanRadioDisplayName(name);
+    if (resolved.isNotEmpty && !isPlaceholderNodeName(resolved, nodeId)) {
+      return resolved;
+    }
+    final normalizedNodeId = normalizeHexId(nodeId);
+    if (normalizedNodeId.isEmpty) return 'Unknown';
+    return normalizedNodeId.length <= 8
+        ? normalizedNodeId
+        : normalizedNodeId.substring(0, 8);
+  }
+
+  String _discoverStatusLine({
+    required String nodeId,
+    required String name,
+    num? rssi,
+    num? snr,
+  }) {
+    final label = _discoverResponderLabel(nodeId: nodeId, name: name);
+    if (rssi == null && snr == null) return '$label · Discovered';
+    final parts = <String>[label];
+    if (rssi != null) {
+      parts.add('RSSI ${rssi.toStringAsFixed(0)}');
+    }
+    if (snr != null) {
+      parts.add('SNR ${snr.toStringAsFixed(1)}');
+    }
+    return parts.join(' · ');
+  }
+
+  String _frameCodeName(int code) {
+    switch (code) {
+      case respCodeOk:
+        return 'respCodeOk';
+      case respCodeErr:
+        return 'respCodeErr';
+      case respCodeContactsStart:
+        return 'respCodeContactsStart';
+      case respCodeContact:
+        return 'respCodeContact';
+      case respCodeEndOfContacts:
+        return 'respCodeEndOfContacts';
+      case respCodeSelfInfo:
+        return 'respCodeSelfInfo';
+      case respCodeSent:
+        return 'respCodeSent';
+      case respCodeContactMsgRecv:
+        return 'respCodeContactMsgRecv';
+      case respCodeChannelMsgRecv:
+        return 'respCodeChannelMsgRecv';
+      case respCodeCurrTime:
+        return 'respCodeCurrTime';
+      case respCodeNoMoreMessages:
+        return 'respCodeNoMoreMessages';
+      case respCodeExportContact:
+        return 'respCodeExportContact';
+      case respCodeBattAndStorage:
+        return 'respCodeBattAndStorage';
+      case respCodeDeviceInfo:
+        return 'respCodeDeviceInfo';
+      case respCodeContactMsgRecvV3:
+        return 'respCodeContactMsgRecvV3';
+      case respCodeChannelMsgRecvV3:
+        return 'respCodeChannelMsgRecvV3';
+      case respCodeChannelInfo:
+        return 'respCodeChannelInfo';
+      case respCodeSignStart:
+        return 'respCodeSignStart';
+      case respCodeSignature:
+        return 'respCodeSignature';
+      case respCodeCustomVars:
+        return 'respCodeCustomVars';
+      case respCodeAutoAddConfig:
+        return 'respCodeAutoAddConfig';
+      case pushCodeAdvert:
+        return 'pushCodeAdvert';
+      case pushCodePathUpdated:
+        return 'pushCodePathUpdated';
+      case pushCodeSendConfirmed:
+        return 'pushCodeSendConfirmed';
+      case pushCodeMsgWaiting:
+        return 'pushCodeMsgWaiting';
+      case pushCodeLoginSuccess:
+        return 'pushCodeLoginSuccess';
+      case pushCodeLoginFail:
+        return 'pushCodeLoginFail';
+      case pushCodeStatusResponse:
+        return 'pushCodeStatusResponse';
+      case pushCodeLogRxData:
+        return 'pushCodeLogRxData';
+      case pushCodeTraceData:
+        return 'pushCodeTraceData';
+      case pushCodeNewAdvert:
+        return 'pushCodeNewAdvert';
+      case pushCodeTelemetryResponse:
+        return 'pushCodeTelemetryResponse';
+      case pushCodeBinaryResponse:
+        return 'pushCodeBinaryResponse';
+      case pushCodeControlData:
+        return 'pushCodeControlData';
+      case pushCodeAdvertCompact:
+        return 'pushCodeAdvertCompact';
+      default:
+        return code < 0 ? 'empty_frame' : 'unknown';
+    }
+  }
+
+  bool _cacheAdvertName({
+    required String nodeId,
+    required String name,
+    required String source,
+  }) {
+    final safeId = safePublicRadioId(nodeId);
+    if (safeId == null || safeId.isEmpty) return false;
+    final trimmed = name.trim();
+    if (isPlaceholderNodeName(trimmed, safeId)) return false;
+    final existing = _bestContactNameForId(_radioContactsByPrefix, safeId);
+    if ((existing ?? '').trim() == trimmed) return false;
+    _radioContactsByPrefix[safeId] = trimmed;
+    _debugLog.debug(
+      'ble_advert',
+      'Cached advert name id=$safeId name=$trimmed source=$source',
+    );
+    return true;
+  }
+
+  void _startPassiveAdvertListener() {
+    if (_passiveAdvertSubscription != null) return;
+    _passiveAdvertSubscription = _transport.inbound.listen((frame) {
+      final advert = parseNodeDiscoverAdvertResponse(frame);
+      if (advert == null) return;
+      _cacheAdvertName(
+        nodeId: advert.publicKeyPrefix,
+        name: advert.name,
+        source: 'passive',
+      );
+      if (bleDiscoveries.isEmpty) return;
+      final resolvedName = _resolveDiscoverName(
+        nodeId: advert.publicKeyPrefix,
+        incomingName: advert.name,
+      );
+      if (resolvedName.isEmpty) return;
+
+      var changed = false;
+      final nextDiscoveries = bleDiscoveries
+          .map((response) {
+            if (!idsLikelySameDevice(
+              response.publicKeyPrefix,
+              advert.publicKeyPrefix,
+            )) {
+              return response;
+            }
+            if (!isPlaceholderNodeName(
+              response.name,
+              response.publicKeyPrefix,
+            )) {
+              return response;
+            }
+            if (response.name.trim() == resolvedName) {
+              return response;
+            }
+            changed = true;
+            return NodeDiscoverResponse(
+              snr: response.snr,
+              rssi: response.rssi,
+              snrIn: response.snrIn,
+              nodeType: response.nodeType,
+              tagHex: response.tagHex,
+              publicKeyPrefix: response.publicKeyPrefix,
+              name: resolvedName,
+            );
+          })
+          .toList(growable: false);
+      if (!changed) return;
+      bleDiscoveries = nextDiscoveries;
+      _debugLog.debug(
+        'ble_advert',
+        'Applied passive advert names to active discoveries',
+      );
+      notifyListeners();
+    });
+    _debugLog.debug('ble_advert', 'Passive advert listener started');
+  }
+
+  void _stopPassiveAdvertListener() {
+    final sub = _passiveAdvertSubscription;
+    if (sub == null) return;
+    _passiveAdvertSubscription = null;
+    unawaited(sub.cancel());
+    _debugLog.debug('ble_advert', 'Passive advert listener stopped');
+  }
+
   bool _autoReconnectInProgress = false;
   bool _resumeAutoScanAfterReconnect = false;
-  bool _discoverLocationRefreshInFlight = false;
-  DateTime? _lastDiscoverLocationRefreshAt;
   bool _smartScanReevaluatePending = false;
   bool _smartScanPausedForRecentCoverage = false;
   String? _smartScanPausedZoneId;
+  DateTime? _lastSmartScanPauseLogAt;
+  DateTime? _lastSmartScanSkipAt;
   int _autoScanRemainingSeconds = 0;
+  bool _autoScanDueWhileBusy = false;
+  bool _autoScanTickInProgress = false;
+  int _autoScanCycleSeq = 0;
+  DateTime? _lastAutoScanTriggerAt;
+  DateTime? _nextAutoScanDueAt;
   String? _connectedRadioMeshIdPrefix;
   String? _connectedRadioPublicKeyHex;
   String? _connectedRadioDisplayName;
@@ -298,13 +679,10 @@ class AppState extends ChangeNotifier {
   String? _lastSelfInfoText;
   bool _deleteInProgress = false;
   bool _hostDetaching = false;
-  final Stopwatch _monotonicClock = Stopwatch()..start();
-  DateTime? _internetTimeAnchorUtc;
-  Duration? _internetTimeAnchorElapsed;
-  DateTime? _lastPeriodicSyncInternetUtc;
-  bool _internetTimeRefreshInFlight = false;
   Future<String?> Function(String deviceId)? onBlePinRequest;
-  Future<bool> Function({required bool background})? onLocationPermissionPrompt;
+  set onLocationPermissionPrompt(
+    Future<bool> Function({required bool background})? fn,
+  ) => _locationService.onLocationPermissionPrompt = fn;
   Future<void> Function({
     required AvailabilityState state,
     required String context,
@@ -321,7 +699,7 @@ class AppState extends ChangeNotifier {
     if (!bleConnected) return null;
     final name =
         connectedRadioDisplayName ??
-        _cleanRadioDisplayName(_selectedBleDeviceName());
+        cleanRadioDisplayName(_selectedBleDeviceName());
     if (name.isEmpty) return null;
     return name;
   }
@@ -329,6 +707,13 @@ class AppState extends ChangeNotifier {
   String? get connectedRadioDisplayName => _connectedRadioDisplayName;
   String? get connectedRadioMeshId8 => _connectedRadioMeshId8();
   String? get connectedRadioPublicKeyHex => _connectedRadioPublicKeyHex;
+
+  Map<String, String> get currentRadioContacts {
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null) return const {};
+    return settings.contactsByRadioId[radioId] ?? const {};
+  }
+
   bool get deleteInProgress => _deleteInProgress;
   Map<String, String> get knownContactNames =>
       Map<String, String>.unmodifiable(_radioContactsByPrefix);
@@ -337,6 +722,14 @@ class AppState extends ChangeNotifier {
       rawScans.where((scan) => scan.uploadEligible).length;
   List<RawScan> get uploadCandidates =>
       rawScans.where((scan) => scan.uploadEligible).toList(growable: false);
+  int get periodicSyncIntervalMinutes => _resolvedPeriodicSyncIntervalMinutes();
+  bool get periodicSyncEnabled => !settings.forceOffline;
+  bool get periodicSyncWaitingForInternetTimeAnchor =>
+      periodicSyncEnabled && _syncService.waitingForInternetTimeAnchor;
+  DateTime? get nextPeriodicSyncDueAtUtc => periodicSyncEnabled
+      ? _syncService.nextPeriodicSyncDueAtUtc(periodicSyncIntervalMinutes)
+      : null;
+
   (double, double)? get currentObserverPosition {
     if (deviceLatitude != null && deviceLongitude != null) {
       return (deviceLatitude!, deviceLongitude!);
@@ -356,11 +749,20 @@ class AppState extends ChangeNotifier {
       settings = settings.copyWith(forceOffline: true);
       await _settingsStore.save(settings);
     }
-    AppI18n.instance.setLanguage(settings.language);
-    rawScans = _normalizeRawScans(await _localStore.loadRawScans());
+    // TODO: Re-enable user-selectable language setting.
+    // Language setting is temporarily disabled; keep app language fixed to English.
+    AppI18n.instance.setLanguage('en');
+    _restoreKnownBleDeviceNames();
+    _radioContactsByPrefix.clear();
+    for (final contacts in settings.contactsByRadioId.values) {
+      _radioContactsByPrefix.addAll(contacts);
+    }
+    rawScans = normalizeRawScans(await _localStore.loadRawScans());
     rawScans = _applyDeadzoneSuccessPrecedence(rawScans, source: 'local_cache');
     await _localStore.saveRawScans(rawScans);
     _rebuildDerivedData();
+    _seedKnownBleScanDevices();
+    _primePreferredBleDeviceForScan();
 
     loading = false;
     notifyListeners();
@@ -373,7 +775,7 @@ class AppState extends ChangeNotifier {
       unawaited(connectBle());
     }
 
-    unawaited(_startDeviceLocationTracking());
+    unawaited(_locationService.startTracking());
     await syncFromWorker();
     _configurePeriodicSyncTimer();
   }
@@ -383,7 +785,9 @@ class AppState extends ChangeNotifier {
     settings = !next.privacyAccepted && !next.forceOffline
         ? next.copyWith(forceOffline: true)
         : next;
-    AppI18n.instance.setLanguage(settings.language);
+    // TODO: Re-enable user-selectable language setting.
+    // Language setting is temporarily disabled; keep app language fixed to English.
+    AppI18n.instance.setLanguage('en');
     await _settingsStore.save(settings);
     notifyListeners();
 
@@ -392,11 +796,13 @@ class AppState extends ChangeNotifier {
         previous.smartScanDays != settings.smartScanDays;
     if (smartChanged && bleScanning && bleConnected) {
       if (bleBusy) {
-        _smartScanReevaluatePending = true;
-        _debugLog.info(
-          'smart_scan',
-          'Settings changed during active scan; queued smart-scan re-evaluation',
-        );
+        if (!_smartScanReevaluatePending) {
+          _smartScanReevaluatePending = true;
+          _debugLog.info(
+            'smart_scan',
+            'Settings changed during active scan; queued smart-scan re-evaluation',
+          );
+        }
       } else {
         _debugLog.info(
           'smart_scan',
@@ -414,6 +820,35 @@ class AppState extends ChangeNotifier {
         bleConnected) {
       unawaited(_applyCompanionLocationPolicyFromSettings());
     }
+
+    // --- Auto-connect toggle changed ---
+    final autoConnectChanged =
+        previous.bleAutoConnect != settings.bleAutoConnect;
+    if (autoConnectChanged) {
+      if (settings.bleAutoConnect) {
+        // Toggled ON: connect if we have a known device and are not already
+        // connected or connecting.
+        if (!bleConnected &&
+            !bleConnecting &&
+            settings.knownBleDeviceIds.isNotEmpty) {
+          bleSelectedDeviceId ??= settings.knownBleDeviceIds.first;
+          if (_transport is BleTransport) {
+            _transport.preferredDeviceId = bleSelectedDeviceId;
+          }
+          _debugLog.info(
+            'ble',
+            'Auto-connect enabled; connecting to $bleSelectedDeviceId',
+          );
+          unawaited(connectBle());
+        }
+      } else {
+        // Toggled OFF: disconnect gracefully so the radio is released.
+        if (bleConnected || bleConnecting) {
+          _debugLog.info('ble', 'Auto-connect disabled; disconnecting');
+          unawaited(disconnectBle());
+        }
+      }
+    }
   }
 
   Future<void> setAutoCenter(bool value) async {
@@ -423,9 +858,7 @@ class AppState extends ChangeNotifier {
   Future<void> syncFromWorker() async {
     if (syncing) return;
     _debugLog.info('sync', 'Starting worker sync');
-    syncing = true;
-    error = null;
-    notifyListeners();
+    _syncService.beginSync();
 
     try {
       if (settings.forceOffline) {
@@ -433,14 +866,14 @@ class AppState extends ChangeNotifier {
           'sync',
           'Skipped worker sync because offline mode is enabled',
         );
-        syncing = false;
-        notifyListeners();
+        _syncService.completeSync(0);
         return;
       }
 
       final api = WorkerApi(
         AppConfig.deployedWorkerUrl,
         fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+        staticDataBaseUrl: AppConfig.staticDataUrl,
       );
       final connectedRadioId = _connectedRadioMeshId8();
       final localOnlyBeforeSync = rawScans
@@ -454,42 +887,62 @@ class AppState extends ChangeNotifier {
             historyDays: settings.historyDays,
             deadzoneDays: settings.deadzoneDays,
             connectedRadioId: connectedRadioId,
+            centerLat: deviceLatitude,
+            centerLng: deviceLongitude,
+            radiusMiles: settings.syncRadiusMiles,
           )
           .then(
             (value) => value
                 .map((scan) => scan.copyWith(downloadedFromWorker: true))
                 .toList(growable: false),
           );
-      final normalizedWorkerScans = _normalizeRawScans(
-        _sanitizeDeadzoneRadioIds(workerScans, connectedRadioId),
+      final normalizedWorkerScans = normalizeRawScans(
+        sanitizeDeadzoneRadioIds(workerScans, connectedRadioId),
       );
-      final workerScansWithPrecedence = _applyDeadzoneSuccessPrecedence(
+      final workerPrecedence = _applyDeadzoneSuccessPrecedenceDetailed(
         normalizedWorkerScans,
         source: 'worker',
       );
-      lastSyncScanCount = workerScans.length;
-      lastSyncAt = DateTime.now();
+      final workerScansWithPrecedence = workerPrecedence.scans;
+      if (workerPrecedence.suppressedHexes.isNotEmpty) {
+        await _cleanupWorkerDeadzoneRows(api, workerPrecedence.suppressedHexes);
+      }
 
       if (workerScansWithPrecedence.isNotEmpty) {
         _debugLog.info(
           'sync',
           'Fetched ${workerScansWithPrecedence.length} raw scans from worker',
         );
-        final merged = <RawScan>[...workerScansWithPrecedence];
-        final seen = <String>{};
-        for (final scan in merged) {
-          seen.add(_scanIdentity(scan));
+        final mergedScans = <String, RawScan>{};
+        for (final scan in workerScansWithPrecedence) {
+          mergedScans[scanIdentity(scan)] = scan;
         }
+
         var preservedLocal = 0;
         for (final local in localOnlyBeforeSync) {
-          final key = _scanIdentity(local);
-          if (seen.add(key)) {
-            merged.add(local);
+          final key = scanIdentity(local);
+          final existing = mergedScans[key];
+          if (existing == null) {
+            mergedScans[key] = local;
             preservedLocal += 1;
+          } else {
+            final workerName = (existing.senderName ?? '').trim();
+            final localName = (local.senderName ?? '').trim();
+            final workerIsPlaceholder =
+                workerName.isEmpty ||
+                isPlaceholderNodeName(workerName, existing.nodeId ?? '');
+            final localIsPlaceholder =
+                localName.isEmpty ||
+                isPlaceholderNodeName(localName, local.nodeId ?? '');
+
+            if (workerIsPlaceholder && !localIsPlaceholder) {
+              mergedScans[key] = existing.copyWith(senderName: localName);
+            }
           }
         }
+        final merged = mergedScans.values.toList();
         rawScans = _applyDeadzoneSuccessPrecedence(
-          _normalizeRawScans(merged),
+          normalizeRawScans(merged),
           source: 'merged',
         );
         _debugLog.info(
@@ -506,13 +959,16 @@ class AppState extends ChangeNotifier {
           historyDays: settings.historyDays,
           deadzoneDays: settings.deadzoneDays,
           connectedRadioId: connectedRadioId,
+          centerLat: deviceLatitude,
+          centerLng: deviceLongitude,
+          radiusMiles: settings.syncRadiusMiles,
         );
         _debugLog.info(
           'sync',
           'Fetched ${workerZones.length} coverage zones from worker',
         );
         coverageZones = _applyZoneDeadzonePrecedence(
-          _sanitizeDeadzoneZoneRadioIds(workerZones, connectedRadioId),
+          sanitizeDeadzoneZoneRadioIds(workerZones, connectedRadioId),
           source: 'worker',
         );
       } catch (_) {
@@ -524,18 +980,18 @@ class AppState extends ChangeNotifier {
       }
 
       _rebuildDerivedData(skipZones: true);
-      _captureInternetTimeAnchor(api.lastServerDateUtc);
-      final internetNow = _estimatedInternetNowUtc();
+      _syncService.captureInternetTimeAnchor(api.lastServerDateUtc);
+      final internetNow = _syncService.estimatedInternetNowUtc();
       if (internetNow != null) {
-        _lastPeriodicSyncInternetUtc = internetNow;
+        _syncService.recordPeriodicSyncTime(internetNow);
       }
+      _syncService.completeSync(workerScans.length);
     } catch (e) {
-      error = e.toString();
       _debugLog.error('sync', 'Worker sync failed: $e');
       _rebuildDerivedData();
+      _syncService.failSync(e.toString());
     } finally {
       _debugLog.info('sync', 'Worker sync finished');
-      syncing = false;
       notifyListeners();
     }
   }
@@ -544,7 +1000,7 @@ class AppState extends ChangeNotifier {
     if (!await _ensureBleAvailable(context: 'ble')) {
       return;
     }
-    if (!await _ensureAndroidLocationReadyForBle()) {
+    if (!await _locationService.ensureAndroidReadyForBle()) {
       return;
     }
     if (bleConnecting || bleConnected) return;
@@ -568,35 +1024,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await _bleProtocol.run(_protocol.connect());
-      bleConnected = _transport.isConnected;
-      final selectedName = _cleanRadioDisplayName(_selectedBleDeviceName());
-      if (selectedName.isNotEmpty) {
-        _connectedRadioDisplayName = selectedName;
-      }
-      _debugLog.info(
-        'ble',
-        'Connected via ${selectedName.isNotEmpty ? selectedName : _transport.name}',
-      );
-      final selectedId = (bleSelectedDeviceId ?? '').trim();
-      bleStatus = selectedName.isNotEmpty
-          ? (selectedId.isNotEmpty
-                ? 'Connected ($selectedName [$selectedId])'
-                : 'Connected ($selectedName)')
-          : (selectedId.isNotEmpty ? 'Connected [$selectedId]' : 'Connected');
-      if (bleSelectedDeviceId != null &&
-          bleSelectedDeviceId!.isNotEmpty &&
-          !settings.knownBleDeviceIds.contains(bleSelectedDeviceId)) {
-        final updatedKnown = [
-          ...settings.knownBleDeviceIds,
-          bleSelectedDeviceId!,
-        ];
-        await updateSettings(
-          settings.copyWith(knownBleDeviceIds: updatedKnown),
-        );
-      }
-      await _requestSelfInfo();
-      await _syncContactsAndBackfillNames();
-      await _applyCompanionLocationPolicyFromSettings();
+      await _completeBleConnectSuccess();
     } catch (e) {
       bleConnected = false;
       final lowered = e.toString().toLowerCase();
@@ -611,9 +1039,22 @@ class AppState extends ChangeNotifier {
           context: 'ble_connect',
         );
       }
+      var recovered = false;
+      if (!handledAsBluetoothOff &&
+          _isDeviceNotFoundConnectError(e) &&
+          !kIsWeb) {
+        recovered = await _recoverConnectAfterDeviceNotFound();
+      }
+      if (recovered) {
+        return;
+      }
       _debugLog.error('ble', 'Connect failed: $e');
       if (!handledAsBluetoothOff) {
-        bleStatus = 'BLE connect failed: $e';
+        if (_isDeviceNotFoundConnectError(e)) {
+          bleStatus = 'Device not found – is your radio powered on?';
+        } else {
+          bleStatus = 'BLE connect failed';
+        }
       }
     } finally {
       bleConnecting = false;
@@ -621,77 +1062,135 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> _ensureAndroidLocationReadyForBle() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
-      return true;
+  Future<void> _completeBleConnectSuccess() async {
+    bleConnected = _transport.isConnected;
+    if (!bleConnected) {
+      throw StateError('BLE connect returned without an active transport link');
+    }
+    _startPassiveAdvertListener();
+    final selectedName = cleanRadioDisplayName(_selectedBleDeviceName());
+    if (selectedName.isNotEmpty) {
+      _connectedRadioDisplayName = selectedName;
+    }
+    _debugLog.info(
+      'ble',
+      'Connected via ${selectedName.isNotEmpty ? selectedName : _transport.name}',
+    );
+    final selectedId = (bleSelectedDeviceId ?? '').trim();
+    bleStatus = selectedName.isNotEmpty
+        ? (selectedId.isNotEmpty
+              ? 'Connected ($selectedName [$selectedId])'
+              : 'Connected ($selectedName)')
+        : (selectedId.isNotEmpty ? 'Connected [$selectedId]' : 'Connected');
+    final nextKnownIds =
+        settings.knownBleDeviceIds.contains(selectedId) || selectedId.isEmpty
+        ? settings.knownBleDeviceIds
+        : [...settings.knownBleDeviceIds, selectedId];
+    final nextKnownNames = Map<String, String>.from(
+      settings.knownBleDeviceNames,
+    );
+    if (selectedId.isNotEmpty &&
+        selectedName.isNotEmpty &&
+        !_isPlaceholderBleDeviceName(selectedName)) {
+      nextKnownNames[selectedId] = selectedName;
+    }
+    final knownIdsChanged = !listEquals(
+      nextKnownIds,
+      settings.knownBleDeviceIds,
+    );
+    final knownNamesChanged = !mapEquals(
+      nextKnownNames,
+      settings.knownBleDeviceNames,
+    );
+    if (knownIdsChanged || knownNamesChanged) {
+      await updateSettings(
+        settings.copyWith(
+          knownBleDeviceIds: nextKnownIds,
+          knownBleDeviceNames: nextKnownNames,
+        ),
+      );
+    }
+    await _requestSelfInfo();
+    await _syncContactsAndBackfillNames();
+    await _applyCompanionLocationPolicyFromSettings();
+  }
+
+  bool _isDeviceNotFoundConnectError(Object error) {
+    final lowered = error.toString().toLowerCase();
+    return lowered.contains('device_not_found') ||
+        lowered.contains('unknown deviceid') ||
+        lowered.contains('universalbleerrorcode.devicenotfound') ||
+        lowered.contains('devicenotfound');
+  }
+
+  Future<bool> _recoverConnectAfterDeviceNotFound() async {
+    if (_transport is! BleTransport) return false;
+    final ble = _transport;
+    final targetDeviceId = (bleSelectedDeviceId ?? '').trim();
+    if (targetDeviceId.isEmpty) return false;
+    _debugLog.warn(
+      'ble',
+      'Connect failed with device-not-found for $targetDeviceId; '
+          'running refresh scan and retrying once',
+    );
+    bleStatus = 'Refreshing BLE device list...';
+    notifyListeners();
+    try {
+      await ble.resetLinkState(deviceId: targetDeviceId);
+    } catch (resetError) {
+      _debugLog.warn('ble', 'Recovery link-state reset failed: $resetError');
     }
     try {
-      final enabled = await Geolocator.isLocationServiceEnabled();
-      if (!enabled) {
-        deviceLocationStatus = 'Location services disabled';
-        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-        notifyListeners();
-        await Geolocator.openLocationSettings();
-        return false;
-      }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-          final proceed =
-              await (onLocationPermissionPrompt?.call(background: false) ??
-                  Future<bool>.value(true));
-          if (!proceed) {
-            deviceLocationStatus = 'Location permission not requested';
-            _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-            notifyListeners();
-            return false;
-          }
-        }
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied) {
-        deviceLocationStatus = 'Location permission denied';
-        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-        notifyListeners();
-        return false;
-      }
-      if (permission == LocationPermission.deniedForever) {
-        deviceLocationStatus = 'Location permission denied forever';
-        _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-        notifyListeners();
-        await Geolocator.openAppSettings();
-        return false;
-      }
-
-      // Android background permission requires a separate permission flow.
-      final alwaysStatus = await ph.Permission.locationAlways.status;
-      if (!alwaysStatus.isGranted) {
-        final proceed =
-            await (onLocationPermissionPrompt?.call(background: true) ??
-                Future<bool>.value(true));
-        if (!proceed) {
-          deviceLocationStatus = 'Background location not requested';
-          _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-          notifyListeners();
-          return false;
-        }
-        final requestStatus = await ph.Permission.locationAlways.request();
-        if (!requestStatus.isGranted) {
-          deviceLocationStatus = 'Background location not granted';
-          _debugLog.warn('location', '$deviceLocationStatus (BLE precheck)');
-          notifyListeners();
-          if (requestStatus.isPermanentlyDenied) {
-            await Geolocator.openAppSettings();
-          }
-          return false;
-        }
-      }
-      return true;
-    } catch (e) {
-      _debugLog.warn('location', 'BLE location precheck failed: $e');
-      return true;
+      await ble.scanDevices(timeout: const Duration(seconds: 3));
+    } catch (scanError) {
+      _debugLog.warn('ble', 'Recovery scan failed: $scanError');
     }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    try {
+      await _bleProtocol.run(_protocol.connect());
+      await _completeBleConnectSuccess();
+      _debugLog.info(
+        'ble',
+        'Recovery connect succeeded after scan refresh target=$targetDeviceId',
+      );
+      return true;
+    } catch (scanRetryError) {
+      _debugLog.warn(
+        'ble',
+        'Recovery connect after scan failed: $scanRetryError; '
+            'trying direct BlueZ connect',
+      );
+    }
+
+    // Last resort: ask bluetoothctl to connect directly (works for
+    // previously-paired devices that BlueZ still has cached even though
+    // they weren't discovered in the scan).
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      bleStatus = 'Trying direct BlueZ connect...';
+      notifyListeners();
+      final directOk = await ble.tryDirectBlueZConnect(targetDeviceId);
+      if (directOk) {
+        // Device is now connected at the BlueZ level; re-discover & bind.
+        try {
+          await _bleProtocol.run(_protocol.connect());
+          await _completeBleConnectSuccess();
+          _debugLog.info(
+            'ble',
+            'Recovery connect succeeded via direct BlueZ connect '
+                'target=$targetDeviceId',
+          );
+          return true;
+        } catch (directRetryError) {
+          _debugLog.error(
+            'ble',
+            'Recovery connect failed after direct BlueZ connect '
+                'target=$targetDeviceId: $directRetryError',
+          );
+        }
+      }
+    }
+    bleConnected = false;
+    return false;
   }
 
   Future<void> disconnectBle() async {
@@ -704,10 +1203,10 @@ class AppState extends ChangeNotifier {
     bleScanStatus = 'idle';
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
-    bleNextScanCountdown = null;
-    _autoScanRemainingSeconds = 0;
+    _resetAutoScanSchedule();
     _smartScanPausedForRecentCoverage = false;
     _smartScanPausedZoneId = null;
+    _stopPassiveAdvertListener();
     try {
       await _transport.disconnect();
     } catch (_) {}
@@ -765,9 +1264,17 @@ class AppState extends ChangeNotifier {
     _webAutoConnectAttemptedDeviceId = null;
     if (!kIsWeb) {
       bleScanDevices = const [];
+      _seedKnownBleScanDevices();
+      _primePreferredBleDeviceForScan();
     }
     notifyListeners();
     try {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        final selected = (bleSelectedDeviceId ?? '').trim();
+        if (selected.isNotEmpty) {
+          await ble.resetLinkState(deviceId: selected);
+        }
+      }
       await ble.scanDevices();
       if (bleConnected || bleConnecting) {
         return;
@@ -787,7 +1294,7 @@ class AppState extends ChangeNotifier {
       }
       bleStatus = bleScanDevices.isEmpty
           ? 'No BLE devices found'
-          : 'Select a BLE device from results, then Connect';
+          : 'Tap a BLE device from results to connect';
     } catch (e) {
       final message = e.toString();
       if (kIsWeb &&
@@ -825,6 +1332,7 @@ class AppState extends ChangeNotifier {
     }
     final discoverWait =
         waitForResponses ?? Duration(seconds: settings.discoverWaitSeconds);
+    final discoverStartedAt = DateTime.now();
     _debugLog.info('ble_discover', 'node_discover requested');
     if (!bleConnected) {
       await connectBle();
@@ -833,31 +1341,70 @@ class AppState extends ChangeNotifier {
 
     if (bleBusy) return;
     bleBusy = true;
+    final autoLoopOwnsCountdown = bleScanning;
     bleScanStatus = 'advertising';
-    bleStatus = 'Discovering...';
+    bleStatus = 'Discovery Sent';
     bleDiscoveries = const [];
     bleLastDiscoverError = null;
-    bleNextScanCountdown = discoverWait.inSeconds;
+    _bleCountdownTimer?.cancel();
+    if (!autoLoopOwnsCountdown) {
+      bleNextScanCountdown = discoverWait.inSeconds;
+    }
     notifyListeners();
 
     final byPrefix = <String, NodeDiscoverResponse>{};
+    final directDiscoverPrefixes = <String>{};
     late final StreamSubscription<NodeDiscoverResponse> discoverSub;
     late final StreamSubscription<NodeDiscoverAdvertResponse> advertSub;
     late final StreamSubscription<Uint8List> rawSub;
-    var unknownFrameLogs = 0;
+    DateTime? firstResponseAt;
+    DateTime? lastResponseAt;
+    const autoScanQuietWindow = Duration(milliseconds: 1800);
 
     discoverSub = _bleProtocol.nodeDiscoverResponses().listen((response) {
-      byPrefix[response.publicKeyPrefix] = response;
-      unawaited(_refreshLocationForDiscoverResponse());
+      final resolvedName = _resolveDiscoverName(
+        nodeId: response.publicKeyPrefix,
+        incomingName: response.name,
+      );
+      directDiscoverPrefixes.add(response.publicKeyPrefix);
+      byPrefix[response.publicKeyPrefix] = resolvedName.isEmpty
+          ? response
+          : NodeDiscoverResponse(
+              snr: response.snr,
+              rssi: response.rssi,
+              snrIn: response.snrIn,
+              nodeType: response.nodeType,
+              tagHex: response.tagHex,
+              publicKeyPrefix: response.publicKeyPrefix,
+              name: resolvedName,
+            );
+      final responseAt = DateTime.now();
+      firstResponseAt ??= responseAt;
+      lastResponseAt = responseAt;
+      unawaited(_locationService.refreshForDiscoverResponse());
       bleDiscoveries = byPrefix.values.toList();
       _debugLog.debug(
         'ble_discover',
         'Response ${response.publicKeyPrefix} RSSI=${response.rssi} SNR=${response.snr}',
       );
-      bleStatus = 'node_discover: ${bleDiscoveries.length} response(s)';
+      bleStatus = _discoverStatusLine(
+        nodeId: response.publicKeyPrefix,
+        name: resolvedName,
+        rssi: response.rssi,
+        snr: response.snr,
+      );
       notifyListeners();
     });
     advertSub = _bleProtocol.nodeDiscoverAdvertResponses().listen((advert) {
+      _cacheAdvertName(
+        nodeId: advert.publicKeyPrefix,
+        name: advert.name,
+        source: 'discover',
+      );
+      final resolvedAdvertName = _resolveDiscoverName(
+        nodeId: advert.publicKeyPrefix,
+        incomingName: advert.name,
+      );
       final existing = byPrefix[advert.publicKeyPrefix];
       if (existing == null) {
         byPrefix[advert.publicKeyPrefix] = NodeDiscoverResponse(
@@ -867,10 +1414,10 @@ class AppState extends ChangeNotifier {
           nodeType: advert.nodeType,
           tagHex: '',
           publicKeyPrefix: advert.publicKeyPrefix,
-          name: advert.name,
+          name: resolvedAdvertName,
         );
-      } else if (existing.name.trim().isEmpty &&
-          advert.name.trim().isNotEmpty) {
+      } else if (resolvedAdvertName.isNotEmpty &&
+          existing.name.trim() != resolvedAdvertName) {
         byPrefix[advert.publicKeyPrefix] = NodeDiscoverResponse(
           snr: existing.snr,
           rssi: existing.rssi,
@@ -878,15 +1425,21 @@ class AppState extends ChangeNotifier {
           nodeType: existing.nodeType,
           tagHex: existing.tagHex,
           publicKeyPrefix: existing.publicKeyPrefix,
-          name: advert.name,
+          name: resolvedAdvertName,
         );
       }
-      unawaited(_refreshLocationForDiscoverResponse());
+      final responseAt = DateTime.now();
+      firstResponseAt ??= responseAt;
+      lastResponseAt = responseAt;
+      unawaited(_locationService.refreshForDiscoverResponse());
       bleDiscoveries = byPrefix.values.toList();
-      bleStatus = 'node_discover: ${bleDiscoveries.length} response(s)';
       _debugLog.debug(
         'ble_discover',
-        'Advert ${advert.publicKeyPrefix} name=${advert.name}',
+        'Advert ${advert.publicKeyPrefix} name=$resolvedAdvertName',
+      );
+      bleStatus = _discoverStatusLine(
+        nodeId: advert.publicKeyPrefix,
+        name: resolvedAdvertName,
       );
       notifyListeners();
     });
@@ -896,16 +1449,26 @@ class AppState extends ChangeNotifier {
       if (parsedControl != null || parsedAdvert != null) {
         return;
       }
-      if (unknownFrameLogs >= 20) return;
-      unknownFrameLogs += 1;
       final code = frame.isNotEmpty ? frame.first : -1;
+      final codeName = _frameCodeName(code);
+      if (code == respCodeOk) {
+        _debugLog.debug(
+          'ble_discover_diag',
+          'node_discover ack received ($codeName)',
+        );
+        return;
+      }
       final headBytes = frame.length > 12 ? frame.sublist(0, 12) : frame;
       final headHex = headBytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
       _debugLog.debug(
         'ble_discover_diag',
-        'non-discover frame code=0x${code.toRadixString(16)} len=${frame.length} head=$headHex',
+        code == pushCodeLogRxData
+            ? 'RX frame code=0x${code.toRadixString(16)} '
+                  '($codeName) len=${frame.length} head=$headHex'
+            : 'RX activity frame code=0x${code.toRadixString(16)} '
+                  '($codeName) len=${frame.length} head=$headHex',
       );
     });
 
@@ -913,27 +1476,61 @@ class AppState extends ChangeNotifier {
     try {
       await _bleProtocol.run(_protocol.nodeDiscover());
       bleScanStatus = 'waiting';
-      _bleCountdownTimer?.cancel();
-      _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        final current = bleNextScanCountdown ?? 0;
-        if (current <= 1) {
-          bleNextScanCountdown = 0;
-          timer.cancel();
-        } else {
-          bleNextScanCountdown = current - 1;
-        }
-        notifyListeners();
-      });
+      if (!autoLoopOwnsCountdown) {
+        _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (
+          timer,
+        ) {
+          final current = bleNextScanCountdown ?? 0;
+          if (current <= 1) {
+            bleNextScanCountdown = 0;
+            timer.cancel();
+          } else {
+            bleNextScanCountdown = current - 1;
+          }
+          notifyListeners();
+        });
+      }
       final start = DateTime.now();
       final deadline = start.add(discoverWait);
+      final initialWaitDeadline = start.add(const Duration(seconds: 10));
       var resentDiscover = false;
-      while (DateTime.now().isBefore(deadline)) {
+      while (true) {
+        final now = DateTime.now();
+        if (!now.isBefore(deadline)) break;
+
+        if (byPrefix.isEmpty && !now.isBefore(initialWaitDeadline)) {
+          _debugLog.info(
+            'ble_discover',
+            'No responses after initial 10s wait; finishing early',
+          );
+          break;
+        }
+
         if (!bleConnected || !_transport.isConnected) {
           throw StateError('BLE disconnected during node_discover');
         }
+        if (autoLoopOwnsCountdown &&
+            byPrefix.isNotEmpty &&
+            lastResponseAt != null) {
+          final quietFor = now.difference(lastResponseAt!);
+          if (quietFor >= autoScanQuietWindow) {
+            final firstResponseMs = firstResponseAt == null
+                ? 'n/a'
+                : firstResponseAt!.difference(start).inMilliseconds;
+            _debugLog.info(
+              'ble_discover',
+              'Auto loop quiet window reached; finishing early '
+                  'responses=${byPrefix.length} '
+                  'firstResponseMs=$firstResponseMs '
+                  'quietMs=${quietFor.inMilliseconds} '
+                  'elapsedMs=${now.difference(start).inMilliseconds}',
+            );
+            break;
+          }
+        }
         if (!resentDiscover &&
             byPrefix.isEmpty &&
-            DateTime.now().difference(start).inMilliseconds >=
+            now.difference(start).inMilliseconds >=
                 discoverWait.inMilliseconds ~/ 2) {
           resentDiscover = true;
           _debugLog.info(
@@ -942,13 +1539,18 @@ class AppState extends ChangeNotifier {
           );
           await _bleProtocol.run(_protocol.nodeDiscover());
         }
-        final remainingMs = deadline.difference(DateTime.now()).inMilliseconds;
+        final remainingMs = deadline.difference(now).inMilliseconds;
         final sliceMs = remainingMs > 250 ? 250 : remainingMs;
         if (sliceMs <= 0) break;
         await Future<void>.delayed(Duration(milliseconds: sliceMs));
       }
       _bleCountdownTimer?.cancel();
-      final appended = _appendDiscoverScansWithOsLocation(byPrefix.values);
+      final persistedDiscoverResponses = byPrefix.values.where(
+        (response) => directDiscoverPrefixes.contains(response.publicKeyPrefix),
+      );
+      final appended = _appendDiscoverScansWithOsLocation(
+        persistedDiscoverResponses,
+      );
       if (appended > 0) {
         await _localStore.saveRawScans(rawScans);
         _rebuildDerivedData();
@@ -956,23 +1558,46 @@ class AppState extends ChangeNotifier {
           'ble_discover',
           'Stored $appended local scan(s) with OS location',
         );
+      } else if (byPrefix.isEmpty) {
+        final recorded = _recordDeadZoneScan();
+        if (recorded) {
+          await _localStore.saveRawScans(rawScans);
+          _rebuildDerivedData();
+        }
       }
       bleScanStatus = 'done';
-      bleStatus =
-          'node_discover completed (${bleDiscoveries.length} response(s))';
+      if (bleDiscoveries.isEmpty) {
+        bleStatus = 'Discovery Complete (No Responses)';
+      } else {
+        final last = bleDiscoveries.last;
+        bleStatus = _discoverStatusLine(
+          nodeId: last.publicKeyPrefix,
+          name: last.name,
+          rssi: last.rssi,
+          snr: last.snr,
+        );
+      }
       _debugLog.info(
         'ble_discover',
-        'Completed with ${bleDiscoveries.length} response(s)',
+        'Completed with ${bleDiscoveries.length} response(s) '
+            'elapsedMs=${DateTime.now().difference(discoverStartedAt).inMilliseconds}',
       );
       bleLastDiscoverCount = bleDiscoveries.length;
       bleLastDiscoverAt = DateTime.now();
-      bleNextScanCountdown = null;
+      if (!autoLoopOwnsCountdown) {
+        bleNextScanCountdown = null;
+      }
     } catch (e) {
       bleScanStatus = 'error';
       bleStatus = 'node_discover failed: $e';
-      _debugLog.error('ble_discover', 'Failed: $e');
+      _debugLog.error(
+        'ble_discover',
+        'Failed: $e elapsedMs=${DateTime.now().difference(discoverStartedAt).inMilliseconds}',
+      );
       bleLastDiscoverError = e.toString();
-      bleNextScanCountdown = null;
+      if (!autoLoopOwnsCountdown) {
+        bleNextScanCountdown = null;
+      }
       if (!_transport.isConnected) {
         bleConnected = false;
         if (retryOnDisconnect &&
@@ -989,6 +1614,7 @@ class AppState extends ChangeNotifier {
       await discoverSub.cancel();
       await advertSub.cancel();
       await rawSub.cancel();
+      _bleCountdownTimer?.cancel();
       bleBusy = false;
       if (_smartScanReevaluatePending && bleScanning && bleConnected) {
         _smartScanReevaluatePending = false;
@@ -1041,7 +1667,7 @@ class AppState extends ChangeNotifier {
     }
     final appended = <RawScan>[];
     for (final response in responses) {
-      final nodeId8 = _safePublicRadioId(response.publicKeyPrefix);
+      final nodeId8 = safePublicRadioId(response.publicKeyPrefix);
       if (nodeId8 == null || nodeId8.isEmpty) {
         _debugLog.warn(
           'scan_store',
@@ -1049,6 +1675,26 @@ class AppState extends ChangeNotifier {
         );
         continue;
       }
+      final responseName = response.name.trim();
+      final responseNameHex = normalizeHexId(responseName);
+      final nodeIdHex = normalizeHexId(nodeId8);
+      final responseLooksLikeId =
+          responseNameHex.isNotEmpty && responseNameHex == nodeIdHex;
+      final responseLooksUnknown =
+          responseName.toLowerCase() == 'unknown' ||
+          responseName.startsWith('Unknown (');
+      final contactName = _bestContactNameForId(
+        _radioContactsByPrefix,
+        nodeId8,
+      )?.trim();
+      final senderName =
+          responseName.isNotEmpty &&
+              !responseLooksLikeId &&
+              !responseLooksUnknown
+          ? responseName
+          : (contactName != null && contactName.isNotEmpty
+                ? contactName
+                : nodeId8);
       final scan = RawScan(
         observerId: connectedMeshId8,
         nodeId: nodeId8,
@@ -1060,14 +1706,14 @@ class AppState extends ChangeNotifier {
         altitude: deviceAltitude,
         timestamp: now,
         receivedAt: now,
-        senderName: response.name.trim().isEmpty ? nodeId8 : response.name,
+        senderName: senderName,
         receiverName: (_connectedRadioDisplayName ?? '').trim().isEmpty
             ? connectedMeshId8
             : _connectedRadioDisplayName!.trim(),
         radioId: connectedMeshId8,
         downloadedFromWorker: false,
       );
-      appended.add(_normalizeRawScanIds(scan));
+      appended.add(normalizeRawScanIds(scan));
       _debugLog.info(
         'scan_store',
         'radio=${scan.radioId ?? 'unknown'} node=${scan.nodeId} '
@@ -1077,8 +1723,85 @@ class AppState extends ChangeNotifier {
     }
     if (appended.isNotEmpty) {
       rawScans = [...appended, ...rawScans];
+      final beforeDelete = rawScans.length;
+      rawScans = _applyDeadzoneSuccessPrecedence(
+        rawScans,
+        source: 'local_discover',
+      );
+      final deleted = beforeDelete - rawScans.length;
+      if (deleted > 0) {
+        _debugLog.info(
+          'scan_store',
+          'Deleted $deleted local deadzone row(s) after successful discover scan(s)',
+        );
+      }
     }
     return appended.length;
+  }
+
+  /// Records a synthetic dead-zone [RawScan] at the current GPS location
+  /// when a node_discover completes with zero responses.
+  bool _recordDeadZoneScan() {
+    final lat = deviceLatitude;
+    final lng = deviceLongitude;
+    if (lat == null || lng == null) {
+      _debugLog.warn(
+        'dead_zone',
+        'No OS location fix; skipping dead-zone scan',
+      );
+      return false;
+    }
+    if (_hexHasSuccessfulCoverage(lat, lng)) {
+      _debugLog.info(
+        'dead_zone',
+        'Skipping dead-zone scan; hex already has successful coverage',
+      );
+      return false;
+    }
+    final connectedMeshId8 = _connectedRadioMeshId8();
+    if (connectedMeshId8 == null || connectedMeshId8.isEmpty) {
+      _debugLog.warn(
+        'dead_zone',
+        'No connected radio ID; skipping dead-zone scan',
+      );
+      return false;
+    }
+    final now = DateTime.now();
+    final scan = normalizeRawScanIds(
+      RawScan(
+        observerId: connectedMeshId8,
+        nodeId: null,
+        latitude: lat,
+        longitude: lng,
+        rssi: null,
+        snr: null,
+        altitude: deviceAltitude,
+        timestamp: now,
+        receivedAt: now,
+        senderName: null,
+        receiverName: (_connectedRadioDisplayName ?? '').trim().isEmpty
+            ? connectedMeshId8
+            : _connectedRadioDisplayName!.trim(),
+        radioId: connectedMeshId8,
+        downloadedFromWorker: false,
+      ),
+    );
+    rawScans = [scan, ...rawScans];
+    _debugLog.info(
+      'dead_zone',
+      'Recorded dead-zone scan radio=$connectedMeshId8 '
+          'lat=${lat.toStringAsFixed(6)} lng=${lng.toStringAsFixed(6)}',
+    );
+    return true;
+  }
+
+  bool _hexHasSuccessfulCoverage(double lat, double lng) {
+    final zoneId = hexKey(lat, lng);
+    for (final scan in rawScans) {
+      if (hexKey(scan.latitude, scan.longitude) != zoneId) continue;
+      if (!isDeadLikeScan(scan)) return true;
+    }
+    return false;
   }
 
   Future<void> _syncContactsAndBackfillNames() async {
@@ -1095,7 +1818,6 @@ class AppState extends ChangeNotifier {
       final name = contact.name.trim();
       if (prefix.isEmpty || name.isEmpty) return;
       contacts[prefix] = name;
-      _debugLog.debug('contacts', 'contact $prefix => $name');
     });
     endSub = _bleProtocol.endOfContactsResponses().listen((_) {
       if (!done.isCompleted) done.complete();
@@ -1117,9 +1839,18 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    _radioContactsByPrefix
-      ..clear()
-      ..addAll(contacts);
+    final radioId = _connectedRadioMeshId8();
+    if (radioId != null && radioId.isNotEmpty) {
+      final nextContactsByRadio = Map<String, Map<String, String>>.from(
+        settings.contactsByRadioId,
+      );
+      nextContactsByRadio[radioId] = contacts;
+      await updateSettings(
+        settings.copyWith(contactsByRadioId: nextContactsByRadio),
+      );
+    }
+
+    _radioContactsByPrefix.addAll(contacts);
     _updateConnectedRadioMeshIdFromContacts(contacts);
     _pruneSelfContact(_radioContactsByPrefix);
 
@@ -1174,14 +1905,14 @@ class AppState extends ChangeNotifier {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join()
           .toUpperCase();
-      _lastSelfInfoText = _extractPrintableAscii(frame);
+      _lastSelfInfoText = extractPrintableAscii(frame);
       if (prefix.isNotEmpty) {
         _connectedRadioMeshIdPrefix = prefix;
       }
       if (publicKeyHex.length == 64) {
         _connectedRadioPublicKeyHex = publicKeyHex;
       }
-      final selfInfoName = _extractSelfInfoDisplayName(_lastSelfInfoText ?? '');
+      final selfInfoName = extractSelfInfoDisplayName(_lastSelfInfoText ?? '');
       if (selfInfoName != null && selfInfoName.isNotEmpty) {
         _connectedRadioDisplayName = selfInfoName;
       }
@@ -1205,7 +1936,7 @@ class AppState extends ChangeNotifier {
             .timeout(const Duration(seconds: 2));
         await _bleProtocol.run(_protocol.deviceQuery());
         final frame = await diagFrameFuture;
-        final text = _extractPrintableAscii(frame);
+        final text = extractPrintableAscii(frame);
         _lastSelfInfoHex = frame
             .map((b) => b.toRadixString(16).padLeft(2, '0'))
             .join()
@@ -1225,22 +1956,13 @@ class AppState extends ChangeNotifier {
   int _backfillScanNamesFromContacts(Map<String, String> contacts) {
     var updates = 0;
     final next = <RawScan>[];
-    final scanIdSample = <String>[];
-    final contactPrefixSample = contacts.keys
-        .map(_normalizeHexId)
-        .where((v) => v.isNotEmpty)
-        .take(12)
-        .toList(growable: false);
-    final connectedMesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
+    final connectedMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     var candidateScans = 0;
-    var localCandidateScans = 0;
-    var workerCandidateScans = 0;
     var globalNodeContactMatches = 0;
     var globalSenderBackfillable = 0;
     var globalReceiverBackfillable = 0;
-    final globalBackfillExamples = <String>[];
     final contactIdCache = contacts.keys
-        .map(_normalizeHexId)
+        .map(normalizeHexId)
         .where((v) => v.isNotEmpty)
         .toList(growable: false);
     for (final scan in rawScans) {
@@ -1260,34 +1982,16 @@ class AppState extends ChangeNotifier {
       if (receiverNeedsBackfill) {
         globalReceiverBackfillable += 1;
       }
-      if (globalBackfillExamples.length < 8 && senderNeedsBackfill) {
-        globalBackfillExamples.add(
-          '${_normalizeHexId(senderId)}=>$senderMatchGlobal',
-        );
-      }
-      final nodeNorm = _normalizeHexId(scan.nodeId ?? '');
+      final nodeNorm = normalizeHexId(scan.nodeId ?? '');
       if (nodeNorm.isNotEmpty) {
         for (final contactId in contactIdCache) {
-          if (_idsLikelySameDevice(nodeNorm, contactId)) {
+          if (idsLikelySameDevice(nodeNorm, contactId)) {
             globalNodeContactMatches += 1;
             break;
           }
         }
       }
       candidateScans += 1;
-      if (scan.downloadedFromWorker) {
-        workerCandidateScans += 1;
-      } else {
-        localCandidateScans += 1;
-      }
-      if (scanIdSample.length < 24) {
-        final s = _normalizeHexId(senderId);
-        if (s.isNotEmpty) scanIdSample.add(s);
-      }
-      if (scanIdSample.length < 24) {
-        final o = _normalizeHexId(observerId);
-        if (o.isNotEmpty) scanIdSample.add(o);
-      }
       final senderMatch = _bestContactNameForId(contacts, senderId);
       final observerMatch = _bestContactNameForId(contacts, observerId);
 
@@ -1303,7 +2007,7 @@ class AppState extends ChangeNotifier {
 
       updates += (senderChanged ? 1 : 0) + (receiverChanged ? 1 : 0);
       next.add(
-        _normalizeRawScanIds(
+        normalizeRawScanIds(
           RawScan(
             observerId: scan.observerId,
             nodeId: scan.nodeId,
@@ -1325,25 +2029,12 @@ class AppState extends ChangeNotifier {
     }
     if (updates > 0) {
       rawScans = next;
-    } else {
-      _debugLog.debug(
-        'contacts',
-        'No ID matches for connected radio mesh=$connectedMesh. '
-            'candidates=$candidateScans '
-            'localCandidates=$localCandidateScans '
-            'workerCandidates=$workerCandidateScans '
-            'globalNodeContactMatches=$globalNodeContactMatches '
-            'globalSenderBackfillable=$globalSenderBackfillable '
-            'globalReceiverBackfillable=$globalReceiverBackfillable '
-            'globalExamples=${globalBackfillExamples.join(";")} '
-            'scanIds(sample)=${scanIdSample.toSet().take(12).join(",")} '
-            'contactPrefixes(sample)=${contactPrefixSample.join(",")}',
-      );
     }
     _debugLog.debug(
       'contacts',
       'Connected-radio backfill scope: mesh=$connectedMesh '
           'candidates=$candidateScans totalScans=${rawScans.length} '
+          'nodeMatches=$globalNodeContactMatches '
           'globalSenderBackfillable=$globalSenderBackfillable '
           'globalReceiverBackfillable=$globalReceiverBackfillable',
     );
@@ -1354,7 +2045,7 @@ class AppState extends ChangeNotifier {
     final frameHex = _lastSelfInfoHex ?? '';
     if (contacts.isEmpty) return;
 
-    final existingMesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
+    final existingMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     if (existingMesh.isNotEmpty) {
       final existingName = _bestContactNameForId(
         contacts,
@@ -1376,12 +2067,12 @@ class AppState extends ChangeNotifier {
     }
 
     final selectedName = _selectedBleDeviceName().toLowerCase();
-    final selectedTokens = _nameTokens(selectedName);
+    final selectedTokens = nameTokens(selectedName);
 
     String? inferred;
     var bestScore = -1;
     for (final entry in contacts.entries) {
-      final key = _normalizeHexId(entry.key);
+      final key = normalizeHexId(entry.key);
       final name = entry.value.trim();
       if (key.isEmpty || name.isEmpty) continue;
       final lowerName = name.toLowerCase();
@@ -1423,7 +2114,7 @@ class AppState extends ChangeNotifier {
 
   String? _bestContactNameForId(Map<String, String> contacts, String id) {
     if (id.isEmpty) return null;
-    final upper = _normalizeHexId(id);
+    final upper = normalizeHexId(id);
     if (upper.isEmpty) return null;
     if (contacts.containsKey(upper)) return contacts[upper];
 
@@ -1431,7 +2122,7 @@ class AppState extends ChangeNotifier {
     // prefix window so 8-char IDs can match longer contact prefixes.
     final shortWindow = upper.length >= 8 ? upper.substring(0, 8) : upper;
     for (final entry in contacts.entries) {
-      final prefix = _normalizeHexId(entry.key);
+      final prefix = normalizeHexId(entry.key);
       if (prefix.isEmpty) continue;
       if (upper.startsWith(prefix) || prefix.startsWith(upper)) {
         return entry.value;
@@ -1444,46 +2135,27 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  String _normalizeHexId(String value) {
-    final cleaned = value.toUpperCase().replaceAll(RegExp(r'[^0-9A-F]'), '');
-    return cleaned;
-  }
-
-  String _scanIdentity(RawScan scan) {
-    final sender = _normalizeHexId(scan.nodeId ?? '');
-    final observer = _normalizeHexId(scan.observerId ?? '');
-    final ts = scan.effectiveTimestamp.toUtc().millisecondsSinceEpoch;
-    return '$sender|$observer|'
-        '${scan.latitude.toStringAsFixed(6)}|${scan.longitude.toStringAsFixed(6)}|'
-        '${scan.rssi?.toStringAsFixed(1) ?? 'na'}|$ts';
-  }
-
-  bool _isDeadLikeScan(RawScan scan) {
-    final nodeId = (scan.nodeId ?? '').trim();
-    return nodeId.isEmpty || scan.rssi == null;
-  }
-
-  bool _isSuccessfulScan(RawScan scan) => !_isDeadLikeScan(scan);
-
-  List<RawScan> _applyDeadzoneSuccessPrecedence(
+  _DeadzonePrecedenceResult _applyDeadzoneSuccessPrecedenceDetailed(
     List<RawScan> scans, {
     required String source,
   }) {
-    if (scans.isEmpty) return scans;
+    if (scans.isEmpty) return const _DeadzonePrecedenceResult([]);
     final hexesWithSuccess = <String>{};
     for (final scan in scans) {
-      if (_isSuccessfulScan(scan)) {
+      if (isSuccessfulScan(scan)) {
         hexesWithSuccess.add(hexKey(scan.latitude, scan.longitude));
       }
     }
-    if (hexesWithSuccess.isEmpty) return scans;
+    if (hexesWithSuccess.isEmpty) return _DeadzonePrecedenceResult(scans);
 
     var suppressed = 0;
+    final suppressedHexes = <String>{};
     final filtered = <RawScan>[];
     for (final scan in scans) {
       final hex = hexKey(scan.latitude, scan.longitude);
-      if (_isDeadLikeScan(scan) && hexesWithSuccess.contains(hex)) {
+      if (isDeadLikeScan(scan) && hexesWithSuccess.contains(hex)) {
         suppressed += 1;
+        suppressedHexes.add(hex);
         continue;
       }
       filtered.add(scan);
@@ -1494,7 +2166,34 @@ class AppState extends ChangeNotifier {
         'Suppressed $suppressed deadzone row(s) in hexes with successful scans ($source)',
       );
     }
-    return filtered;
+    return _DeadzonePrecedenceResult(
+      filtered,
+      suppressedHexes: suppressedHexes,
+    );
+  }
+
+  List<RawScan> _applyDeadzoneSuccessPrecedence(
+    List<RawScan> scans, {
+    required String source,
+  }) {
+    return _applyDeadzoneSuccessPrecedenceDetailed(scans, source: source).scans;
+  }
+
+  Future<void> _cleanupWorkerDeadzoneRows(
+    WorkerApi api,
+    Set<String> hexes,
+  ) async {
+    try {
+      final deleted = await api.cleanupDeadzoneRows(hexes);
+      if (deleted > 0) {
+        _debugLog.info(
+          'sync',
+          'Deleted $deleted worker deadzone row(s) for ${hexes.length} successful hex(es)',
+        );
+      }
+    } catch (e) {
+      _debugLog.warn('sync', 'Worker deadzone cleanup failed: $e');
+    }
   }
 
   List<CoverageZone> _applyZoneDeadzonePrecedence(
@@ -1526,24 +2225,27 @@ class AppState extends ChangeNotifier {
   }
 
   String? _connectedRadioMeshId8() {
-    final mesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
+    final mesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     if (mesh.isEmpty) return null;
     return mesh.length >= 8 ? mesh.substring(0, 8) : mesh;
   }
 
-  String? _safePublicRadioId(String value) {
-    final raw = value.trim();
-    if (raw.isEmpty) return null;
-    if (raw.contains(':') || raw.contains('-')) return null;
-    final normalized = _normalizeHexId(raw);
-    if (normalized.isEmpty) return null;
-    // Avoid leaking BLE MAC-like IDs.
-    if (normalized.length == 12) return null;
-    return normalized.length >= 8 ? normalized.substring(0, 8) : normalized;
-  }
-
   Future<void> _uploadPendingScans(WorkerApi api, List<RawScan> pending) async {
-    final payload = pending
+    final backfilledPending = pending.map((scan) {
+      final senderName = _bestContactNameForId(
+        _radioContactsByPrefix,
+        scan.nodeId ?? '',
+      );
+      final currentName = (scan.senderName ?? '').trim();
+      if (senderName != null &&
+          senderName.isNotEmpty &&
+          (currentName.isEmpty ||
+              isPlaceholderNodeName(currentName, scan.nodeId ?? ''))) {
+        return scan.copyWith(senderName: senderName);
+      }
+      return scan;
+    }).toList();
+    final payload = backfilledPending
         .map(_toWorkerScanPayload)
         .whereType<Map<String, dynamic>>()
         .toList(growable: false);
@@ -1562,10 +2264,10 @@ class AppState extends ChangeNotifier {
     try {
       final uploaded = await api.uploadScans(payload);
       if (uploaded <= 0) return;
-      final uploadedKeys = pending.map(_scanIdentity).toSet();
+      final uploadedKeys = pending.map(scanIdentity).toSet();
       rawScans = rawScans
           .map((scan) {
-            if (!uploadedKeys.contains(_scanIdentity(scan))) return scan;
+            if (!uploadedKeys.contains(scanIdentity(scan))) return scan;
             return scan.copyWith(downloadedFromWorker: true);
           })
           .toList(growable: false);
@@ -1580,7 +2282,7 @@ class AppState extends ChangeNotifier {
   }
 
   Map<String, dynamic>? _toWorkerScanPayload(RawScan scan) {
-    final nodeId = _safePublicRadioId(scan.nodeId ?? '') ?? '';
+    final nodeId = safePublicRadioId(scan.nodeId ?? '') ?? '';
     final nodeName = (scan.senderName ?? '').trim();
     final observerName = _resolveObserverNameForUpload(scan);
     final nodeEntry = <String, dynamic>{
@@ -1593,7 +2295,7 @@ class AppState extends ChangeNotifier {
     };
 
     final radioId = (scan.radioId ?? '').trim();
-    final uploadRadioId = _safePublicRadioId(radioId);
+    final uploadRadioId = safePublicRadioId(radioId);
     if (uploadRadioId == null) {
       return null;
     }
@@ -1614,8 +2316,8 @@ class AppState extends ChangeNotifier {
     final receiver = (scan.receiverName ?? '').trim();
     if (receiver.isNotEmpty) return receiver;
 
-    final radioId = _normalizeHexId(scan.radioId ?? '');
-    final observerId = _normalizeHexId(scan.observerId ?? '');
+    final radioId = normalizeHexId(scan.radioId ?? '');
+    final observerId = normalizeHexId(scan.observerId ?? '');
     final fromRadio = _bestContactNameForId(_radioContactsByPrefix, radioId);
     if (fromRadio != null && fromRadio.trim().isNotEmpty) {
       return fromRadio.trim();
@@ -1629,196 +2331,57 @@ class AppState extends ChangeNotifier {
     }
 
     final connectedName = (_connectedRadioDisplayName ?? '').trim();
-    final connectedMesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
+    final connectedMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     if (connectedName.isNotEmpty &&
         connectedMesh.isNotEmpty &&
-        (_idsLikelySameDevice(radioId, connectedMesh) ||
-            _idsLikelySameDevice(observerId, connectedMesh))) {
+        (idsLikelySameDevice(radioId, connectedMesh) ||
+            idsLikelySameDevice(observerId, connectedMesh))) {
       return connectedName;
     }
 
     return '';
   }
 
-  List<RawScan> _normalizeRawScans(List<RawScan> scans) {
-    return scans.map(_normalizeRawScanIds).toList(growable: false);
-  }
-
-  List<RawScan> _sanitizeDeadzoneRadioIds(
-    List<RawScan> scans,
-    String? connectedRadioId,
-  ) {
-    final connected = _safePublicRadioId(connectedRadioId ?? '');
-    return scans
-        .map((scan) {
-          final nodeId = (scan.nodeId ?? '').trim();
-          final isDeadLike = nodeId.isEmpty || scan.rssi == null;
-          if (!isDeadLike) return scan;
-          final rowRadio = _safePublicRadioId(scan.radioId ?? '');
-          final keep =
-              connected != null && rowRadio != null && connected == rowRadio;
-          if (keep) return scan;
-          return RawScan(
-            observerId: scan.observerId,
-            nodeId: scan.nodeId,
-            latitude: scan.latitude,
-            longitude: scan.longitude,
-            rssi: scan.rssi,
-            snr: scan.snr,
-            snrIn: scan.snrIn,
-            altitude: scan.altitude,
-            timestamp: scan.timestamp,
-            receivedAt: scan.receivedAt,
-            senderName: scan.senderName,
-            receiverName: scan.receiverName,
-            radioId: null,
-            downloadedFromWorker: scan.downloadedFromWorker,
-          );
-        })
-        .toList(growable: false);
-  }
-
-  List<CoverageZone> _sanitizeDeadzoneZoneRadioIds(
-    List<CoverageZone> zones,
-    String? connectedRadioId,
-  ) {
-    final connected = _safePublicRadioId(connectedRadioId ?? '');
-    return zones
-        .map((zone) {
-          if (!zone.isDeadZone) return zone;
-          final rowRadio = _safePublicRadioId(zone.radioId ?? '');
-          final keep =
-              connected != null && rowRadio != null && connected == rowRadio;
-          if (keep) return zone;
-          return CoverageZone(
-            id: zone.id,
-            centerLat: zone.centerLat,
-            centerLng: zone.centerLng,
-            radiusMeters: zone.radiusMeters,
-            avgRssi: zone.avgRssi,
-            avgSnr: zone.avgSnr,
-            scanCount: zone.scanCount,
-            lastScanned: zone.lastScanned,
-            isDeadZone: zone.isDeadZone,
-            polygon: zone.polygon,
-            radioId: null,
-          );
-        })
-        .toList(growable: false);
-  }
-
-  RawScan _normalizeRawScanIds(RawScan scan) {
-    return RawScan(
-      observerId: _safePublicRadioId(scan.observerId ?? ''),
-      nodeId: _safePublicRadioId(scan.nodeId ?? ''),
-      latitude: scan.latitude,
-      longitude: scan.longitude,
-      rssi: scan.rssi,
-      snr: scan.snr,
-      snrIn: scan.snrIn,
-      altitude: scan.altitude,
-      timestamp: scan.timestamp,
-      receivedAt: scan.receivedAt,
-      senderName: scan.senderName,
-      receiverName: scan.receiverName,
-      radioId: _safePublicRadioId(scan.radioId ?? ''),
-      downloadedFromWorker: scan.downloadedFromWorker,
-    );
-  }
-
-  bool _idsLikelySameDevice(String a, String b) {
-    if (a.isEmpty || b.isEmpty) return false;
-    if (a == b) return true;
-    if (a.startsWith(b) || b.startsWith(a)) return true;
-    final a8 = a.length >= 8 ? a.substring(0, 8) : a;
-    final b8 = b.length >= 8 ? b.substring(0, 8) : b;
-    return a8 == b8;
-  }
-
-  String _extractPrintableAscii(List<int> bytes) {
-    final sb = StringBuffer();
-    for (final b in bytes) {
-      if (b >= 32 && b <= 126) {
-        sb.writeCharCode(b);
-      }
-    }
-    return sb.toString();
-  }
-
-  String? _extractSelfInfoDisplayName(String text) {
-    final trimmed = text.trim();
-    if (trimmed.isEmpty) return null;
-
-    // MeshCore self-info often contains binary-looking ASCII then a '$' marker
-    // before the human-readable radio name.
-    var candidate = trimmed;
-    final markerIndex = candidate.lastIndexOf(r'$');
-    if (markerIndex >= 0 && markerIndex + 1 < candidate.length) {
-      candidate = candidate.substring(markerIndex + 1);
-    }
-    candidate = candidate.trim();
-    if (candidate.isEmpty) return null;
-
-    // Keep common readable name characters and collapse spacing.
-    candidate = candidate
-        .replaceAll(RegExp(r'[^A-Za-z0-9 ._\-]'), '')
-        .replaceAll(RegExp(r'\s{2,}'), ' ')
-        .trim();
-    candidate = _cleanRadioDisplayName(candidate);
-    if (candidate.length < 3) return null;
-    return candidate;
-  }
-
-  Set<String> _nameTokens(String value) {
-    return value
-        .split(RegExp(r'[^a-z0-9]+'))
-        .where((t) => t.length >= 3)
-        .toSet();
-  }
-
   String _selectedBleDeviceName() {
     final selectedId = bleSelectedDeviceId;
     if (selectedId == null || selectedId.isEmpty) return '';
     final fromMap = _bleDeviceNamesById[selectedId];
-    if (fromMap != null && fromMap.isNotEmpty) return fromMap;
+    if (fromMap != null &&
+        fromMap.isNotEmpty &&
+        !_isPlaceholderBleDeviceName(fromMap)) {
+      return fromMap;
+    }
     for (final label in bleScanDevices) {
-      final suffix = '[$selectedId]';
-      if (label.endsWith(suffix)) {
-        return label.substring(0, label.length - suffix.length).trim();
+      final labelId = _extractDeviceIdFromBleLabel(label);
+      if (labelId == selectedId) {
+        final name = _extractDeviceNameFromBleLabel(label);
+        if (!_isPlaceholderBleDeviceName(name)) {
+          return name;
+        }
+        break;
       }
     }
     return '';
   }
 
-  String _cleanRadioDisplayName(String raw) {
-    var value = raw.trim();
-    if (value.isEmpty) return value;
-    value = value
-        .replaceAll(RegExp(r'\bble\b', caseSensitive: false), '')
-        .trim();
-    value = value.replaceAll(RegExp(r'\s{2,}'), ' ');
-    if (value == '-' || value == '_' || value == '()') return '';
-    return value;
-  }
-
   void _pruneSelfContact(Map<String, String> contacts) {
     if (contacts.isEmpty) return;
-    final mesh = _normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
+    final mesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     if (mesh.isNotEmpty && contacts.remove(mesh) != null) {
       _debugLog.info('contacts', 'Removed self contact entry for mesh=$mesh');
       return;
     }
 
-    final selectedTokens = _nameTokens(_selectedBleDeviceName().toLowerCase());
+    final selectedTokens = nameTokens(_selectedBleDeviceName().toLowerCase());
     if (selectedTokens.isEmpty) return;
     String? bestKey;
     var bestScore = 0;
     for (final entry in contacts.entries) {
-      final nameTokens = _nameTokens(entry.value.toLowerCase());
-      if (nameTokens.isEmpty) continue;
+      final entryTokens = nameTokens(entry.value.toLowerCase());
+      if (entryTokens.isEmpty) continue;
       var score = 0;
       for (final token in selectedTokens) {
-        if (token.length >= 4 && nameTokens.contains(token)) {
+        if (token.length >= 4 && entryTokens.contains(token)) {
           score += 1;
         }
       }
@@ -1858,8 +2421,7 @@ class AppState extends ChangeNotifier {
       bleScanning = false;
       bleScanStatus = 'idle';
       _bleAutoScanTimer?.cancel();
-      bleNextScanCountdown = null;
-      _autoScanRemainingSeconds = 0;
+      _resetAutoScanSchedule();
       _smartScanPausedForRecentCoverage = false;
       _smartScanPausedZoneId = null;
       notifyListeners();
@@ -1875,20 +2437,32 @@ class AppState extends ChangeNotifier {
     _debugLog.info('ble_scan', 'Auto scan started');
     bleScanStatus = 'idle';
     notifyListeners();
+    _startAutoScanLoop();
     await _runAutoScanCycle();
     if (!bleScanning || !bleConnected || !_transport.isConnected) {
       _debugLog.warn(
         'ble_scan',
         'Auto scan loop not started because BLE is no longer connected',
       );
+      _bleAutoScanTimer?.cancel();
       return;
     }
-    _startAutoScanLoop();
   }
 
   Future<void> forceBleScan() async {
     if (!await _ensureBleAvailable(context: 'ble_discover')) {
       return;
+    }
+    if (bleScanning) {
+      final forcedAt = DateTime.now();
+      _scheduleNextAutoScanFrom(forcedAt);
+      _autoScanDueWhileBusy = false;
+      _debugLog.info(
+        'smart_scan',
+        'Force scan requested; reset auto-loop timer '
+            'interval=${settings.scanIntervalSeconds}s',
+      );
+      notifyListeners();
     }
     await runNodeDiscover();
   }
@@ -1896,6 +2470,7 @@ class AppState extends ChangeNotifier {
   Future<void> _attemptAutoReconnect({String? reason}) async {
     if (kIsWeb) return;
     if (_autoReconnectInProgress || _manualBleDisconnectRequested) return;
+    if (!settings.bleAutoConnect) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) return;
     _autoReconnectInProgress = true;
     try {
@@ -1915,9 +2490,10 @@ class AppState extends ChangeNotifier {
         bleScanning = true;
         bleScanStatus = 'idle';
         notifyListeners();
+        _startAutoScanLoop();
         await _runAutoScanCycle();
-        if (bleScanning && bleConnected && _transport.isConnected) {
-          _startAutoScanLoop();
+        if (!bleScanning || !bleConnected || !_transport.isConnected) {
+          _bleAutoScanTimer?.cancel();
         }
       }
     } finally {
@@ -1925,70 +2501,248 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  int _secondsUntilNextAutoScan(DateTime now) {
+    final dueAt = _nextAutoScanDueAt;
+    if (dueAt == null) return 0;
+    final remainingMs = dueAt.difference(now).inMilliseconds;
+    if (remainingMs <= 0) return 0;
+    return (remainingMs + 999) ~/ 1000;
+  }
+
+  void _resetAutoScanSchedule({bool clearCountdown = true}) {
+    _autoScanRemainingSeconds = 0;
+    _autoScanDueWhileBusy = false;
+    _autoScanTickInProgress = false;
+    _lastAutoScanTriggerAt = null;
+    _nextAutoScanDueAt = null;
+    if (clearCountdown) {
+      bleNextScanCountdown = null;
+    }
+  }
+
+  void _scheduleNextAutoScanFrom(DateTime triggerAt) {
+    _lastAutoScanTriggerAt = triggerAt;
+    _nextAutoScanDueAt = triggerAt.add(
+      Duration(seconds: settings.scanIntervalSeconds),
+    );
+    _autoScanRemainingSeconds = settings.scanIntervalSeconds;
+    bleNextScanCountdown = _autoScanRemainingSeconds;
+  }
+
   void _startAutoScanLoop() {
     _bleAutoScanTimer?.cancel();
+    _autoScanTickInProgress = false;
     _debugLog.debug(
       'ble_scan',
       'Auto scan loop interval=${settings.scanIntervalSeconds}s',
     );
-    _autoScanRemainingSeconds = settings.scanIntervalSeconds;
+    _nextAutoScanDueAt ??= DateTime.now().add(
+      Duration(seconds: settings.scanIntervalSeconds),
+    );
+    _autoScanRemainingSeconds = _secondsUntilNextAutoScan(DateTime.now());
+    _autoScanDueWhileBusy = false;
     bleNextScanCountdown = _autoScanRemainingSeconds;
 
     _bleAutoScanTimer = Timer.periodic(const Duration(seconds: 1), (
       timer,
     ) async {
-      if (!bleScanning) {
-        timer.cancel();
-        return;
-      }
-      if (_smartScanPausedForRecentCoverage) {
-        bleNextScanCountdown = _autoScanRemainingSeconds;
-        notifyListeners();
-        return;
-      }
-      _autoScanRemainingSeconds -= 1;
-      if (_autoScanRemainingSeconds <= 0) {
-        _autoScanRemainingSeconds = settings.scanIntervalSeconds;
-        bleNextScanCountdown = _autoScanRemainingSeconds;
-        notifyListeners();
-        if (!bleBusy) {
-          await _runAutoScanCycle();
+      if (_autoScanTickInProgress) return;
+      _autoScanTickInProgress = true;
+      try {
+        if (!bleScanning) {
+          timer.cancel();
+          return;
         }
-        return;
+        if (_smartScanPausedForRecentCoverage) {
+          final now = DateTime.now();
+          bleNextScanCountdown = null;
+          if (_lastSmartScanPauseLogAt == null ||
+              now.difference(_lastSmartScanPauseLogAt!) >=
+                  const Duration(seconds: 20)) {
+            _lastSmartScanPauseLogAt = now;
+            _debugLog.debug(
+              'smart_scan',
+              'Pause active zone=${_smartScanPausedZoneId ?? 'unknown'} '
+                  'reason=recent_coverage waiting_for=zone_change',
+            );
+          }
+          notifyListeners();
+          return;
+        }
+        final now = DateTime.now();
+        final remainingSeconds = _secondsUntilNextAutoScan(now);
+        _autoScanRemainingSeconds = remainingSeconds;
+        if (bleBusy) {
+          if (remainingSeconds <= 0) {
+            _autoScanRemainingSeconds = 0;
+            bleNextScanCountdown = 0;
+            if (!_autoScanDueWhileBusy) {
+              _autoScanDueWhileBusy = true;
+              _debugLog.info(
+                'smart_scan',
+                'Auto loop became due while discover is busy; '
+                    'next cycle will start immediately after current discover',
+              );
+            }
+          } else {
+            bleNextScanCountdown = remainingSeconds;
+          }
+          notifyListeners();
+          return;
+        }
+        if (_autoScanDueWhileBusy) {
+          _autoScanDueWhileBusy = false;
+          bleNextScanCountdown = 0;
+          notifyListeners();
+          _debugLog.info(
+            'smart_scan',
+            'Discover finished after due time; launching immediate next cycle',
+          );
+          await _runAutoScanCycle();
+          return;
+        }
+        if (remainingSeconds <= 0) {
+          bleNextScanCountdown = 0;
+          notifyListeners();
+          if (!bleBusy) {
+            _debugLog.info(
+              'smart_scan',
+              'Auto loop trigger countdown reached 0; starting cycle '
+                  'interval=${settings.scanIntervalSeconds}s',
+            );
+            await _runAutoScanCycle();
+          }
+          return;
+        }
+        bleNextScanCountdown = remainingSeconds;
+        notifyListeners();
+      } finally {
+        _autoScanTickInProgress = false;
       }
-      bleNextScanCountdown = _autoScanRemainingSeconds;
-      notifyListeners();
     });
   }
 
   Future<void> _runAutoScanCycle() async {
+    if (bleBusy) {
+      _debugLog.debug(
+        'smart_scan',
+        'Cycle request ignored: discover already busy',
+      );
+      return;
+    }
+    final cycleStartedAt = DateTime.now();
+    final cycleId = ++_autoScanCycleSeq;
+    final sinceLastTriggerMs = _lastAutoScanTriggerAt == null
+        ? null
+        : cycleStartedAt.difference(_lastAutoScanTriggerAt!).inMilliseconds;
+    final expectedTriggerAt = _lastAutoScanTriggerAt?.add(
+      Duration(seconds: settings.scanIntervalSeconds),
+    );
+    final triggerDriftMs = expectedTriggerAt == null
+        ? null
+        : cycleStartedAt.difference(expectedTriggerAt).inMilliseconds;
+    final currentZone = (deviceLatitude != null && deviceLongitude != null)
+        ? hexKey(deviceLatitude!, deviceLongitude!)
+        : null;
+    _debugLog.info(
+      'smart_scan',
+      'Cycle#$cycleId start zone=${currentZone ?? 'unknown'} '
+          'sinceLastTriggerMs=${sinceLastTriggerMs ?? 'first'} '
+          'triggerDriftMs=${triggerDriftMs ?? 'n/a'} '
+          'countdown=${bleNextScanCountdown ?? -1}',
+    );
+    final smartScanActive =
+        settings.smartScanEnabled && settings.smartScanDays >= 1;
+    if (!smartScanActive) {
+      _smartScanPausedForRecentCoverage = false;
+      _smartScanPausedZoneId = null;
+      _lastSmartScanPauseLogAt = null;
+      final triggerAt = DateTime.now();
+      _scheduleNextAutoScanFrom(triggerAt);
+      _debugLog.info(
+        'ble_scan',
+        'Cycle#$cycleId smart-scan disabled; running discovery',
+      );
+      final discoverStartedAt = DateTime.now();
+      await runNodeDiscover();
+      _debugLog.info(
+        'ble_scan',
+        'Cycle#$cycleId finished discoverMs='
+            '${DateTime.now().difference(discoverStartedAt).inMilliseconds} '
+            'responses=${bleDiscoveries.length} status=$bleScanStatus',
+      );
+      return;
+    }
+    final decisionStartedAt = DateTime.now();
     final decision = _evaluateSmartScanDecision();
+    final decisionMs = DateTime.now()
+        .difference(decisionStartedAt)
+        .inMilliseconds;
     if (decision.skip) {
       _smartScanPausedForRecentCoverage = true;
       _smartScanPausedZoneId = decision.zoneId;
       bleScanStatus = 'done';
       bleStatus = 'Smart scan skipped: recently covered';
       bleLastDiscoverError = null;
+      _lastSmartScanSkipAt = DateTime.now();
+      _nextAutoScanDueAt = null;
+      _autoScanRemainingSeconds = 0;
+      bleNextScanCountdown = null;
       _debugLog.info(
         'smart_scan',
-        'Skipped auto scan for zone=${decision.zoneId} reason=${decision.reason}',
+        'Cycle#$cycleId skipped zone=${decision.zoneId ?? 'unknown'} '
+            'reason=${decision.reason} decisionMs=$decisionMs '
+            'nextScan=on_zone_change',
       );
       notifyListeners();
       return;
     }
     _smartScanPausedForRecentCoverage = false;
     _smartScanPausedZoneId = decision.zoneId;
-    _autoScanRemainingSeconds = settings.scanIntervalSeconds;
-    bleNextScanCountdown = _autoScanRemainingSeconds;
+    _lastSmartScanPauseLogAt = null;
+    final triggerAt = DateTime.now();
+    _scheduleNextAutoScanFrom(triggerAt);
+    final sinceSkipMs = _lastSmartScanSkipAt == null
+        ? null
+        : cycleStartedAt.difference(_lastSmartScanSkipAt!).inMilliseconds;
+    _debugLog.info(
+      'smart_scan',
+      'Cycle#$cycleId proceeding zone=${decision.zoneId ?? 'unknown'} '
+          'reason=${decision.reason} decisionMs=$decisionMs '
+          'sinceLastSkipMs=${sinceSkipMs ?? 'none'}',
+    );
+    final discoverStartedAt = DateTime.now();
     await runNodeDiscover();
+    _debugLog.info(
+      'smart_scan',
+      'Cycle#$cycleId finished discoverMs='
+          '${DateTime.now().difference(discoverStartedAt).inMilliseconds} '
+          'responses=${bleDiscoveries.length} status=$bleScanStatus',
+    );
   }
 
   Future<void> _onObserverZoneMaybeChanged() async {
     if (!bleScanning || !bleConnected || bleBusy) return;
+    if (!settings.smartScanEnabled || settings.smartScanDays < 1) {
+      if (_smartScanPausedForRecentCoverage || _smartScanPausedZoneId != null) {
+        _smartScanPausedForRecentCoverage = false;
+        _smartScanPausedZoneId = null;
+        _lastSmartScanPauseLogAt = null;
+        notifyListeners();
+      }
+      return;
+    }
     if (!_smartScanPausedForRecentCoverage) return;
 
     final decision = _evaluateSmartScanDecision();
     if (decision.skip) {
+      if (decision.zoneId != _smartScanPausedZoneId) {
+        _debugLog.info(
+          'smart_scan',
+          'Observer moved but still in recent-coverage zone='
+              '${decision.zoneId ?? 'unknown'} reason=${decision.reason}',
+        );
+      }
       _smartScanPausedZoneId = decision.zoneId;
       return;
     }
@@ -1996,8 +2750,6 @@ class AppState extends ChangeNotifier {
     final fromZone = _smartScanPausedZoneId;
     _smartScanPausedForRecentCoverage = false;
     _smartScanPausedZoneId = decision.zoneId;
-    _autoScanRemainingSeconds = settings.scanIntervalSeconds;
-    bleNextScanCountdown = _autoScanRemainingSeconds;
     _debugLog.info(
       'smart_scan',
       'Left recent-coverage zone=${fromZone ?? 'unknown'}; '
@@ -2034,7 +2786,7 @@ class AppState extends ChangeNotifier {
     var hasRecentSuccess = false;
     for (final scan in rawScans) {
       if (hexKey(scan.latitude, scan.longitude) != zoneId) continue;
-      if (_isDeadLikeScan(scan)) continue;
+      if (isDeadLikeScan(scan)) continue;
       if (scan.effectiveTimestamp.isAfter(cutoff)) {
         hasRecentSuccess = true;
         break;
@@ -2064,188 +2816,6 @@ class AppState extends ChangeNotifier {
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
   }
 
-  Future<void> _startDeviceLocationTracking() async {
-    try {
-      _debugLog.info('location', 'Starting OS location tracking');
-      final enabled = await Geolocator.isLocationServiceEnabled();
-      if (!enabled) {
-        deviceLocationStatus = 'Location services disabled';
-        _debugLog.warn('location', deviceLocationStatus);
-        notifyListeners();
-        return;
-      }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-          final proceed =
-              await (onLocationPermissionPrompt?.call(background: false) ??
-                  Future<bool>.value(true));
-          if (!proceed) {
-            deviceLocationStatus = 'Location permission not requested';
-            _debugLog.warn('location', deviceLocationStatus);
-            notifyListeners();
-            return;
-          }
-        }
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied) {
-        deviceLocationStatus = 'Location permission denied';
-        _debugLog.warn('location', deviceLocationStatus);
-        notifyListeners();
-        return;
-      }
-      if (permission == LocationPermission.deniedForever) {
-        deviceLocationStatus = 'Location permission denied forever';
-        _debugLog.warn('location', deviceLocationStatus);
-        notifyListeners();
-        return;
-      }
-
-      deviceLocationStatus = 'Location active';
-      notifyListeners();
-
-      try {
-        final initial = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 5,
-          ),
-        ).timeout(const Duration(seconds: 8));
-        _applyDevicePosition(initial, source: 'current');
-      } catch (e) {
-        _debugLog.warn('location', 'Initial location fetch failed: $e');
-        await _tryIpFallbackLocation();
-      }
-
-      await _locationSubscription?.cancel();
-      _locationPollTimer?.cancel();
-      _locationSubscription =
-          Geolocator.getPositionStream(
-            locationSettings: const LocationSettings(
-              accuracy: LocationAccuracy.high,
-              distanceFilter: 5,
-            ),
-          ).listen(
-            (position) => _applyDevicePosition(position, source: 'stream'),
-            onError: (Object e) {
-              deviceLocationStatus = 'Location stream error';
-              _debugLog.error('location', 'Location stream error: $e');
-              notifyListeners();
-            },
-          );
-      deviceLocationStatus = 'Waiting for location fix...';
-      notifyListeners();
-      _locationPollTimer = Timer.periodic(
-        const Duration(seconds: 12),
-        (_) => _pollLocationFallback(),
-      );
-      _debugLog.info('location', 'Location tracking started');
-    } catch (e) {
-      deviceLocationStatus = 'Location unavailable';
-      _debugLog.error('location', 'Location setup failed: $e');
-      notifyListeners();
-    }
-  }
-
-  void _applyDevicePosition(Position position, {required String source}) {
-    deviceLatitude = position.latitude;
-    deviceLongitude = position.longitude;
-    deviceAltitude = position.altitude;
-    deviceLocationAt = DateTime.now();
-    deviceLocationStatus = 'Location active';
-    _debugLog.info(
-      'location',
-      '$source lat=${position.latitude.toStringAsFixed(6)} '
-          'lng=${position.longitude.toStringAsFixed(6)} '
-          'alt=${position.altitude.toStringAsFixed(1)}',
-    );
-    notifyListeners();
-    unawaited(_onObserverZoneMaybeChanged());
-  }
-
-  Future<void> _pollLocationFallback() async {
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium,
-          distanceFilter: 0,
-        ),
-      ).timeout(const Duration(seconds: 6));
-      _applyDevicePosition(pos, source: 'poll');
-    } catch (e) {
-      _debugLog.debug('location', 'Fallback poll no fix yet: $e');
-      await _tryIpFallbackLocation();
-    }
-  }
-
-  Future<void> _refreshLocationForDiscoverResponse() async {
-    if (_discoverLocationRefreshInFlight) return;
-    final now = DateTime.now();
-    if (_lastDiscoverLocationRefreshAt != null &&
-        now.difference(_lastDiscoverLocationRefreshAt!) <
-            const Duration(seconds: 1)) {
-      return;
-    }
-    _discoverLocationRefreshInFlight = true;
-    _lastDiscoverLocationRefreshAt = now;
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 0,
-        ),
-      ).timeout(const Duration(seconds: 2));
-      _applyDevicePosition(pos, source: 'discover');
-    } catch (_) {
-      // Keep discover path non-blocking; periodic/stream updates still apply.
-    } finally {
-      _discoverLocationRefreshInFlight = false;
-    }
-  }
-
-  bool get _isLinuxDesktop =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
-
-  Future<void> _tryIpFallbackLocation() async {
-    if (!_isLinuxDesktop) return;
-    final now = DateTime.now();
-    if (_lastIpFallbackAt != null &&
-        now.difference(_lastIpFallbackAt!) < const Duration(minutes: 2)) {
-      return;
-    }
-    _lastIpFallbackAt = now;
-    try {
-      final res = await http
-          .get(
-            Uri.parse(
-              'http://ip-api.com/json/?fields=status,lat,lon,city,regionName,country',
-            ),
-          )
-          .timeout(const Duration(seconds: 5));
-      if (res.statusCode != 200) return;
-      final data = jsonDecode(res.body);
-      if (data is! Map<String, dynamic>) return;
-      if (data['status'] != 'success') return;
-      final lat = (data['lat'] as num?)?.toDouble();
-      final lon = (data['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) return;
-      deviceLatitude = lat;
-      deviceLongitude = lon;
-      deviceAltitude = null;
-      deviceLocationAt = DateTime.now();
-      deviceLocationStatus = 'Location fallback active';
-      _debugLog.info(
-        'location',
-        'ip-fallback lat=${lat.toStringAsFixed(6)} lng=${lon.toStringAsFixed(6)}',
-      );
-      notifyListeners();
-    } catch (e) {
-      _debugLog.debug('location', 'IP fallback failed: $e');
-    }
-  }
-
   void markHostDetaching() {
     _hostDetaching = true;
     _debugLog.info(
@@ -2257,12 +2827,12 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _debugLog.info('app_state', 'Disposing app state');
-    _locationSubscription?.cancel();
-    _locationPollTimer?.cancel();
+    _syncService.dispose();
+    _locationService.dispose();
     _bleAvailabilitySubscription?.cancel();
     _bleAutoScanTimer?.cancel();
     _bleCountdownTimer?.cancel();
-    _periodicSyncTimer?.cancel();
+    _stopPassiveAdvertListener();
     final skipTransportDisposeOnMobileDetach =
         _hostDetaching &&
         !kIsWeb &&
@@ -2280,83 +2850,19 @@ class AppState extends ChangeNotifier {
   }
 
   void _configurePeriodicSyncTimer() {
-    _periodicSyncTimer?.cancel();
-    _periodicSyncTimer = null;
-    if (settings.forceOffline) {
-      _debugLog.info('sync', 'Periodic sync disabled (offline mode enabled)');
-      return;
-    }
-    final configured = settings.uploadBatchIntervalMinutes;
-    final intervalMinutes = configured < 30
-        ? 30
-        : (configured > 1440 ? 1440 : configured);
-    _periodicSyncTimer = Timer.periodic(const Duration(minutes: 1), (_) {
-      unawaited(_maybeRunPeriodicSync(intervalMinutes));
-    });
-    _debugLog.info(
-      'sync',
-      'Periodic sync scheduled interval=${intervalMinutes}m',
+    _syncService.isReadyToSync = () => !loading;
+    _syncService.onPeriodicSyncDue = syncFromWorker;
+    _syncService.configure(
+      intervalMinutes: _resolvedPeriodicSyncIntervalMinutes(),
+      forceOffline: settings.forceOffline,
     );
   }
 
-  Future<void> _maybeRunPeriodicSync(int intervalMinutes) async {
-    if (loading || syncing || settings.forceOffline) return;
-    final interval = Duration(minutes: intervalMinutes);
-    var internetNow = _estimatedInternetNowUtc();
-    if (internetNow == null) {
-      await _refreshInternetTimeAnchor();
-      internetNow = _estimatedInternetNowUtc();
-    }
-    if (internetNow == null) {
-      _debugLog.warn('sync', 'Periodic sync waiting for internet time anchor');
-      return;
-    }
-
-    final last = _lastPeriodicSyncInternetUtc;
-    if (last != null && internetNow.difference(last) < interval) {
-      return;
-    }
-
-    _debugLog.info(
-      'sync',
-      'Periodic sync trigger (internet time) interval=${intervalMinutes}m',
-    );
-    await syncFromWorker();
-  }
-
-  void _captureInternetTimeAnchor(DateTime? serverUtc) {
-    if (serverUtc == null) return;
-    _internetTimeAnchorUtc = serverUtc.toUtc();
-    _internetTimeAnchorElapsed = _monotonicClock.elapsed;
-    _debugLog.debug(
-      'sync',
-      'Internet time anchor updated: ${_internetTimeAnchorUtc!.toIso8601String()}',
-    );
-  }
-
-  DateTime? _estimatedInternetNowUtc() {
-    final anchorUtc = _internetTimeAnchorUtc;
-    final anchorElapsed = _internetTimeAnchorElapsed;
-    if (anchorUtc == null || anchorElapsed == null) return null;
-    final delta = _monotonicClock.elapsed - anchorElapsed;
-    return anchorUtc.add(delta);
-  }
-
-  Future<void> _refreshInternetTimeAnchor() async {
-    if (_internetTimeRefreshInFlight || settings.forceOffline) return;
-    _internetTimeRefreshInFlight = true;
-    try {
-      final api = WorkerApi(
-        AppConfig.deployedWorkerUrl,
-        fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
-      );
-      final serverNow = await api.fetchServerUtcNow();
-      _captureInternetTimeAnchor(serverNow);
-    } catch (e) {
-      _debugLog.debug('sync', 'Internet time refresh failed: $e');
-    } finally {
-      _internetTimeRefreshInFlight = false;
-    }
+  int _resolvedPeriodicSyncIntervalMinutes([int? configured]) {
+    final value = configured ?? settings.uploadBatchIntervalMinutes;
+    if (value < 30) return 30;
+    if (value > 1440) return 1440;
+    return value;
   }
 
   void clearDebugLogs() {
@@ -2449,6 +2955,7 @@ class AppState extends ChangeNotifier {
       final api = WorkerApi(
         AppConfig.deployedWorkerUrl,
         fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+        staticDataBaseUrl: AppConfig.staticDataUrl,
       );
       final challengeRes = await api.requestDeleteChallenge(
         radioId: radioId,
@@ -2467,7 +2974,7 @@ class AppState extends ChangeNotifier {
 
       final next = rawScans
           .where(
-            (scan) => (_safePublicRadioId(scan.radioId ?? '') ?? '') != radioId,
+            (scan) => (safePublicRadioId(scan.radioId ?? '') ?? '') != radioId,
           )
           .toList(growable: false);
       final removedLocal = rawScans.length - next.length;
@@ -2561,7 +3068,7 @@ class AppState extends ChangeNotifier {
       throw StateError('Invalid signature response length');
     }
     final signature = Uint8List.fromList(signatureFrame.sublist(1, 65));
-    final signatureHex = _bytesToHex(signature);
+    final signatureHex = bytesToHex(signature);
     _debugLog.info('delete', 'Radio challenge signature received');
     return signatureHex;
   }
@@ -2596,13 +3103,6 @@ class AppState extends ChangeNotifier {
     );
     return frame;
   }
-
-  String _bytesToHex(Uint8List bytes) {
-    return bytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join()
-        .toUpperCase();
-  }
 }
 
 class _SmartScanDecision {
@@ -2615,4 +3115,12 @@ class _SmartScanDecision {
   final bool skip;
   final String reason;
   final String? zoneId;
+}
+
+class _DeadzonePrecedenceResult {
+  const _DeadzonePrecedenceResult(this.scans, {Set<String>? suppressedHexes})
+    : suppressedHexes = suppressedHexes ?? const <String>{};
+
+  final List<RawScan> scans;
+  final Set<String> suppressedHexes;
 }

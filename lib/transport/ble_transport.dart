@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
+import 'package:mesh_utility/transport/linux_ble_error_classifier.dart';
 import 'package:mesh_utility/transport/linux_ble_pairing_service_base.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 import 'package:mesh_utility/transport/transport_core.dart';
@@ -40,6 +41,8 @@ class BleTransport extends Transport {
   StreamSubscription<Uint8List>? _valueSubscription;
   StreamSubscription<BleDevice>? _scanSubscription;
   StreamSubscription<bool>? _connectionSubscription;
+  final Set<String> _scanNameLookupPending = <String>{};
+  final Map<String, String> _scanResolvedNames = <String, String>{};
   bool _scanInProgress = false;
   bool _manualDisconnectInProgress = false;
   bool _unexpectedResetInProgress = false;
@@ -85,22 +88,294 @@ class BleTransport extends Transport {
     }
     await _prepareFreshLink(targetDeviceId);
     _debugLog.info('ble_transport', 'Target device selected: $targetDeviceId');
-    await _ensureLinuxPairing(targetDeviceId);
-    try {
-      await _connectAndBindWithSoftRetry(targetDeviceId);
-    } catch (e) {
-      if (!_isLinuxDesktop) rethrow;
-      _debugLog.warn(
-        'linux_ble_pairing',
-        'Connect failed for $targetDeviceId; removing bond and retrying pairing once: $e',
-      );
-      await _linuxPairingService.removeDevice(
-        targetDeviceId,
-        onLog: (message) => _debugLog.info('linux_ble_pairing', message),
-      );
-      await _ensureLinuxPairing(targetDeviceId);
-      await _connectAndBindWithSoftRetry(targetDeviceId);
+
+    if (_isLinuxDesktop) {
+      await _connectLinux(targetDeviceId);
+    } else {
+      await _connectNonLinux(targetDeviceId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Linux connect flow – modeled after MeshCore-open.
+  //
+  // 1. Pre-connect BlueZ disconnect (clear stale link state).
+  // 2. Short 6 s connect timeout (+ 2 s hard-timeout wrapper).
+  // 3. On failure: BlueZ disconnect → 700 ms → retry.
+  //    On "abort-by-local": extra 1200 ms → third attempt.
+  //    Still failing: pairing/trust recovery → BlueZ disconnect → reconnect.
+  // 4. Post-connect: ensure BlueZ paired + trusted (trust repair or full pair).
+  // ---------------------------------------------------------------------------
+
+  Future<void> _connectLinux(String targetDeviceId) async {
+    // Pre-connect BlueZ disconnect to release any prior stale link.
+    _debugLog.info(
+      'linux_ble',
+      'Pre-connect BlueZ disconnect for $targetDeviceId',
+    );
+    await _linuxPairingService.disconnectDevice(
+      targetDeviceId,
+      onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+    );
+
+    const connectTimeout = Duration(seconds: 6);
+    _debugLog.info(
+      'ble_transport',
+      'Linux connect timeout set to ${connectTimeout.inSeconds}s',
+    );
+
+    Future<void> attemptConnect() async {
+      await UniversalBle.connect(
+        targetDeviceId,
+        timeout: connectTimeout,
+      ).timeout(
+        connectTimeout + const Duration(seconds: 2),
+        onTimeout: () {
+          throw TimeoutException(
+            'Linux connect hard-timeout after '
+            '${connectTimeout.inSeconds + 2}s',
+          );
+        },
+      );
+    }
+
+    try {
+      await attemptConnect();
+    } catch (error) {
+      _debugLog.error('ble_transport', 'device.connect() failure: $error');
+
+      // Fast-fail on deviceNotFound – the device hasn't been scanned yet.
+      // Let the higher-level _recoverConnectAfterDeviceNotFound() in
+      // AppState handle it (scan → retry) instead of wasting ~46 s on
+      // pointless BlueZ disconnect/pairing retries.
+      final errorLower = error.toString().toLowerCase();
+      if (errorLower.contains('devicenotfound') ||
+          errorLower.contains('device_not_found') ||
+          errorLower.contains('unknown deviceid')) {
+        _debugLog.warn(
+          'linux_ble',
+          'Device not found in UniversalBle cache; skipping retry tiers',
+        );
+        rethrow;
+      }
+
+      // --- Tier 1: BlueZ disconnect + immediate retry ---
+      _debugLog.warn(
+        'linux_ble',
+        'Immediate retry: forcing BlueZ disconnect before second connect',
+      );
+      await _linuxPairingService.disconnectDevice(
+        targetDeviceId,
+        onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+
+      try {
+        await attemptConnect();
+        _debugLog.info('linux_ble', 'Immediate retry connect succeeded');
+      } catch (retryError, retryStackTrace) {
+        Object finalConnectError = retryError;
+        StackTrace finalConnectStackTrace = retryStackTrace;
+        final retryErrorText = retryError.toString().toLowerCase();
+        final isAbortByLocal = retryErrorText.contains(
+          'le-connection-abort-by-local',
+        );
+
+        // --- Tier 2: "abort-by-local" → wait longer + third attempt ---
+        var recoveredOnThirdAttempt = false;
+        if (isAbortByLocal) {
+          _debugLog.warn(
+            'linux_ble',
+            'Retry aborted by local stack; waiting and retrying once more',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          try {
+            await attemptConnect();
+            _debugLog.info(
+              'linux_ble',
+              'Third-attempt connect succeeded after local abort',
+            );
+            recoveredOnThirdAttempt = true;
+          } catch (thirdError, thirdStackTrace) {
+            finalConnectError = thirdError;
+            finalConnectStackTrace = thirdStackTrace;
+            _debugLog.error(
+              'ble_transport',
+              'Third-attempt connect failure: $thirdError',
+            );
+          }
+        }
+
+        // --- Tier 3: pairing/trust recovery ---
+        if (!recoveredOnThirdAttempt) {
+          final recoveredByPairing = await _recoverLinuxConnectFailure(
+            targetDeviceId,
+            attemptConnect: attemptConnect,
+          );
+          if (recoveredByPairing) {
+            _debugLog.info(
+              'linux_ble',
+              'Connect succeeded after pairing/trust recovery',
+            );
+          } else {
+            _debugLog.error(
+              'ble_transport',
+              'Connect retry failure: $finalConnectError',
+            );
+            Error.throwWithStackTrace(
+              _wrapLinuxConnectStageError(finalConnectError),
+              finalConnectStackTrace,
+            );
+          }
+        }
+      }
+    }
+
+    // Post-connect: ensure device is paired and trusted in BlueZ.
+    await _ensureLinuxBleBond(targetDeviceId);
+
+    // Bind characteristics (skip MTU request on Linux – UniversalBle only
+    // supports requestMtu on Android; on Linux the kernel negotiates MTU).
+    _deviceId = targetDeviceId;
+    _debugLog.info(
+      'linux_ble',
+      'Skipping MTU request on Linux; kernel negotiates MTU directly',
+    );
+    await _discoverAndBind(targetDeviceId);
+  }
+
+  /// Non-Linux connect (Android, Web, etc.) – original flow with a single
+  /// soft retry for web.
+  Future<void> _connectNonLinux(String targetDeviceId) async {
+    try {
+      await _connectAndBind(targetDeviceId);
+    } catch (e) {
+      if (!kIsWeb) rethrow;
+      _debugLog.warn(
+        'ble_transport',
+        'Initial web connect/bind attempt failed for $targetDeviceId: $e; '
+            'retrying once',
+      );
+      await _prepareFreshLink(targetDeviceId);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      await _connectAndBind(targetDeviceId);
+    }
+  }
+
+  /// Attempt pairing/trust recovery after all connect retries have failed.
+  ///
+  /// Returns `true` when recovery succeeds and the device is reconnected.
+  Future<bool> _recoverLinuxConnectFailure(
+    String targetDeviceId, {
+    required Future<void> Function() attemptConnect,
+  }) async {
+    if (!await _linuxPairingService.isBluetoothctlAvailable()) return false;
+
+    final trusted = await _linuxPairingService.isPairedAndTrusted(
+      targetDeviceId,
+    );
+    if (trusted) {
+      // Already paired and trusted – nothing to recover.
+      return false;
+    }
+    _debugLog.warn(
+      'linux_ble',
+      'Connect failed with an untrusted/unpaired device; attempting '
+          'pairing/trust recovery',
+    );
+    await _ensureLinuxBleBond(targetDeviceId);
+
+    // Reset BlueZ connection state after pairing recovery.
+    _debugLog.info(
+      'linux_ble',
+      'Resetting BlueZ connection after pairing/trust recovery',
+    );
+    await _linuxPairingService.disconnectDevice(
+      targetDeviceId,
+      onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    try {
+      await attemptConnect();
+    } catch (error, stackTrace) {
+      Error.throwWithStackTrace(_wrapLinuxConnectStageError(error), stackTrace);
+    }
+    return true;
+  }
+
+  Object _wrapLinuxConnectStageError(Object error) {
+    final errorText = error.toString().toLowerCase();
+    if (errorText.contains(linuxConnectStageFailureMarker)) return error;
+    return StateError('Linux connect stage failure: $error');
+  }
+
+  /// Ensure the device is paired and trusted in BlueZ after a successful
+  /// connect.  Mimics MeshCore's `_ensureLinuxBleBond()`:
+  ///
+  /// 1. If already paired + trusted → no-op.
+  /// 2. If paired but not trusted → trust-repair only.
+  /// 3. Otherwise → full `pairAndTrust()` flow.
+  Future<void> _ensureLinuxBleBond(String deviceId) async {
+    if (!await _linuxPairingService.isBluetoothctlAvailable()) {
+      _debugLog.warn(
+        'linux_ble',
+        'bluetoothctl unavailable; skipping bond check for $deviceId',
+      );
+      return;
+    }
+
+    final trusted = await _linuxPairingService.isPairedAndTrusted(deviceId);
+    if (trusted) {
+      _debugLog.info(
+        'linux_ble',
+        'Device $deviceId already paired/trusted; skipping pairing flow',
+      );
+      return;
+    }
+
+    // Attempt trust repair first (device may be paired but untrusted).
+    _debugLog.warn(
+      'linux_ble',
+      'Device $deviceId not fully trusted; attempting trust repair',
+    );
+    final trustRepaired = await _linuxPairingService.trustDevice(
+      deviceId,
+      onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+    );
+    if (trustRepaired) {
+      _debugLog.info(
+        'linux_ble',
+        'Trust repair succeeded without re-pairing for $deviceId',
+      );
+      return;
+    }
+
+    // Full pair flow.
+    _debugLog.info(
+      'linux_ble',
+      'Trust repair insufficient; requesting full pair for $deviceId',
+    );
+    final paired = await _linuxPairingService.pairAndTrust(
+      remoteId: deviceId,
+      onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+      onRequestPin: () async {
+        _debugLog.info(
+          'linux_ble_pairing',
+          'Pairing challenge requesting PIN/passkey for $deviceId',
+        );
+        return onRequestPin?.call(deviceId);
+      },
+    );
+    if (!paired) {
+      throw StateError('Linux BLE pairing fallback failed for $deviceId');
+    }
+    final trustedAfter = await _linuxPairingService.isPairedAndTrusted(
+      deviceId,
+    );
+    if (!trustedAfter) {
+      throw StateError('Linux BLE trust repair did not complete for $deviceId');
+    }
+    _debugLog.info('linux_ble', 'Pair/trust succeeded for $deviceId');
   }
 
   Future<void> _prepareFreshLink(String targetDeviceId) async {
@@ -136,90 +411,19 @@ class BleTransport extends Transport {
   bool get _isLinuxDesktop =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
 
-  Duration get _effectiveConnectTimeout {
-    if (!_isLinuxDesktop) return connectionTimeout;
-    // BlueZ may need extra time immediately after trust/pairing operations.
-    const linuxMin = Duration(seconds: 35);
-    return connectionTimeout > linuxMin ? connectionTimeout : linuxMin;
-  }
-
-  Future<void> _connectAndBindWithSoftRetry(String targetDeviceId) async {
-    try {
-      await _connectAndBind(targetDeviceId);
-      return;
-    } catch (e) {
-      if (!_isLinuxDesktop && !kIsWeb) rethrow;
-      if (kIsWeb) {
-        _debugLog.warn(
-          'ble_transport',
-          'Initial web connect/bind attempt failed for $targetDeviceId: $e; retrying once',
-        );
-        await _prepareFreshLink(targetDeviceId);
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-        await _connectAndBind(targetDeviceId);
-        return;
-      }
-      _debugLog.warn(
-        'ble_transport',
-        'Initial Linux connect attempt failed for $targetDeviceId: $e; retrying once',
-      );
-      try {
-        await UniversalBle.disconnect(targetDeviceId);
-      } catch (_) {}
-      await Future<void>.delayed(const Duration(milliseconds: 700));
-      await _connectAndBind(targetDeviceId);
-    }
-  }
-
-  Future<void> _ensureLinuxPairing(String deviceId) async {
-    if (!_isLinuxDesktop) return;
-
-    if (await _linuxPairingService.isPairedAndTrusted(deviceId)) {
-      _debugLog.info(
-        'linux_ble_pairing',
-        'Device $deviceId already paired/trusted',
-      );
-      return;
-    }
-
-    _debugLog.info(
-      'linux_ble_pairing',
-      'Device $deviceId is not paired/trusted; starting bluetoothctl pairing flow',
-    );
-    final paired = await _linuxPairingService.pairAndTrust(
-      remoteId: deviceId,
-      onLog: (message) => _debugLog.info('linux_ble_pairing', message),
-      onRequestPin: () async {
-        _debugLog.info(
-          'linux_ble_pairing',
-          'Pairing challenge requesting PIN/passkey for $deviceId',
-        );
-        return onRequestPin?.call(deviceId);
-      },
-    );
-    if (!paired) {
-      _debugLog.error('linux_ble_pairing', 'Pair/trust failed for $deviceId');
-      throw StateError('BLE pairing failed for $deviceId');
-    }
-    _debugLog.info('linux_ble_pairing', 'Pair/trust succeeded for $deviceId');
-  }
-
   Future<void> _connectAndBind(String targetDeviceId) async {
     // Ensure scanner is not left running from a previous discovery pass.
     try {
       await UniversalBle.stopScan();
     } catch (_) {}
-    final timeout = _effectiveConnectTimeout;
     _debugLog.info(
       'ble_transport',
-      'Connecting to $targetDeviceId timeout=${timeout.inSeconds}s',
+      'Connecting to $targetDeviceId timeout=${connectionTimeout.inSeconds}s',
     );
-    await UniversalBle.connect(targetDeviceId, timeout: timeout);
+    await UniversalBle.connect(targetDeviceId, timeout: connectionTimeout);
     _debugLog.info('ble_transport', 'Connected to device $targetDeviceId');
     _deviceId = targetDeviceId;
-    if (!kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux)) {
+    if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android)) {
       try {
         final mtu = await UniversalBle.requestMtu(targetDeviceId, 247);
         _debugLog.info(
@@ -231,6 +435,11 @@ class BleTransport extends Transport {
       }
     }
 
+    await _discoverAndBind(targetDeviceId);
+  }
+
+  /// Discover services and subscribe to inbound notifications.
+  Future<void> _discoverAndBind(String targetDeviceId) async {
     try {
       final services = await UniversalBle.discoverServices(targetDeviceId);
       _bindCharacteristics(services);
@@ -343,40 +552,114 @@ class BleTransport extends Transport {
       'Scanning devices timeout=${scanFor.inSeconds}s '
           'service=$_meshCoreServiceUuidCanonical',
     );
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+
     final seenSession = <String>{};
-    _scanSubscription = UniversalBle.scanStream.listen((device) {
+    final seenMeshcoreIds = <String>{};
+    int handleDevice(BleDevice device) {
       if (!_hasMeshCoreService(device)) {
         final key = '${device.deviceId}|ignored-no-meshcore-service';
-        if (!seenSession.add(key)) return;
+        if (!seenSession.add(key)) return 0;
         _debugLog.debug(
           'ble_scan',
           'Ignoring non-meshcore advertisement id=${device.deviceId} '
+              'name=${(device.name ?? device.rawName ?? '').trim()} '
               'services=${device.services}',
         );
-        return;
+        return 0;
       }
       final seenName = (device.name ?? device.rawName ?? '').trim();
-      onScanResult?.call(device.deviceId, seenName);
-      final key = '${device.deviceId}|$seenName';
-      if (!seenSession.add(key)) return;
+      final cachedResolvedName = _scanResolvedNames[device.deviceId] ?? '';
+      final emittedName = seenName.isNotEmpty ? seenName : cachedResolvedName;
+      if (_isLinuxDesktop &&
+          emittedName.isEmpty &&
+          _scanNameLookupPending.add(device.deviceId)) {
+        unawaited(_resolveLinuxScanDeviceName(device.deviceId));
+      }
+      onScanResult?.call(device.deviceId, emittedName);
+      final key = '${device.deviceId}|$emittedName';
+      if (seenSession.add(key)) {
+        _debugLog.debug(
+          'ble_scan',
+          'Seen meshcore device id=${device.deviceId} name=$emittedName',
+        );
+      }
+      return seenMeshcoreIds.add(device.deviceId) ? 1 : 0;
+    }
+
+    Future<int> runScanPass({
+      required ScanFilter filter,
+      required Duration duration,
+      required String label,
+    }) async {
+      if (duration.inMilliseconds <= 0) return 0;
+      var passHits = 0;
       _debugLog.debug(
         'ble_scan',
-        'Seen meshcore device id=${device.deviceId} name=$seenName',
+        'Starting $label scan pass duration=${duration.inMilliseconds}ms '
+            'withServices=${filter.withServices} withNamePrefix=${filter.withNamePrefix}',
       );
-    });
-    final scanFilter = ScanFilter(
-      withServices: const [_nusServiceUuid],
-      withNamePrefix: namePrefixes,
-    );
-    await UniversalBle.startScan(scanFilter: scanFilter);
+      _scanSubscription = UniversalBle.scanStream.listen((device) {
+        passHits += handleDevice(device);
+      });
+      await UniversalBle.startScan(scanFilter: filter);
+      try {
+        await Future<void>.delayed(duration);
+      } finally {
+        try {
+          await UniversalBle.stopScan();
+        } catch (_) {}
+        await _scanSubscription?.cancel();
+        _scanSubscription = null;
+      }
+      _debugLog.debug('ble_scan', '$label scan pass complete hits=$passHits');
+      return passHits;
+    }
+
     try {
       if (kIsWeb) {
+        final scanFilter = ScanFilter(
+          withServices: const [_nusServiceUuid],
+          withNamePrefix: namePrefixes,
+        );
+        await runScanPass(
+          filter: scanFilter,
+          duration: const Duration(milliseconds: 150),
+          label: 'web',
+        );
         // Web scan is an interactive picker request, not a continuous scan.
         // Do not hold scan state open for scanTimeout.
-        await Future<void>.delayed(const Duration(milliseconds: 150));
         return;
       }
-      await Future<void>.delayed(scanFor);
+      final totalMs = scanFor.inMilliseconds;
+      final primaryMs = totalMs >= 6000 ? 6000 : totalMs;
+      final fallbackMs = totalMs - primaryMs;
+      final strictFilter = ScanFilter(
+        withServices: const [_nusServiceUuid],
+        withNamePrefix: namePrefixes,
+      );
+      final strictHits = await runScanPass(
+        filter: strictFilter,
+        duration: Duration(milliseconds: primaryMs),
+        label: 'strict',
+      );
+      if (strictHits == 0 && fallbackMs > 0) {
+        _debugLog.warn(
+          'ble_scan',
+          'No meshcore results from strict service-filter pass; '
+              'starting broad fallback scan',
+        );
+        final broadFilter = ScanFilter(withNamePrefix: namePrefixes);
+        await runScanPass(
+          filter: broadFilter,
+          duration: Duration(milliseconds: fallbackMs),
+          label: 'fallback',
+        );
+      }
     } finally {
       try {
         await UniversalBle.stopScan();
@@ -388,18 +671,57 @@ class BleTransport extends Transport {
     }
   }
 
+  Future<void> _resolveLinuxScanDeviceName(String deviceId) async {
+    try {
+      final resolved = await _linuxPairingService.lookupDeviceDisplayName(
+        deviceId,
+        onLog: (m) => _debugLog.debug('linux_ble_pairing', m),
+      );
+      final name = (resolved ?? '').trim();
+      if (name.isEmpty) return;
+      _scanResolvedNames[deviceId] = name;
+      onScanResult?.call(deviceId, name);
+      _debugLog.debug(
+        'ble_scan',
+        'Resolved Linux BLE name id=$deviceId name=$name',
+      );
+    } catch (e) {
+      _debugLog.debug('ble_scan', 'Linux BLE name resolution failed: $e');
+    } finally {
+      _scanNameLookupPending.remove(deviceId);
+    }
+  }
+
   bool _hasMeshCoreService(BleDevice device) {
     if (kIsWeb) {
       // Web picker already applies service filters in requestDevice().
       // The returned scan result may still have an empty `services` list.
       return true;
     }
-    if (device.services.isEmpty) return false;
-    for (final service in device.services) {
-      final normalized = BleUuidParser.stringOrNull(service) ?? service;
-      if (normalized == _meshCoreServiceUuidCanonical) {
-        return true;
+    final targetDeviceId = (preferredDeviceId ?? '').trim();
+    if (targetDeviceId.isNotEmpty && device.deviceId == targetDeviceId) {
+      return true;
+    }
+    if (device.services.isNotEmpty) {
+      for (final service in device.services) {
+        final normalized = BleUuidParser.stringOrNull(service) ?? service;
+        if (normalized == _meshCoreServiceUuidCanonical) {
+          return true;
+        }
       }
+    }
+    final advertisedName = (device.name ?? device.rawName ?? '')
+        .trim()
+        .toLowerCase();
+    if (advertisedName.contains('meshcore') ||
+        advertisedName.contains('meshcore-') ||
+        advertisedName.contains('mesh core')) {
+      return true;
+    }
+    for (final prefix in namePrefixes) {
+      final normalizedPrefix = prefix.trim().toLowerCase();
+      if (normalizedPrefix.isEmpty) continue;
+      if (advertisedName.startsWith(normalizedPrefix)) return true;
     }
     return false;
   }
@@ -413,6 +735,54 @@ class BleTransport extends Transport {
     _scanSubscription = null;
     _scanInProgress = false;
     _debugLog.info('ble_scan', 'Scan stopped (forced)');
+  }
+
+  /// Ask bluetoothctl to connect directly (bypassing UniversalBle's scan
+  /// cache).  Returns `true` if BlueZ reports a successful connection.
+  Future<bool> tryDirectBlueZConnect(String deviceId) async {
+    if (!_isLinuxDesktop) return false;
+    return _linuxPairingService.connectDevice(
+      deviceId,
+      onLog: (m) => _debugLog.info('linux_ble_pairing', m),
+    );
+  }
+
+  Future<String?> resolveDeviceDisplayName(String deviceId) async {
+    final id = deviceId.trim();
+    if (id.isEmpty || !_isLinuxDesktop) return null;
+    return _linuxPairingService.lookupDeviceDisplayName(
+      id,
+      onLog: (m) => _debugLog.debug('linux_ble_pairing', m),
+    );
+  }
+
+  Future<void> resetLinkState({String? deviceId}) async {
+    final target = (deviceId ?? preferredDeviceId ?? _deviceId ?? '').trim();
+    _debugLog.info(
+      'ble_transport',
+      'Resetting BLE link state target=${target.isEmpty ? 'none' : target}',
+    );
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    _scanInProgress = false;
+    if (!kIsWeb && target.isNotEmpty) {
+      try {
+        await UniversalBle.disconnect(target);
+        _debugLog.debug(
+          'ble_transport',
+          'Link-state reset disconnect attempted for $target',
+        );
+      } catch (_) {}
+    }
+    await _valueSubscription?.cancel();
+    _valueSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _resetSessionState();
+    await Future<void>.delayed(const Duration(milliseconds: 250));
   }
 
   void _bindCharacteristics(List<BleService> services) {
@@ -512,10 +882,6 @@ class BleTransport extends Transport {
           notifyCharacteristicUuid,
         ).listen((value) {
           if (!_inboundController.isClosed) {
-            _debugLog.debug(
-              'ble_transport_rx',
-              'Received ${value.length} byte(s)',
-            );
             _handleInboundChunk(value);
           }
         });
