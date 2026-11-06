@@ -98,6 +98,7 @@ class AppState extends ChangeNotifier {
             _lastSelfInfoHex = null;
             _lastSelfInfoText = null;
             _sessionRadioContacts.clear();
+            _sessionRadioContactTypes.clear();
             _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
             _resumeAutoScanAfterReconnect = wasScanning;
@@ -179,6 +180,7 @@ class AppState extends ChangeNotifier {
   String? _lastObservedZoneId;
   final Map<String, String> _radioContactsByPrefix = {};
   final Map<String, String> _sessionRadioContacts = {};
+  final Map<String, int> _sessionRadioContactTypes = {};
   final Map<String, String> _bleDeviceNamesById = {};
   static const String _knownBleDeviceFallbackName = 'Known Device';
   bool _manualBleDisconnectRequested = false;
@@ -457,8 +459,9 @@ class AppState extends ChangeNotifier {
     required String nodeId,
     required String incomingName,
   }) {
-    // Keep the advertised name on the discover model. Contact names are
-    // applied only at display time so they are not stored or uploaded.
+    // Keep the advertised name on the discover model. Repeater/room contact
+    // names are applied when scans are stored or backfilled, not here, so
+    // companion contact names cannot leak onto the discover payload.
     final trimmed = incomingName.trim();
     if (!isPlaceholderNodeName(trimmed, nodeId)) {
       return trimmed;
@@ -724,8 +727,9 @@ class AppState extends ChangeNotifier {
   /// Repeater/node label.
   ///
   /// Order: in-memory session contact, advertised/discovered name already on
-  /// the node or scan, then the short public-key prefix. Session contacts are
-  /// not written onto scans or uploaded.
+  /// the node or scan, then the short public-key prefix. Session contact names
+  /// are shown locally for every type. Only repeater/room contact names are
+  /// written onto scans for upload.
   String displayNameForNode(String nodeId, {String? advertisedName}) {
     final fromSession = _bestContactNameForId(_sessionRadioContacts, nodeId);
     if (fromSession != null && fromSession.isNotEmpty) return fromSession;
@@ -742,10 +746,38 @@ class AppState extends ChangeNotifier {
   }
 
   @visibleForTesting
-  void debugSeedSessionContacts(Map<String, String> contacts) {
+  void debugSeedSessionContacts(
+    Map<String, String> contacts, {
+    Map<String, int>? types,
+  }) {
     _sessionRadioContacts
       ..clear()
       ..addAll(contacts);
+    _sessionRadioContactTypes.clear();
+    if (types != null) {
+      _sessionRadioContactTypes.addAll(types);
+    }
+  }
+
+  @visibleForTesting
+  int debugBackfillScanNamesFromContacts(Map<String, String> contacts) {
+    return _backfillScanNamesFromContacts(contacts);
+  }
+
+  @visibleForTesting
+  Map<String, dynamic>? debugToWorkerScanPayload(RawScan scan) {
+    return _toWorkerScanPayload(scan);
+  }
+
+  @visibleForTesting
+  String debugResolveScanSenderName({
+    required String nodeId,
+    required String advertisedName,
+  }) {
+    return _resolveScanSenderName(
+      nodeId: nodeId,
+      advertisedName: advertisedName,
+    );
   }
 
   bool get deleteInProgress => _deleteInProgress;
@@ -1275,6 +1307,7 @@ class AppState extends ChangeNotifier {
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
     _sessionRadioContacts.clear();
+    _sessionRadioContactTypes.clear();
     notifyListeners();
   }
 
@@ -1739,21 +1772,12 @@ class AppState extends ChangeNotifier {
         continue;
       }
       final responseName = response.name.trim();
-      final responseNameHex = normalizeHexId(responseName);
-      final nodeIdHex = normalizeHexId(nodeId8);
-      final responseLooksLikeId =
-          responseNameHex.isNotEmpty && responseNameHex == nodeIdHex;
-      final responseLooksUnknown =
-          responseName.toLowerCase() == 'unknown' ||
-          responseName.startsWith('Unknown (');
-      // Store the advertised name only. Session contact names stay in memory
-      // and are resolved by [displayNameForNode] so they are not uploaded.
-      final senderName =
-          responseName.isNotEmpty &&
-              !responseLooksLikeId &&
-              !responseLooksUnknown
-          ? responseName
-          : nodeId8;
+      // Prefer a repeater/room contact name when present. Advertised names
+      // still win over a raw id. Companion/chat contact names are never used.
+      final senderName = _resolveScanSenderName(
+        nodeId: response.publicKeyPrefix,
+        advertisedName: responseName,
+      );
       final scan = RawScan(
         observerId: connectedMeshId8,
         nodeId: nodeId8,
@@ -1869,6 +1893,7 @@ class AppState extends ChangeNotifier {
     _debugLog.info('contacts', 'Requesting contacts from radio');
 
     final contacts = <String, String>{};
+    final contactTypes = <String, int>{};
     final done = Completer<void>();
     late final StreamSubscription<RadioContact> contactSub;
     late final StreamSubscription<void> endSub;
@@ -1878,6 +1903,7 @@ class AppState extends ChangeNotifier {
       final name = contact.name.trim();
       if (prefix.isEmpty || name.isEmpty) return;
       contacts[prefix] = name;
+      contactTypes[prefix] = contact.type;
     });
     endSub = _bleProtocol.endOfContactsResponses().listen((_) {
       if (!done.isCompleted) done.complete();
@@ -1905,11 +1931,17 @@ class AppState extends ChangeNotifier {
     final sessionContacts = Map<String, String>.from(contacts);
     _pruneSelfContact(sessionContacts);
     _pruneSelfContact(_radioContactsByPrefix);
+    final sessionTypes = Map<String, int>.from(contactTypes)
+      ..removeWhere((key, _) => !sessionContacts.containsKey(key));
     final sessionChanged = !mapEquals(_sessionRadioContacts, sessionContacts);
-    if (sessionChanged) {
+    final typesChanged = !mapEquals(_sessionRadioContactTypes, sessionTypes);
+    if (sessionChanged || typesChanged) {
       _sessionRadioContacts
         ..clear()
         ..addAll(sessionContacts);
+      _sessionRadioContactTypes
+        ..clear()
+        ..addAll(sessionTypes);
     }
 
     // Contact maps stay in memory for this connection. They are not written
@@ -1926,7 +1958,7 @@ class AppState extends ChangeNotifier {
       await _localStore.saveRawScans(rawScans);
       _rebuildDerivedData();
     }
-    if (sessionChanged || updated > 0) {
+    if (sessionChanged || typesChanged || updated > 0) {
       notifyListeners();
     }
     _debugLog.info(
@@ -2035,15 +2067,19 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Advert-cache names may be copied onto scans. Contact-book names may not:
-  /// those stay in memory and must not be persisted or uploaded.
-  Map<String, String> _withoutContactBookNames(Map<String, String> contacts) {
+  /// Names that may be written onto scans (and therefore uploaded).
+  ///
+  /// Advertised names are allowed. Repeater/room contact-book names are
+  /// allowed. Companion/chat and other non-infrastructure contact names are
+  /// never eligible.
+  Map<String, String> _namesAllowedOnScans(Map<String, String> contacts) {
     if (contacts.isEmpty) return contacts;
     final filtered = <String, String>{};
     for (final entry in contacts.entries) {
       final name = entry.value.trim();
-      if (name.isEmpty || _nameBelongsToContactBook(entry.key, name)) continue;
-      filtered[entry.key] = entry.value;
+      if (name.isEmpty) continue;
+      if (_isNonInfrastructureContactName(entry.key, name)) continue;
+      filtered[entry.key] = name;
     }
     return filtered;
   }
@@ -2061,7 +2097,7 @@ class AppState extends ChangeNotifier {
   }
 
   int _backfillScanNamesFromContacts(Map<String, String> contacts) {
-    final storeable = _withoutContactBookNames(contacts);
+    final storeable = _namesAllowedOnScans(contacts);
     var updates = 0;
     final next = <RawScan>[];
     final connectedMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
@@ -2103,9 +2139,18 @@ class AppState extends ChangeNotifier {
       final senderMatch = _bestContactNameForId(storeable, senderId);
       final observerMatch = _bestContactNameForId(storeable, observerId);
 
-      final newSenderName = senderMatch ?? scan.senderName;
+      final senderLeakedCompanion = _isNonInfrastructureContactName(
+        senderId,
+        senderCurrent,
+      );
+      final newSenderName = senderLeakedCompanion
+          ? (senderMatch ?? _shortNodeId(senderId))
+          : (senderMatch ?? scan.senderName);
       final newReceiverName = observerMatch ?? scan.receiverName;
-      final senderChanged = senderMatch != null && senderCurrent != senderMatch;
+      final senderChanged =
+          (senderMatch != null && senderCurrent != senderMatch) ||
+          (senderLeakedCompanion &&
+              senderCurrent != (newSenderName ?? '').trim());
       final receiverChanged =
           observerMatch != null && receiverCurrent != observerMatch;
       if (!senderChanged && !receiverChanged) {
@@ -2385,7 +2430,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _uploadPendingScans(WorkerApi api, List<RawScan> pending) async {
-    // Do not copy contact-book names onto the upload payload.
+    // Companion/chat contact names are stripped in [_toWorkerScanPayload].
     final payload = pending
         .map(_toWorkerScanPayload)
         .whereType<Map<String, dynamic>>()
@@ -2424,11 +2469,11 @@ class AppState extends ChangeNotifier {
 
   Map<String, dynamic>? _toWorkerScanPayload(RawScan scan) {
     final nodeId = safePublicRadioId(scan.nodeId ?? '') ?? '';
-    final nodeName = (scan.senderName ?? '').trim();
+    final nodeName = _uploadableSenderName(scan);
     final observerName = _resolveObserverNameForUpload(scan);
     final nodeEntry = <String, dynamic>{
       'nodeId': nodeId,
-      if (nodeName.isNotEmpty) 'name': nodeName,
+      if (nodeName != null && nodeName.isNotEmpty) 'name': nodeName,
       if (observerName.isNotEmpty) 'observerName': observerName,
       'rssi': scan.rssi ?? 0.0,
       'snr': scan.snr ?? 0.0,
@@ -2455,7 +2500,13 @@ class AppState extends ChangeNotifier {
 
   String _resolveObserverNameForUpload(RawScan scan) {
     final receiver = (scan.receiverName ?? '').trim();
-    if (receiver.isNotEmpty) return receiver;
+    final senderId = scan.nodeId ?? '';
+    // Keep observer self-name upload as today, but never send a companion
+    // chat destination that was accidentally copied onto receiverName.
+    final receiverIsSenderCompanion =
+        receiver.isNotEmpty &&
+        _isNonInfrastructureContactName(senderId, receiver);
+    if (receiver.isNotEmpty && !receiverIsSenderCompanion) return receiver;
 
     final radioId = normalizeHexId(scan.radioId ?? '');
     final observerId = normalizeHexId(scan.observerId ?? '');
@@ -2469,6 +2520,72 @@ class AppState extends ChangeNotifier {
     }
 
     return '';
+  }
+
+  /// Scan senderName written locally and eligible for upload.
+  ///
+  /// Precedence: repeater/room session contact name, then a real advertised
+  /// name, then the short node id. Companion/chat contact names are skipped.
+  String _resolveScanSenderName({
+    required String nodeId,
+    required String advertisedName,
+  }) {
+    final infra = _infrastructureContactNameForId(nodeId);
+    if (infra != null) return infra;
+    final trimmed = advertisedName.trim();
+    if (trimmed.isNotEmpty && !isPlaceholderNodeName(trimmed, nodeId)) {
+      return trimmed;
+    }
+    return _shortNodeId(nodeId);
+  }
+
+  String? _uploadableSenderName(RawScan scan) {
+    final name = (scan.senderName ?? '').trim();
+    if (name.isEmpty) return null;
+    if (_isNonInfrastructureContactName(scan.nodeId ?? '', name)) {
+      return null;
+    }
+    return name;
+  }
+
+  String? _infrastructureContactNameForId(String id) {
+    if (!_isInfrastructureContactId(id)) return null;
+    final name = _bestContactNameForId(_sessionRadioContacts, id);
+    if (name == null || name.isEmpty) return null;
+    if (isPlaceholderNodeName(name, id)) return null;
+    return name;
+  }
+
+  bool _isInfrastructureContactId(String id) {
+    final type = _bestContactTypeForId(id);
+    if (type == null) return false;
+    return isInfrastructureAdvertType(type);
+  }
+
+  bool _isNonInfrastructureContactName(String id, String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return false;
+    if (!_nameBelongsToContactBook(id, trimmed)) return false;
+    return !_isInfrastructureContactId(id);
+  }
+
+  int? _bestContactTypeForId(String id) {
+    if (id.isEmpty || _sessionRadioContactTypes.isEmpty) return null;
+    final upper = normalizeHexId(id);
+    if (upper.isEmpty) return null;
+
+    int? bestType;
+    var bestLength = -1;
+    for (final entry in _sessionRadioContactTypes.entries) {
+      final prefix = normalizeHexId(entry.key);
+      if (prefix.isEmpty) continue;
+      if (prefix != upper && !idsLikelySameDevice(prefix, upper)) continue;
+      if (prefix.length > bestLength) {
+        bestLength = prefix.length;
+        bestType = entry.value;
+      }
+    }
+    return bestType;
   }
 
   String _selectedBleDeviceName() {

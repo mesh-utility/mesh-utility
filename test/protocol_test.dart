@@ -259,4 +259,59 @@ void main() {
       expect(parseNodeDiscoverAdvertResponse(frame), isNull);
     });
   });
+
+  group('RadioContact parsing', () {
+    Uint8List contactFrame({required int type, required String name}) {
+      final frame = Uint8List(contactFrameSize);
+      frame[0] = respCodeContact;
+      frame.setAll(contactPubKeyOffset, const [
+        0x10,
+        0x52,
+        0xA9,
+        0x30,
+        0xAA,
+        0xBB,
+        0xCC,
+        0xDD,
+      ]);
+      frame[contactTypeOffset] = type;
+      frame.setAll(contactNameOffset, name.codeUnits);
+      return frame;
+    }
+
+    test('parseRadioContact reads repeater type and name', () {
+      final parsed = parseRadioContact(
+        contactFrame(type: advTypeRepeater, name: 'TestRep'),
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.publicKeyPrefix, equals('1052A930AABBCCDD'));
+      expect(parsed.name, equals('TestRep'));
+      expect(parsed.type, equals(advTypeRepeater));
+      expect(isInfrastructureAdvertType(parsed.type), isTrue);
+    });
+
+    test('parseRadioContact reads room type', () {
+      final parsed = parseRadioContact(
+        contactFrame(type: advTypeRoom, name: 'TestRoom'),
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.name, equals('TestRoom'));
+      expect(parsed.type, equals(advTypeRoom));
+      expect(isInfrastructureAdvertType(parsed.type), isTrue);
+    });
+
+    test('parseRadioContact reads chat type as non-infrastructure', () {
+      final parsed = parseRadioContact(
+        contactFrame(type: advTypeChat, name: 'TestChat'),
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.name, equals('TestChat'));
+      expect(parsed.type, equals(advTypeChat));
+      expect(isInfrastructureAdvertType(parsed.type), isFalse);
+    });
+
+    test('parseRadioContact returns null for a short frame', () {
+      expect(parseRadioContact(Uint8List(10)), isNull);
+    });
+  });
 }

@@ -270,6 +270,11 @@ const int advTypeRepeater = 2;
 const int advTypeRoom = 3;
 const int advTypeSensor = 4;
 
+/// Repeater and room-server contacts may have their saved names written onto
+/// scans and uploaded. Companion/chat and other types must not.
+bool isInfrastructureAdvertType(int type) =>
+    type == advTypeRepeater || type == advTypeRoom;
+
 // Payload Types
 const int payloadTypeREQ = 0x00;
 const int payloadTypeRESPONSE = 0x01;
@@ -356,10 +361,18 @@ class ParsedContactText {
 }
 
 class RadioContact {
-  const RadioContact({required this.publicKeyPrefix, required this.name});
+  const RadioContact({
+    required this.publicKeyPrefix,
+    required this.name,
+    this.type = 0,
+  });
 
   final String publicKeyPrefix;
   final String name;
+
+  /// Advert type from [contactTypeOffset]: [advTypeChat], [advTypeRepeater],
+  /// [advTypeRoom], [advTypeSensor]. `0` means unknown/unset.
+  final int type;
 }
 
 ParsedContactText? parseContactMessageText(Uint8List frame) {
@@ -421,7 +434,8 @@ RadioContact? parseRadioContact(Uint8List frame) {
   final name = _extractBestContactName(frame);
   if (name.isEmpty) return null;
 
-  return RadioContact(publicKeyPrefix: publicKeyPrefix, name: name);
+  final type = frame[contactTypeOffset];
+  return RadioContact(publicKeyPrefix: publicKeyPrefix, name: name, type: type);
 }
 
 String _extractBestContactName(Uint8List frame) {
