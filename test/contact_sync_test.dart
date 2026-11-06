@@ -206,5 +206,33 @@ void main() {
       expect(parseContactsStartTotal(buildContactsStartFrame(732)), 732);
       expect(parseContactsStartTotal(Uint8List.fromList([2])), isNull);
     });
+
+    test('PUSH frames reset idle so sync survives advert gaps', () async {
+      final controller = StreamController<Uint8List>();
+      final start = DateTime.now();
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: () async {
+          controller.add(buildContactsStartFrame(2));
+          controller.add(buildSyntheticContactFrame(index: 0, name: 'Rep0'));
+        },
+        idleTimeout: const Duration(milliseconds: 200),
+        overallTimeout: const Duration(seconds: 3),
+        maxAttempts: 1,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      controller.add(buildPushAdvertFrame());
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      controller.add(buildPushAdvertFrame());
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      controller.add(buildSyntheticContactFrame(index: 1, name: 'Rep1'));
+      controller.add(buildEndOfContactsFrame());
+      final result = await future;
+      await controller.close();
+      expect(result.sawEnd, isTrue);
+      expect(result.contacts.length, 2);
+      expect(DateTime.now().difference(start).inMilliseconds, greaterThan(200));
+    });
+
   });
 }

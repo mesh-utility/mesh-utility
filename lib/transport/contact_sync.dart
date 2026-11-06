@@ -41,14 +41,16 @@ class ContactSyncResult {
 
 /// Runs GET_CONTACTS collection with an **idle/per-frame** timeout.
 ///
-/// Each START/CONTACT/END frame resets [idleTimeout]. [overallTimeout] is only
-/// a safety ceiling for huge books on slow links.
+/// Idle resets on **every** inbound frame (including PUSH), so advert traffic
+/// during a large dump does not abort the sync. [overallTimeout] is a safety
+/// ceiling for huge books on slow links.
 Future<ContactSyncResult> collectContactsFromInbound({
   required Stream<Uint8List> inbound,
   required Future<void> Function() sendGetContacts,
   void Function(ContactSyncProgress progress)? onProgress,
-  Duration idleTimeout = const Duration(seconds: 25),
-  Duration overallTimeout = const Duration(minutes: 6),
+  Duration idleTimeout = const Duration(seconds: 45),
+  Duration overallTimeout = const Duration(minutes: 8),
+  int maxAttempts = 3,
 }) async {
   final contacts = <String, String>{};
   final contactTypes = <String, int>{};
@@ -56,90 +58,116 @@ Future<ContactSyncResult> collectContactsFromInbound({
   var sawEnd = false;
   var timedOut = false;
 
-  final done = Completer<void>();
-  Timer? idleTimer;
-  late final Timer overallTimer;
+  for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    final done = Completer<void>();
+    Timer? idleTimer;
+    late final Timer overallTimer;
+    var attemptSawEnd = false;
 
-  void emit({bool completed = false, bool timedOutFlag = false}) {
-    onProgress?.call(
-      ContactSyncProgress(
-        active: !completed && !timedOutFlag,
-        received: contacts.length,
-        expected: expectedTotal,
-        timedOut: timedOutFlag,
-        completed: completed,
-      ),
-    );
-  }
+    void emit({bool completed = false, bool timedOutFlag = false}) {
+      onProgress?.call(
+        ContactSyncProgress(
+          active: !completed && !timedOutFlag,
+          received: contacts.length,
+          expected: expectedTotal,
+          timedOut: timedOutFlag,
+          completed: completed,
+        ),
+      );
+    }
 
-  void armIdle() {
-    idleTimer?.cancel();
-    idleTimer = Timer(idleTimeout, () {
+    void armIdle() {
+      idleTimer?.cancel();
+      idleTimer = Timer(idleTimeout, () {
+        if (!done.isCompleted) {
+          timedOut = true;
+          done.complete();
+        }
+      });
+    }
+
+    void onFrame(Uint8List frame) {
+      if (frame.isEmpty) return;
+      // Any frame means the link is alive — reset idle before filtering.
+      armIdle();
+      final code = frame[0];
+      if (code == respCodeContactsStart) {
+        expectedTotal = parseContactsStartTotal(frame) ?? expectedTotal;
+        emit();
+        return;
+      }
+      if (code == respCodeContact) {
+        final contact = parseRadioContact(frame);
+        if (contact != null) {
+          final prefix = contact.publicKeyPrefix.trim().toUpperCase();
+          final name = contact.name.trim();
+          if (prefix.isNotEmpty && name.isNotEmpty) {
+            contacts[prefix] = name;
+            contactTypes[prefix] = contact.type;
+          }
+        }
+        emit();
+        return;
+      }
+      if (isEndOfContactsFrame(frame)) {
+        attemptSawEnd = true;
+        sawEnd = true;
+        if (!done.isCompleted) done.complete();
+        return;
+      }
+    }
+
+    late final StreamSubscription<Uint8List> sub;
+    sub = inbound.listen(onFrame);
+
+    overallTimer = Timer(overallTimeout, () {
       if (!done.isCompleted) {
         timedOut = true;
         done.complete();
       }
     });
-  }
 
-  void onFrame(Uint8List frame) {
-    if (frame.isEmpty) return;
-    final code = frame[0];
-    if (code == respCodeContactsStart) {
-      expectedTotal = parseContactsStartTotal(frame);
-      armIdle();
-      emit();
-      return;
+    emit();
+    armIdle();
+    try {
+      await sendGetContacts();
+      await done.future;
+    } finally {
+      idleTimer?.cancel();
+      overallTimer.cancel();
+      await sub.cancel();
     }
-    if (code == respCodeContact) {
-      final contact = parseRadioContact(frame);
-      if (contact != null) {
-        final prefix = contact.publicKeyPrefix.trim().toUpperCase();
-        final name = contact.name.trim();
-        if (prefix.isNotEmpty && name.isNotEmpty) {
-          contacts[prefix] = name;
-          contactTypes[prefix] = contact.type;
-        }
-      }
-      armIdle();
-      emit();
-      return;
+
+    if (attemptSawEnd) {
+      timedOut = false;
+      break;
     }
-    if (isEndOfContactsFrame(frame)) {
+    if (expectedTotal != null && contacts.length >= expectedTotal!) {
+      timedOut = false;
       sawEnd = true;
-      armIdle();
-      if (!done.isCompleted) done.complete();
-      return;
+      break;
+    }
+    // Incomplete: retry while keeping merged maps.
+    if (attempt < maxAttempts) {
+      timedOut = false;
+      await Future<void>.delayed(const Duration(milliseconds: 400));
     }
   }
 
-  late final StreamSubscription<Uint8List> sub;
-  sub = inbound.listen(onFrame);
-
-  overallTimer = Timer(overallTimeout, () {
-    if (!done.isCompleted) {
-      timedOut = true;
-      done.complete();
-    }
-  });
-
-  emit();
-  armIdle();
-  try {
-    await sendGetContacts();
-    await done.future;
-  } finally {
-    idleTimer?.cancel();
-    overallTimer.cancel();
-    await sub.cancel();
-  }
-
-  emit(completed: true, timedOutFlag: timedOut);
+  onProgress?.call(
+    ContactSyncProgress(
+      active: false,
+      received: contacts.length,
+      expected: expectedTotal,
+      timedOut: timedOut && !sawEnd,
+      completed: true,
+    ),
+  );
   return ContactSyncResult(
     contacts: contacts,
     contactTypes: contactTypes,
     expectedTotal: expectedTotal,
-    timedOut: timedOut,
+    timedOut: timedOut && !sawEnd,
     sawEnd: sawEnd,
   );
 }

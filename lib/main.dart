@@ -15,6 +15,9 @@ import 'package:mesh_utility/src/pages/settings_page.dart';
 import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
+import 'package:mesh_utility/src/services/app_update_service.dart';
+import 'package:mesh_utility/src/app_version.dart';
+import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
@@ -190,6 +193,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   );
 
   late final AppState _appState;
+  late final AppUpdateService _updateService;
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
@@ -248,6 +252,11 @@ class _MeshHomePageState extends State<MeshHomePage>
       localStore: LocalStore(),
       transport: createDefaultTransport(),
     )..initialize();
+    _updateService = AppUpdateService(currentVersionLabel: kAppVersionLabel);
+    _updateService.addListener(_onAppStateChanged);
+    if (localContactsSupported) {
+      unawaited(_maybeCheckForUpdatesOnLaunch());
+    }
     _appState.addListener(_onAppStateChanged);
     _appState.onBlePinRequest = _showBlePinDialog;
     _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
@@ -265,6 +274,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       );
     }
     WidgetsBinding.instance.removeObserver(this);
+    _updateService.removeListener(_onAppStateChanged);
     _appState.removeListener(_onAppStateChanged);
     _appState.onBlePinRequest = null;
     _appState.onLocationPermissionPrompt = null;
@@ -281,6 +291,69 @@ class _MeshHomePageState extends State<MeshHomePage>
         builder: (_) => _PromptPageShell(canPop: canPop, child: child),
       ),
     );
+  }
+
+
+  Future<void> _maybeCheckForUpdatesOnLaunch() async {
+    final info = await _updateService.check(force: false);
+    if (!mounted || info == null) return;
+    await _showUpdateDialog(info);
+  }
+
+  Future<void> _showUpdateDialog(dynamic info) async {
+    if (!mounted) return;
+    final tag = info.tagName as String;
+    final body = (info.body as String).trim();
+    final notes = body.isEmpty ? 'A newer release is available.' : body;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text('Update available: $tag'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(child: Text(notes)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                unawaited(_updateService.skipVersion(tag));
+              },
+              child: const Text('Skip this version'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Later'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.of(ctx).pop();
+                final err = await _updateService.installAvailable();
+                if (!mounted) return;
+                if (err != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(err)),
+                  );
+                }
+              },
+              child: const Text('Install update'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _checkForUpdatesFromSettings() async {
+    final info = await _updateService.check(force: true);
+    if (!mounted) return;
+    if (info == null) {
+      final msg = _updateService.statusMessage ?? 'Up to date.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      return;
+    }
+    await _showUpdateDialog(info);
   }
 
   Future<void> _showBleUnavailableDialog({
@@ -1403,12 +1476,18 @@ class _MeshHomePageState extends State<MeshHomePage>
             await _appState.updateSettings(value);
           },
           onSync: _appState.syncFromWorker,
+          onCheckForUpdates: localContactsSupported
+              ? _checkForUpdatesFromSettings
+              : null,
+          updateStatusMessage: _updateService.statusMessage,
+          updateChecking: _updateService.checking,
         );
       case 6:
         return const PrivacyPage();
       case 7:
         return ContactsPage(
           contacts: _appState.currentRadioContacts,
+          contactTypes: _appState.currentRadioContactTypes,
           syncProgress: _appState.contactsSyncProgress,
         );
       default:

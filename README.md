@@ -8,6 +8,17 @@ Native Flutter client for Mesh Utility with BLE radio scanning, local cache, and
 
 - https://mesh-utility.org/
 
+
+## Install / update with Obtainium
+
+Android builds are published as **full** (non-prerelease) GitHub Releases with a stable signing key. Each release ships a single APK named `mesh-utility-Alpha-N-android.apk`.
+
+- Source: https://github.com/mesh-utility/mesh-utility
+- Obtainium deep link: [Add in Obtainium](obtainium://add/https://github.com/mesh-utility/mesh-utility)
+
+In Obtainium, add the repo URL above (or tap the deep link). Obtainium will track `Alpha-N` releases and offer the Android APK asset automatically.
+
+
 ## Release Notes
 
 - [Alpha 8](./docs/releases/alpha-8.md) (latest)

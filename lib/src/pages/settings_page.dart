@@ -33,6 +33,9 @@ class SettingsPage extends StatefulWidget {
     required this.connectedRadioId,
     required this.darkMode,
     required this.onToggleTheme,
+    this.onCheckForUpdates,
+    this.updateStatusMessage,
+    this.updateChecking = false,
   });
 
   final AppSettings settings;
@@ -59,6 +62,9 @@ class SettingsPage extends StatefulWidget {
   final String? connectedRadioId;
   final bool darkMode;
   final VoidCallback onToggleTheme;
+  final Future<void> Function()? onCheckForUpdates;
+  final String? updateStatusMessage;
+  final bool updateChecking;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -769,6 +775,28 @@ class _SettingsPageState extends State<SettingsPage> {
                           : 'Sync now (${widget.uploadQueueCount})',
                     ),
                   ),
+                  if (widget.onCheckForUpdates != null) ...[
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: widget.updateChecking
+                          ? null
+                          : () => widget.onCheckForUpdates!(),
+                      icon: const Icon(Icons.system_update, size: 16),
+                      label: Text(
+                        widget.updateChecking
+                            ? 'Checking for updates…'
+                            : 'Check for updates',
+                      ),
+                    ),
+                    if ((widget.updateStatusMessage ?? '').isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          widget.updateStatusMessage!,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                  ],
                 ],
               ),
             ),

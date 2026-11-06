@@ -15,6 +15,9 @@ import 'package:mesh_utility/src/services/sync_service.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
+import 'package:mesh_utility/src/services/contact_store.dart';
+import 'package:mesh_utility/src/models/local_contact.dart';
+import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
 import 'package:mesh_utility/src/services/scan_aggregator.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
@@ -141,6 +144,7 @@ class AppState extends ChangeNotifier {
 
   final SettingsStore _settingsStore;
   final LocalStore _localStore;
+  final ContactStore _contactStore = ContactStore();
   final Transport _transport;
   final AppDebugLogService _debugLog;
 
@@ -717,6 +721,9 @@ class AppState extends ChangeNotifier {
   String? get connectedRadioMeshId8 => _connectedRadioMeshId8();
   String? get connectedRadioPublicKeyHex => _connectedRadioPublicKeyHex;
 
+  Map<String, int> get currentRadioContactTypes =>
+      Map<String, int>.unmodifiable(_sessionRadioContactTypes);
+
   Map<String, String> get currentRadioContacts {
     if (bleConnected) {
       return Map<String, String>.unmodifiable(_sessionRadioContacts);
@@ -919,6 +926,28 @@ class AppState extends ChangeNotifier {
     _configurePeriodicSyncTimer();
   }
 
+  Future<void> _maybePersistRadioSettings(AppSettings next) async {
+    if (!localContactsSupported) return;
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null || radioId.isEmpty || !bleConnected) return;
+    await _contactStore.saveRadioSettings(radioId, next);
+  }
+
+  Future<void> _maybeLoadRadioSettings() async {
+    if (!localContactsSupported) return;
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null || radioId.isEmpty) return;
+    final loaded = await _contactStore.loadRadioSettings(radioId);
+    if (loaded == null) {
+      await _contactStore.saveRadioSettings(radioId, settings);
+      return;
+    }
+    settings = !loaded.privacyAccepted && !loaded.forceOffline
+        ? loaded.copyWith(forceOffline: true)
+        : loaded;
+    await _settingsStore.save(settings);
+  }
+
   Future<void> updateSettings(AppSettings next) async {
     final previous = settings;
     settings = !next.privacyAccepted && !next.forceOffline
@@ -928,6 +957,7 @@ class AppState extends ChangeNotifier {
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
     await _settingsStore.save(settings);
+    await _maybePersistRadioSettings(settings);
     notifyListeners();
 
     final smartChanged =
@@ -1250,6 +1280,7 @@ class AppState extends ChangeNotifier {
       );
     }
     await _requestSelfInfo();
+    await _maybeLoadRadioSettings();
     await _syncContactsAndBackfillNames();
     await _applyCompanionLocationPolicyFromSettings();
   }
@@ -1546,6 +1577,12 @@ class AppState extends ChangeNotifier {
         name: advert.name,
         source: 'discover',
       );
+      unawaited(_upsertHeardContact(
+        prefix: advert.publicKeyPrefix,
+        name: advert.name,
+        type: advert.nodeType,
+        source: 'advert',
+      ));
       final resolvedAdvertName = _resolveDiscoverName(
         nodeId: advert.publicKeyPrefix,
         incomingName: advert.name,
@@ -1957,7 +1994,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncContactsAndBackfillNames() async {
     if (!bleConnected) return;
-    _adoptPersistedContactsIntoSession();
+    await _adoptPersistedContactsIntoSession();
     _debugLog.warn('contacts', 'Requesting contacts from radio');
 
     contactsSyncProgress = const ContactSyncProgress(active: true, received: 0);
@@ -1966,8 +2003,9 @@ class AppState extends ChangeNotifier {
     final result = await collectContactsFromInbound(
       inbound: _transport.inbound,
       sendGetContacts: () => _bleProtocol.run(_protocol.getContacts()),
-      idleTimeout: const Duration(seconds: 25),
-      overallTimeout: const Duration(minutes: 6),
+      idleTimeout: const Duration(seconds: 45),
+      overallTimeout: const Duration(minutes: 8),
+      maxAttempts: 3,
       onProgress: (progress) {
         contactsSyncProgress = progress;
         // Throttle UI churn: notify every 25 contacts or on phase change.
@@ -2026,12 +2064,37 @@ class AppState extends ChangeNotifier {
         ..addAll(sessionTypes);
     }
 
-    // Contact maps stay in memory for this connection. They are not written
-    // to settings, SharedPreferences, or the worker.
-    if (_connectedRadioMeshId8() == null) {
+    // Persist/merge into on-device master store (Android/Linux). Never upload
+    // the full book; REPEATER/ROOM upload gating is unchanged.
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null) {
       _debugLog.warn(
         'contacts',
         'Radio id unknown; keeping ${sessionContacts.length} contact(s) in memory only',
+      );
+    } else if (localContactsSupported) {
+      final now = DateTime.now().toUtc();
+      final incoming = <LocalContact>[
+        for (final e in sessionContacts.entries)
+          LocalContact(
+            publicKeyPrefix: e.key,
+            name: e.value,
+            type: sessionTypes[e.key] ?? 0,
+            lastHeard: now,
+            source: 'sync',
+          ),
+      ];
+      final merged = await _contactStore.mergeContacts(radioId, incoming);
+      // Reflect full local book (includes previously heard companions).
+      _sessionRadioContacts
+        ..clear()
+        ..addAll({for (final c in merged.values) c.publicKeyPrefix: c.name});
+      _sessionRadioContactTypes
+        ..clear()
+        ..addAll({for (final c in merged.values) c.publicKeyPrefix: c.type});
+      _debugLog.warn(
+        'contacts',
+        'Local store merge received=${sessionContacts.length} stored=${merged.length}',
       );
     }
 
@@ -2048,10 +2111,75 @@ class AppState extends ChangeNotifier {
     _logKnownNodeContactMatches();
   }
 
-  void _adoptPersistedContactsIntoSession() {
+
+  Future<void> _upsertHeardContact({
+    required String prefix,
+    required String name,
+    required int type,
+    String? path,
+    String source = 'advert',
+  }) async {
+    final p = prefix.trim().toUpperCase();
+    final n = name.trim();
+    if (p.isEmpty) return;
+    if (n.isNotEmpty) {
+      _sessionRadioContacts[p] = n;
+    }
+    if (type != 0) {
+      _sessionRadioContactTypes[p] = type;
+    }
+    final radioId = _connectedRadioMeshId8();
+    if (radioId == null || !localContactsSupported) return;
+    await _contactStore.mergeContacts(radioId, [
+      LocalContact(
+        publicKeyPrefix: p,
+        name: n.isNotEmpty ? n : (_sessionRadioContacts[p] ?? p),
+        type: type,
+        lastHeard: DateTime.now().toUtc(),
+        path: path,
+        source: source,
+      ),
+    ]);
+  }
+
+  Future<void> _adoptPersistedContactsIntoSession() async {
     if (_sessionRadioContacts.isNotEmpty) return;
     final radioId = _connectedRadioMeshId8();
     if (radioId == null || radioId.isEmpty) return;
+    if (localContactsSupported) {
+      final stored = await _contactStore.loadContacts(radioId);
+      if (stored.isNotEmpty) {
+        final session = {
+          for (final c in stored.values) c.publicKeyPrefix: c.name,
+        };
+        _pruneSelfContact(session);
+        _sessionRadioContacts.addAll(session);
+        _sessionRadioContactTypes.addAll({
+          for (final c in stored.values)
+            if (session.containsKey(c.publicKeyPrefix)) c.publicKeyPrefix: c.type,
+        });
+        // One-time migrate legacy SharedPreferences book if present.
+        final legacy = settings.contactsByRadioId[radioId];
+        if (legacy != null && legacy.isNotEmpty) {
+          final now = DateTime.now().toUtc();
+          await _contactStore.mergeContacts(
+            radioId,
+            [
+              for (final e in legacy.entries)
+                LocalContact(
+                  publicKeyPrefix: e.key,
+                  name: e.value,
+                  type: 0,
+                  lastHeard: now,
+                  source: 'sync',
+                ),
+            ],
+          );
+        }
+        notifyListeners();
+        return;
+      }
+    }
     final persisted = settings.contactsByRadioId[radioId];
     if (persisted == null || persisted.isEmpty) return;
     final session = Map<String, String>.from(persisted);
