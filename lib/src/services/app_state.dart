@@ -84,6 +84,7 @@ class AppState extends ChangeNotifier {
             }
             final wasScanning = bleScanning;
             if (!bleConnected && !bleConnecting) {
+              _signalContactSyncLinkClosed();
               return;
             }
             bleConnected = false;
@@ -103,7 +104,11 @@ class AppState extends ChangeNotifier {
             _lastSelfInfoText = null;
             _sessionRadioContacts.clear();
             _sessionRadioContactTypes.clear();
-            contactsSyncProgress = ContactSyncProgress.idle;
+            // An in-flight contact sync owns the final status. Clearing it
+            // here would replace "Bluetooth disconnected" with idle.
+            if (!_contactSyncInFlight) {
+              contactsSyncProgress = ContactSyncProgress.idle;
+            }
             _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
             _resumeAutoScanAfterReconnect = wasScanning;
@@ -112,6 +117,7 @@ class AppState extends ChangeNotifier {
               'Connection lost device=${deviceId ?? 'unknown'} reason=${reason ?? 'unknown'}',
             );
             notifyListeners();
+            _signalContactSyncLinkClosed();
             if (!_manualBleDisconnectRequested && !kIsWeb) {
               unawaited(_attemptAutoReconnect(reason: reason));
             }
@@ -188,6 +194,17 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _sessionRadioContacts = {};
   final Map<String, int> _sessionRadioContactTypes = {};
   ContactSyncProgress contactsSyncProgress = ContactSyncProgress.idle;
+  Completer<void>? _contactSyncLinkClosed;
+
+  bool get _contactSyncInFlight =>
+      _contactSyncLinkClosed != null && !_contactSyncLinkClosed!.isCompleted;
+
+  void _signalContactSyncLinkClosed() {
+    final pending = _contactSyncLinkClosed;
+    if (pending != null && !pending.isCompleted) {
+      pending.complete();
+    }
+  }
 
   final Map<String, String> _bleDeviceNamesById = {};
   static const String _knownBleDeviceFallbackName = 'Known Device';
@@ -204,6 +221,7 @@ class AppState extends ChangeNotifier {
     _stopPassiveAdvertListener();
     bleStatus = _bleUnavailableStatusMessage();
     _debugLog.info(context, bleStatus);
+    _signalContactSyncLinkClosed();
     notifyListeners();
   }
 
@@ -437,6 +455,7 @@ class AppState extends ChangeNotifier {
     _smartScanPausedZoneId = null;
     bleStatus = _bleUnavailableStateMessage(state);
     _debugLog.warn(context, '$bleStatus state=$state');
+    _signalContactSyncLinkClosed();
     notifyListeners();
 
     if (prompt &&
@@ -1389,7 +1408,11 @@ class AppState extends ChangeNotifier {
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
     _sessionRadioContacts.clear();
-    contactsSyncProgress = ContactSyncProgress.idle;
+    // Keep a sync that already finished as disconnected. The link callback
+    // completes that sync before this line runs.
+    if (contactsSyncProgress.active && !contactsSyncProgress.disconnected) {
+      contactsSyncProgress = ContactSyncProgress.idle;
+    }
     _sessionRadioContactTypes.clear();
     notifyListeners();
   }
@@ -2051,59 +2074,67 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    final result = await collectContactsFromInbound(
-      inbound: _transport.inbound,
-      sendGetContacts: (since) =>
-          _bleProtocol.run(_protocol.getContacts(since: since)),
-      initialSince: initialSince,
-      seedContacts: {
-        for (final c in stored.values) c.publicKeyPrefix: c.name,
-      },
-      seedTypes: {for (final c in stored.values) c.publicKeyPrefix: c.type},
-      seedLastMods: {
-        for (final c in stored.values)
-          if (c.lastMod != null && c.lastMod! > 0) c.publicKeyPrefix: c.lastMod!,
-      },
-      idleTimeout: const Duration(seconds: 90),
-      maxAttempts: 4,
-      onContacts: persistBatch,
-      onProgress: (progress) {
-        contactsSyncProgress = progress;
-        final expectedChanged = progress.expected != lastNotifiedExpected;
-        lastNotifiedExpected = progress.expected;
-        final jumped = lastNotifiedReceived < 0 ||
-            progress.received - lastNotifiedReceived >= 25 ||
-            progress.received < lastNotifiedReceived;
-        if (jumped ||
-            expectedChanged ||
-            progress.completed ||
-            progress.incomplete ||
-            progress.timedOut) {
-          lastNotifiedReceived = progress.received;
-          notifyListeners();
-        }
-      },
-    );
-
-    final syncComplete = result.isComplete;
-    contactsSyncProgress = ContactSyncProgress(
-      active: false,
-      received: result.contacts.length,
-      expected: result.expectedTotal,
-      timedOut: result.timedOut,
-      completed: syncComplete,
-      incomplete: result.expectedTotal != null && !syncComplete,
-    );
-
-    _debugLog.warn(
-      'contacts',
-      'sync ${syncComplete ? 'complete' : 'incomplete'} '
-      'stored=${result.contacts.length} '
-      'expected=${result.expectedTotal ?? -1} '
-      'sawEnd=${result.sawEnd} timedOut=${result.timedOut} '
-      'attempts=${result.attempts} since=${initialSince ?? 0} '
-      'newestLastMod=${result.newestLastMod ?? 0}',
-    );
+    final linkClosed = Completer<void>();
+    _contactSyncLinkClosed = linkClosed;
+    if (!bleConnected || !_transport.isConnected) {
+      linkClosed.complete();
+    }
+    ContactSyncResult? result;
+    try {
+      result = await collectContactsFromInbound(
+        inbound: _transport.inbound,
+        sendGetContacts: (since) =>
+            _bleProtocol.run(_protocol.getContacts(since: since)),
+        initialSince: initialSince,
+        linkClosed: linkClosed.future,
+        seedContacts: {
+          for (final c in stored.values) c.publicKeyPrefix: c.name,
+        },
+        seedTypes: {for (final c in stored.values) c.publicKeyPrefix: c.type},
+        seedLastMods: {
+          for (final c in stored.values)
+            if (c.lastMod != null && c.lastMod! > 0)
+              c.publicKeyPrefix: c.lastMod!,
+        },
+        onContacts: persistBatch,
+        onProgress: (progress) {
+          contactsSyncProgress = progress;
+          final expectedChanged = progress.expected != lastNotifiedExpected;
+          lastNotifiedExpected = progress.expected;
+          final jumped =
+              lastNotifiedReceived < 0 ||
+              progress.received - lastNotifiedReceived >= 25 ||
+              progress.received < lastNotifiedReceived;
+          if (jumped ||
+              expectedChanged ||
+              progress.completed ||
+              progress.incomplete ||
+              progress.disconnected) {
+            lastNotifiedReceived = progress.received;
+            notifyListeners();
+          }
+        },
+      );
+    } finally {
+      if (!linkClosed.isCompleted) linkClosed.complete();
+      _contactSyncLinkClosed = null;
+      final outcome = result?.outcome ?? ContactSyncOutcome.disconnected;
+      final storedCount = result?.contacts.length ?? 0;
+      contactsSyncProgress = ContactSyncProgress(
+        active: false,
+        received: storedCount,
+        expected: result?.expectedTotal,
+        completed: outcome == ContactSyncOutcome.completed,
+        incomplete: outcome == ContactSyncOutcome.incomplete,
+        disconnected: outcome == ContactSyncOutcome.disconnected,
+      );
+      notifyListeners();
+      _debugLog.debug(
+        'contacts',
+        'frames=${result?.framesSeen ?? 0} stored=$storedCount '
+            'expected=${result?.expectedTotal ?? -1} outcome=${outcome.name}',
+      );
+    }
 
     if (result.contacts.isEmpty) {
       _debugLog.warn('contacts', 'No contacts returned from radio');
@@ -2144,8 +2175,9 @@ class AppState extends ChangeNotifier {
       );
     } else if (localContactsSupported) {
       final now = DateTime.now().toUtc();
+      final lastMods = result.lastMods;
       int? keptLastMod(String key) {
-        final value = result.lastMods[key];
+        final value = lastMods[key];
         if (value == null || value <= 0) return null;
         return value;
       }

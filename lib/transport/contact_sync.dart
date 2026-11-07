@@ -1,6 +1,6 @@
 import 'dart:async';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 
 /// Progress for an in-flight GET_CONTACTS sync.
@@ -9,21 +9,23 @@ class ContactSyncProgress {
     required this.active,
     required this.received,
     this.expected,
-    this.timedOut = false,
     this.completed = false,
     this.incomplete = false,
+    this.disconnected = false,
   });
 
   final bool active;
   final int received;
   final int? expected;
-  final bool timedOut;
 
-  /// The sync finished and the stored book reached the radio total.
+  /// RESP_END_OF_CONTACTS was seen.
   final bool completed;
 
-  /// The sync finished short of the radio total.
+  /// RESP_ERR arrived before RESP_CONTACTS_START. The sync does not retry.
   final bool incomplete;
+
+  /// The transport closed before RESP_END_OF_CONTACTS.
+  final bool disconnected;
 
   static const idle = ContactSyncProgress(active: false, received: 0);
 
@@ -33,15 +35,15 @@ class ContactSyncProgress {
     return 'Contacts $received';
   }
 
-  /// True once the sync has stopped and the radio reported a book size.
-  bool get hasOutcome =>
-      !active && expected != null && (completed || incomplete || timedOut);
+  /// True once the sync has stopped with a terminal outcome.
+  bool get hasOutcome => !active && (completed || incomplete || disconnected);
 
-  /// [progressLabel] while running. After the sync stops, appends
-  /// `complete` or `incomplete`.
+  /// [progressLabel] while running. After the sync stops, the terminal status.
+  /// A dropped link reads "Bluetooth disconnected", never "incomplete".
   String get statusLabel {
+    if (disconnected) return 'Bluetooth disconnected';
     if (!hasOutcome) return progressLabel;
-    final outcome = received >= expected! ? 'complete' : 'incomplete';
+    final outcome = completed ? 'complete' : 'incomplete';
     return '$progressLabel $outcome';
   }
 }
@@ -63,6 +65,9 @@ class SyncedContact {
   final int lastMod;
 }
 
+/// How a one-pass GET_CONTACTS finished.
+enum ContactSyncOutcome { completed, incomplete, disconnected }
+
 /// Result of a contact book sync.
 class ContactSyncResult {
   const ContactSyncResult({
@@ -70,47 +75,34 @@ class ContactSyncResult {
     required this.contactTypes,
     required this.lastMods,
     required this.expectedTotal,
-    required this.timedOut,
-    required this.sawEnd,
-    required this.attempts,
-    this.newestLastMod,
+    required this.outcome,
+    required this.framesSeen,
   });
 
   final Map<String, String> contacts;
   final Map<String, int> contactTypes;
   final Map<String, int> lastMods;
   final int? expectedTotal;
-  final bool timedOut;
-  final bool sawEnd;
-  final int attempts;
+  final ContactSyncOutcome outcome;
 
-  /// Newest positive lastmod collected, including contacts seeded from the
-  /// on-device store. This is the next CMD_GET_CONTACTS `since`.
-  ///
-  /// Lastmod is not arrival order. A resume from this value skips contacts
-  /// that were never stored when their lastmod is older.
-  final int? newestLastMod;
+  /// Inbound frames observed during the pass, including ignored PUSH frames.
+  final int framesSeen;
 
-  /// Stored unique contacts reached the radio total. When the radio sent no
-  /// total, this is true only after RESP_END_OF_CONTACTS without an idle stop.
-  bool get isComplete {
-    final expected = expectedTotal;
-    if (expected == null) return sawEnd && !timedOut;
-    return contacts.length >= expected;
-  }
+  /// True when RESP_END_OF_CONTACTS was seen.
+  bool get isComplete => outcome == ContactSyncOutcome.completed;
 }
 
-/// Runs GET_CONTACTS with a per-frame idle timeout and no total timeout.
+/// One GET_CONTACTS pass, matching the MeshCore companion procedure.
 ///
-/// [idleTimeout] resets on every inbound frame, including PUSH adverts, so a
-/// slow phone can take as long as the link stays alive. The sync is complete
-/// only when the merged unique book is at least the START total. A short
-/// RESP_END_OF_CONTACTS and an idle timeout both retry. The retry sends
-/// CMD_GET_CONTACTS with `since` set to the newest lastmod already collected.
-/// If that filtered resume adds no contacts, or a filtered END is still short
-/// of the total, the next attempt is a full dump (`since` omitted). Lastmod
-/// is not arrival order, so a since cursor cannot fill gaps it skips. Stops
-/// when the merged count reaches the START total or [maxAttempts] is exhausted.
+/// Sends [sendGetContacts] once. [initialSince] is forwarded only when the
+/// caller passes a positive value (incremental sync). The radio then sends
+/// RESP_CONTACTS_START (code 2), zero or more RESP_CONTACT (code 3) frames,
+/// and RESP_END_OF_CONTACTS (code 4). Every other code, including PUSH
+/// (0x80+), is ignored. RESP_ERR (code 1) before START finishes as
+/// [ContactSyncOutcome.incomplete] and is not retried. The inbound stream
+/// closing, or [linkClosed] completing, finishes as
+/// [ContactSyncOutcome.disconnected]. There is no timeout and no second
+/// request.
 ///
 /// [onContacts] receives newly accepted contacts in batches so the caller can
 /// merge them into the per-radio store without blocking the frame parser.
@@ -118,41 +110,37 @@ Future<ContactSyncResult> collectContactsFromInbound({
   required Stream<Uint8List> inbound,
   required Future<void> Function(int? since) sendGetContacts,
   int? initialSince,
+  Future<void>? linkClosed,
   Map<String, String> seedContacts = const {},
   Map<String, int> seedTypes = const {},
   Map<String, int> seedLastMods = const {},
   void Function(ContactSyncProgress progress)? onProgress,
   Future<void> Function(List<SyncedContact> batch)? onContacts,
-  Duration idleTimeout = const Duration(seconds: 90),
-  Duration retryDelay = const Duration(milliseconds: 400),
-  int maxAttempts = 4,
   int checkpointEvery = 25,
 }) async {
   final contacts = Map<String, String>.from(seedContacts);
   final contactTypes = Map<String, int>.from(seedTypes);
   final lastMods = Map<String, int>.from(seedLastMods);
   int? expectedTotal;
-  var sawEnd = false;
-  var timedOut = false;
-  var attemptsUsed = 0;
-  var wantFull = false;
+  var sawStart = false;
+  var framesSeen = 0;
+  var outcome = ContactSyncOutcome.disconnected;
 
   final pending = <SyncedContact>[];
   Future<void>? flushing;
   var flushQueued = false;
 
-  void emit() {
+  void emit({bool terminal = false}) {
     onProgress?.call(
       ContactSyncProgress(
-        active: true,
+        active: !terminal,
         received: contacts.length,
         expected: expectedTotal,
+        completed: terminal && outcome == ContactSyncOutcome.completed,
+        incomplete: terminal && outcome == ContactSyncOutcome.incomplete,
+        disconnected: terminal && outcome == ContactSyncOutcome.disconnected,
       ),
     );
-  }
-
-  void logSync(String message) {
-    debugPrint('contact sync $message');
   }
 
   Future<void> deliver(List<SyncedContact> batch) async {
@@ -221,35 +209,27 @@ Future<ContactSyncResult> collectContactsFromInbound({
     if (pending.length >= checkpointEvery) scheduleFlush();
   }
 
-  bool reachedTotal() {
-    final expected = expectedTotal;
-    return expected != null && contacts.length >= expected;
-  }
+  final framesDone = Completer<void>();
 
-  Completer<void>? done;
-  Timer? idleTimer;
-
-  void armIdle() {
-    idleTimer?.cancel();
-    final current = done;
-    if (current == null) return;
-    idleTimer = Timer(idleTimeout, () {
-      if (!current.isCompleted) {
-        timedOut = true;
-        current.complete();
-      }
-    });
+  void finish(ContactSyncOutcome next) {
+    if (framesDone.isCompleted) return;
+    outcome = next;
+    framesDone.complete();
   }
 
   void onFrame(Uint8List frame) {
-    if (frame.isEmpty) return;
-    // Any frame means the link is alive — reset idle before filtering.
-    final current = done;
-    if (current != null && !current.isCompleted) armIdle();
+    framesSeen++;
+    if (frame.isEmpty || framesDone.isCompleted) return;
     final code = frame[0];
     if (code == respCodeContactsStart) {
+      sawStart = true;
       expectedTotal = parseContactsStartTotal(frame) ?? expectedTotal;
       emit();
+      return;
+    }
+    // ERR before START is a failed command. Do not send GET_CONTACTS again.
+    if (!sawStart && code == respCodeErr) {
+      finish(ContactSyncOutcome.incomplete);
       return;
     }
     if (code == respCodeContact) {
@@ -258,142 +238,57 @@ Future<ContactSyncResult> collectContactsFromInbound({
       emit();
       return;
     }
-    if (isEndOfContactsFrame(frame)) {
-      sawEnd = true;
-      final current = done;
-      if (current != null && !current.isCompleted) current.complete();
+    if (code == respCodeEndOfContacts) {
+      finish(ContactSyncOutcome.completed);
+      return;
     }
+    // PUSH (0x80+) and every other response code stay on the link and are
+    // not part of this command.
   }
 
-  final sub = inbound.listen(onFrame);
+  final requestSince = (initialSince != null && initialSince > 0)
+      ? initialSince
+      : null;
+  final sub = inbound.listen(
+    onFrame,
+    onError: (Object _, StackTrace _) =>
+        finish(ContactSyncOutcome.disconnected),
+    onDone: () => finish(ContactSyncOutcome.disconnected),
+  );
   emit();
   try {
-    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-      final countBefore = contacts.length;
-      final newest = _newestPositive(lastMods);
-      final int? requestSince = wantFull
-          ? null
-          : (attempt == 1 ? (_positiveSince(initialSince) ?? newest) : newest);
-      wantFull = false;
-      sawEnd = false;
-      timedOut = false;
-      attemptsUsed = attempt;
-
-      // Stay visible across resumes. END and idle must not clear the bar
-      // until the whole sync stops.
-      emit();
-      logSync(
-        'attempt=$attempt/$maxAttempts since=${requestSince ?? 0} '
-        'stored=${contacts.length} expected=${expectedTotal ?? -1}',
-      );
-
-      final attemptDone = Completer<void>();
-      done = attemptDone;
-      armIdle();
-      try {
-        await sendGetContacts(requestSince);
-        await attemptDone.future;
-      } finally {
-        idleTimer?.cancel();
-        idleTimer = null;
-        done = null;
-      }
-      await flushNow();
-
-      final added = contacts.length - countBefore;
-      final reached = reachedTotal();
-      final wasSince = (requestSince ?? 0) > 0;
-      logSync(
-        'attempt=$attempt added=$added stored=${contacts.length} '
-        'expected=${expectedTotal ?? -1} sawEnd=$sawEnd '
-        'idle=${!sawEnd && !reached}',
-      );
-
-      if (reached) {
-        timedOut = false;
-        break;
-      }
-
-      // Still short of the radio total. A since cursor of the newest stored
-      // lastmod misses contacts that have not arrived yet when their lastmod
-      // is older, so a resume that adds nothing cannot make progress.
-      if (wasSince && (added == 0 || sawEnd)) {
-        wantFull = true;
-        logSync(
-          'next=full stored=${contacts.length} '
-          'expected=${expectedTotal ?? -1} '
-          'reason=${added == 0 ? 'since-added-none' : 'filtered-end-short'}',
-        );
-      } else if (sawEnd) {
-        logSync(
-          'next=retry stored=${contacts.length} '
-          'expected=${expectedTotal ?? -1} reason=end-short',
-        );
+    await sendGetContacts(requestSince);
+    if (!framesDone.isCompleted) {
+      if (linkClosed == null) {
+        await framesDone.future;
       } else {
-        timedOut = true;
-        logSync(
-          'next=retry stored=${contacts.length} '
-          'expected=${expectedTotal ?? -1} reason=idle',
-        );
-      }
-
-      emit();
-      if (attempt >= maxAttempts) break;
-      sawEnd = false;
-      timedOut = false;
-      if (retryDelay > Duration.zero) {
-        await Future<void>.delayed(retryDelay);
+        try {
+          await Future.any([framesDone.future, linkClosed]);
+        } catch (_) {
+          // linkClosed failed closed. Same as a dropped connection.
+        }
+        if (!framesDone.isCompleted) {
+          finish(ContactSyncOutcome.disconnected);
+        }
       }
     }
+  } catch (_) {
+    finish(ContactSyncOutcome.disconnected);
   } finally {
-    idleTimer?.cancel();
     await sub.cancel();
   }
-  await flushNow();
-
-  final newest = _newestPositive(lastMods);
-  final stored = contacts.length;
-  final expected = expectedTotal;
-  final idleStop = timedOut && !sawEnd;
-  final short = expected != null && stored < expected;
-  final complete = !short && (expected != null || (sawEnd && !idleStop));
-  logSync(
-    'done stored=$stored expected=${expected ?? -1} '
-    '${complete ? 'complete' : 'incomplete'} '
-    'attempts=$attemptsUsed sawEnd=$sawEnd idle=$idleStop',
-  );
-  onProgress?.call(
-    ContactSyncProgress(
-      active: false,
-      received: stored,
-      expected: expected,
-      timedOut: idleStop,
-      completed: complete,
-      incomplete: short,
-    ),
-  );
+  try {
+    await flushNow();
+  } catch (_) {
+    // Keep contacts already accepted. The caller still sees the outcome.
+  }
+  emit(terminal: true);
   return ContactSyncResult(
     contacts: contacts,
     contactTypes: contactTypes,
     lastMods: lastMods,
-    expectedTotal: expected,
-    timedOut: idleStop,
-    sawEnd: sawEnd,
-    attempts: attemptsUsed,
-    newestLastMod: newest,
+    expectedTotal: expectedTotal,
+    outcome: outcome,
+    framesSeen: framesSeen,
   );
-}
-
-int? _positiveSince(int? since) {
-  if (since == null || since <= 0) return null;
-  return since;
-}
-
-int? _newestPositive(Map<String, int> lastMods) {
-  int? newest;
-  for (final value in lastMods.values) {
-    if (value <= 0) continue;
-    if (newest == null || value > newest) newest = value;
-  }
-  return newest;
 }

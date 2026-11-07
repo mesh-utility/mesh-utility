@@ -54,7 +54,11 @@ Uint8List buildSyntheticContactFrame({
   final nameBytes = utf8.encode(name);
   final len = nameBytes.length > maxNameSize ? maxNameSize : nameBytes.length;
   frame.setRange(contactNameOffset, contactNameOffset + len, nameBytes);
-  frame.setRange(contactLastModOffset, contactLastModOffset + 4, _le32(lastMod));
+  frame.setRange(
+    contactLastModOffset,
+    contactLastModOffset + 4,
+    _le32(lastMod),
+  );
   return frame;
 }
 
@@ -87,47 +91,54 @@ List<Uint8List> chunkBytes(Uint8List frame, int chunkSize) {
 
 void main() {
   group('BleFrameAssembler', () {
-    test('reassembles chunked contacts and survives interleaved push frames', () {
-      final assembler = BleFrameAssembler();
-      final frames = <Uint8List>[];
-      const total = 750;
+    test(
+      'reassembles chunked contacts and survives interleaved push frames',
+      () {
+        final assembler = BleFrameAssembler();
+        final frames = <Uint8List>[];
+        const total = 750;
 
-      frames.addAll(assembler.push(buildContactsStartFrame(total)));
+        frames.addAll(assembler.push(buildContactsStartFrame(total)));
 
-      for (var i = 0; i < total; i++) {
-        final contact = buildSyntheticContactFrame(
-          index: i,
-          name: 'Rep$i',
-          type: i.isEven ? advTypeRepeater : advTypeChat,
+        for (var i = 0; i < total; i++) {
+          final contact = buildSyntheticContactFrame(
+            index: i,
+            name: 'Rep$i',
+            type: i.isEven ? advTypeRepeater : advTypeChat,
+          );
+          // Split contact across BLE-sized chunks.
+          for (final chunk in chunkBytes(contact, 20)) {
+            frames.addAll(assembler.push(chunk));
+          }
+          // Interleave a push every 10 contacts mid-stream.
+          if (i % 10 == 9) {
+            frames.addAll(assembler.push(buildPushAdvertFrame()));
+          }
+        }
+
+        frames.addAll(assembler.push(buildEndOfContactsFrame(lastmod: 42)));
+
+        final contacts = frames
+            .map(parseRadioContact)
+            .whereType<RadioContact>()
+            .toList();
+        expect(contacts.length, total);
+
+        final starts = frames.where(
+          (f) => f.isNotEmpty && f[0] == respCodeContactsStart,
         );
-        // Split contact across BLE-sized chunks.
-        for (final chunk in chunkBytes(contact, 20)) {
-          frames.addAll(assembler.push(chunk));
-        }
-        // Interleave a push every 10 contacts mid-stream.
-        if (i % 10 == 9) {
-          frames.addAll(assembler.push(buildPushAdvertFrame()));
-        }
-      }
+        final ends = frames.where(isEndOfContactsFrame);
+        expect(starts.length, 1);
+        expect(parseContactsStartTotal(starts.first), total);
+        expect(ends.length, 1);
 
-      frames.addAll(assembler.push(buildEndOfContactsFrame(lastmod: 42)));
-
-      final contacts = frames
-          .map(parseRadioContact)
-          .whereType<RadioContact>()
-          .toList();
-      expect(contacts.length, total);
-
-      final starts = frames.where((f) => f.isNotEmpty && f[0] == respCodeContactsStart);
-      final ends = frames.where(isEndOfContactsFrame);
-      expect(starts.length, 1);
-      expect(parseContactsStartTotal(starts.first), total);
-      expect(ends.length, 1);
-
-      // Push frames were emitted (not swallowed into contacts).
-      final pushes = frames.where((f) => f.isNotEmpty && f[0] == pushCodeNewAdvert);
-      expect(pushes.length, greaterThan(0));
-    });
+        // Push frames were emitted (not swallowed into contacts).
+        final pushes = frames.where(
+          (f) => f.isNotEmpty && f[0] == pushCodeNewAdvert,
+        );
+        expect(pushes.length, greaterThan(0));
+      },
+    );
 
     test('drops incomplete contact when a push arrives mid-frame', () {
       final warns = <String>[];
@@ -146,78 +157,23 @@ void main() {
   });
 
   group('collectContactsFromInbound', () {
-    test('collects 900 contacts across stalls and interleaved pushes', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final progressEvents = <ContactSyncProgress>[];
-      final requests = <int?>[];
-      const total = 900;
+    test(
+      'one-pass completes with exactly one GET_CONTACTS and interleaved PUSH frames ignored',
+      () async {
+        final controller = StreamController<Uint8List>();
+        final progressEvents = <ContactSyncProgress>[];
+        final requests = <int?>[];
+        const total = 40;
 
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          requests.add(since);
-          // Gaps of 80ms would trip a short total timeout. A push between
-          // the two halves of a stall must reset the per-frame idle timer.
-          controller.add(buildContactsStartFrame(total));
-          for (var i = 0; i < total; i++) {
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                lastMod: 1000 + i,
-              ),
-            );
-            if (i % 10 == 9) {
-              controller.add(buildPushAdvertFrame());
-            }
-            if (i % 100 == 99) {
-              await Future<void>.delayed(const Duration(milliseconds: 80));
-              controller.add(buildPushAdvertFrame());
-              await Future<void>.delayed(const Duration(milliseconds: 80));
-            }
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: 1000 + total - 1));
-        },
-        onProgress: progressEvents.add,
-        idleTimeout: const Duration(milliseconds: 150),
-        maxAttempts: 2,
-        retryDelay: Duration.zero,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 20));
-      expect(requests, [null]);
-      expect(result.sawEnd, isTrue);
-      expect(result.timedOut, isFalse);
-      expect(result.contacts.length, total);
-      expect(result.expectedTotal, total);
-      expect(result.newestLastMod, 1000 + total - 1);
-      expect(progressEvents, isNotEmpty);
-      expect(progressEvents.last.completed, isTrue);
-      expect(progressEvents.last.progressLabel, 'Contacts $total/$total');
-      final parsed = parseRadioContact(
-        buildSyntheticContactFrame(index: 7, name: 'Rep7', lastMod: 4242),
-      );
-      expect(parsed!.lastMod, 4242);
-      await controller.close();
-    });
-
-    test('resumes a mid-sync stop from the newest stored lastmod', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final requests = <int?>[];
-      final store = <String, String>{};
-      final storeLastMods = <String, int>{};
-      final storeSizesAtRequest = <int>[];
-      const total = 900;
-      const firstBatch = 440;
-
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          storeSizesAtRequest.add(store.length);
-          requests.add(since);
-          if (requests.length == 1) {
+        final future = collectContactsFromInbound(
+          inbound: controller.stream,
+          sendGetContacts: (since) async {
+            requests.add(since);
             controller.add(buildContactsStartFrame(total));
-            for (var i = 0; i < firstBatch; i++) {
+            // Not a contact frame. Must not end the pass or add a row.
+            controller.add(Uint8List.fromList([respCodeSelfInfo]));
+            controller.add(Uint8List.fromList([respCodeErr, 4]));
+            for (var i = 0; i < total; i++) {
               controller.add(
                 buildSyntheticContactFrame(
                   index: i,
@@ -226,368 +182,183 @@ void main() {
                   lastMod: 1000 + i,
                 ),
               );
-              if (i % 10 == 9) controller.add(buildPushAdvertFrame());
+              if (i % 5 == 4) controller.add(buildPushAdvertFrame());
             }
-            return;
-          }
-          final threshold = since ?? 0;
-          for (var i = 0; i < total; i++) {
-            final lastMod = 1000 + i;
-            if (lastMod <= threshold) continue;
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                type: i.isEven ? advTypeRepeater : advTypeRoom,
-                lastMod: lastMod,
-              ),
-            );
-            if (i % 17 == 0) controller.add(buildPushAdvertFrame());
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: 1000 + total - 1));
-        },
-        onContacts: (batch) async {
-          for (final contact in batch) {
-            store[contact.publicKeyPrefix] = contact.name;
-            if (contact.lastMod > 0) {
-              storeLastMods[contact.publicKeyPrefix] = contact.lastMod;
-            }
-          }
-        },
-        idleTimeout: const Duration(milliseconds: 200),
-        retryDelay: const Duration(milliseconds: 20),
-        maxAttempts: 3,
-        checkpointEvery: 25,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 10));
-      expect(requests, [null, 1000 + firstBatch - 1]);
-      expect(storeSizesAtRequest, [0, firstBatch]);
-      expect(result.sawEnd, isTrue);
-      expect(result.timedOut, isFalse);
-      expect(result.contacts.length, total);
-      expect(result.expectedTotal, total);
-      expect(store.length, total);
-      expect(storeLastMods.length, total);
-      expect(storeLastMods.values.reduce((a, b) => a > b ? a : b), 1000 + total - 1);
-      // Companion names are stored locally; the sync result keeps their types.
-      final chatPrefix = syntheticContactPrefix(1);
-      expect(result.contactTypes[chatPrefix], advTypeChat);
-      await controller.close();
-    });
-
-    test('full dump follows a since-filter that ends short of the total', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final requests = <int?>[];
-      const total = 10;
-      final seedContacts = <String, String>{};
-      final seedTypes = <String, int>{};
-      final seedLastMods = <String, int>{};
-      for (var i = 0; i < 4; i++) {
-        final frame = buildSyntheticContactFrame(
-          index: i,
-          name: 'Rep$i',
-          lastMod: i + 1,
+            controller.add(buildEndOfContactsFrame(lastmod: 1000 + total - 1));
+          },
+          onProgress: progressEvents.add,
         );
-        final parsed = parseRadioContact(frame)!;
-        seedContacts[parsed.publicKeyPrefix] = parsed.name;
-        seedTypes[parsed.publicKeyPrefix] = parsed.type;
-        seedLastMods[parsed.publicKeyPrefix] = parsed.lastMod;
-      }
 
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        initialSince: 4,
-        seedContacts: seedContacts,
-        seedTypes: seedTypes,
-        seedLastMods: seedLastMods,
-        sendGetContacts: (since) async {
-          requests.add(since);
-          if (requests.length == 1) {
-            controller.add(buildContactsStartFrame(total));
-            for (var i = 4; i < 6; i++) {
-              controller.add(
-                buildSyntheticContactFrame(
-                  index: i,
-                  name: 'Rep$i',
-                  lastMod: i + 1,
-                ),
-              );
-            }
-            controller.add(buildEndOfContactsFrame(lastmod: 6));
-            return;
-          }
-          controller.add(buildContactsStartFrame(total));
-          for (var i = 0; i < total; i++) {
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                lastMod: i + 1,
-              ),
-            );
-            if (i == 3) controller.add(buildPushAdvertFrame());
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: total));
-        },
-        idleTimeout: const Duration(seconds: 2),
-        retryDelay: Duration.zero,
-        maxAttempts: 3,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 5));
-      expect(requests, [4, null]);
-      expect(result.sawEnd, isTrue);
-      expect(result.timedOut, isFalse);
-      expect(result.contacts.length, total);
-      expect(result.expectedTotal, total);
-      await controller.close();
-    });
-
-    test('idle timeout fires when frames stop arriving before END', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          controller.add(buildContactsStartFrame(100));
-          for (var i = 0; i < 5; i++) {
-            controller.add(buildSyntheticContactFrame(index: i, name: 'Rep$i'));
-          }
-          // No END frame — wait for idle timeout.
-        },
-        idleTimeout: const Duration(milliseconds: 200),
-        retryDelay: const Duration(milliseconds: 20),
-        maxAttempts: 2,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 3));
-      expect(result.timedOut, isTrue);
-      expect(result.sawEnd, isFalse);
-      expect(result.contacts.length, 5);
-      expect(result.isComplete, isFalse);
-      await controller.close();
-    });
-
-    test('end frame arriving short is incomplete and keeps progress up', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final requests = <int?>[];
-      final progressEvents = <ContactSyncProgress>[];
-      const total = 10;
-      const partial = 6;
-
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          requests.add(since);
-          controller.add(buildContactsStartFrame(total));
-          for (var i = 0; i < partial; i++) {
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                lastMod: 1000 + i,
-              ),
-            );
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: 1000 + partial - 1));
-        },
-        onProgress: progressEvents.add,
-        idleTimeout: const Duration(seconds: 2),
-        retryDelay: Duration.zero,
-        maxAttempts: 3,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 5));
-      // Full dump ends short, since resume adds nothing new, then one full
-      // dump still ends short. END is not success while stored < total.
-      expect(requests, [null, 1000 + partial - 1, null]);
-      expect(result.sawEnd, isTrue);
-      expect(result.timedOut, isFalse);
-      expect(result.attempts, 3);
-      expect(result.contacts.length, partial);
-      expect(result.expectedTotal, total);
-      expect(result.isComplete, isFalse);
-      expect(progressEvents, isNotEmpty);
-      expect(progressEvents.last.active, isFalse);
-      expect(progressEvents.last.incomplete, isTrue);
-      expect(progressEvents.last.completed, isFalse);
-      expect(
-        progressEvents.last.statusLabel,
-        'Contacts $partial/$total incomplete',
-      );
-      for (final event in progressEvents.take(progressEvents.length - 1)) {
-        expect(event.active, isTrue);
-        expect(event.completed, isFalse);
-      }
-      await controller.close();
-    });
-
-    test('out-of-order lastmod is recovered by a full dump', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final requests = <int?>[];
-      const total = 4;
-      // Not sorted by arrival. Newest lastmod is the first contact, so a
-      // since resume skips the contact that has not been sent yet.
-      const lastMods = <int>[80, 10, 50, 20];
-      const missingIndex = 3;
-
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          requests.add(since);
-          controller.add(buildContactsStartFrame(total));
-          if (requests.length == 1) {
-            for (var i = 0; i < missingIndex; i++) {
-              controller.add(
-                buildSyntheticContactFrame(
-                  index: i,
-                  name: 'Rep$i',
-                  lastMod: lastMods[i],
-                ),
-              );
-            }
-            controller.add(buildEndOfContactsFrame(lastmod: lastMods.first));
-            return;
-          }
-          if (since != null) {
-            for (var i = 0; i < total; i++) {
-              if (lastMods[i] <= since) continue;
-              controller.add(
-                buildSyntheticContactFrame(
-                  index: i,
-                  name: 'Rep$i',
-                  lastMod: lastMods[i],
-                ),
-              );
-            }
-            controller.add(buildEndOfContactsFrame(lastmod: since));
-            return;
-          }
-          for (var i = 0; i < total; i++) {
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                lastMod: lastMods[i],
-              ),
-            );
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: lastMods.first));
-        },
-        idleTimeout: const Duration(seconds: 2),
-        retryDelay: Duration.zero,
-        maxAttempts: 4,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 5));
-      expect(requests, [null, lastMods.first, null]);
-      expect(result.isComplete, isTrue);
-      expect(result.contacts.length, total);
-      final missing = syntheticContactPrefix(missingIndex);
-      expect(result.contacts[missing], 'Rep$missingIndex');
-      expect(result.lastMods[missing], lastMods[missingIndex]);
-      await controller.close();
-    });
-
-    test('since resume that adds no contacts falls back to a full dump', () async {
-      final controller = StreamController<Uint8List>.broadcast();
-      final requests = <int?>[];
-      final progressEvents = <ContactSyncProgress>[];
-      const total = 5;
-      final seedContacts = <String, String>{};
-      final seedTypes = <String, int>{};
-      final seedLastMods = <String, int>{};
-      for (var i = 0; i < 2; i++) {
-        final frame = buildSyntheticContactFrame(
-          index: i,
-          name: 'Rep$i',
-          lastMod: i == 0 ? 10 : 40,
+        final result = await future.timeout(const Duration(seconds: 5));
+        expect(requests, [null]);
+        expect(result.outcome, ContactSyncOutcome.completed);
+        expect(result.isComplete, isTrue);
+        expect(result.contacts.length, total);
+        expect(result.expectedTotal, total);
+        expect(result.framesSeen, greaterThan(total));
+        expect(progressEvents.last.completed, isTrue);
+        expect(progressEvents.last.disconnected, isFalse);
+        expect(
+          progressEvents.last.statusLabel,
+          'Contacts $total/$total complete',
         );
-        final parsed = parseRadioContact(frame)!;
-        seedContacts[parsed.publicKeyPrefix] = parsed.name;
-        seedTypes[parsed.publicKeyPrefix] = parsed.type;
-        seedLastMods[parsed.publicKeyPrefix] = parsed.lastMod;
-      }
+        final chatPrefix = syntheticContactPrefix(1);
+        expect(result.contactTypes[chatPrefix], advTypeChat);
+        await controller.close();
+      },
+    );
+
+    test('sends the caller since once and does not request again', () async {
+      final controller = StreamController<Uint8List>();
+      final requests = <int?>[];
 
       final future = collectContactsFromInbound(
         inbound: controller.stream,
-        initialSince: 40,
-        seedContacts: seedContacts,
-        seedTypes: seedTypes,
-        seedLastMods: seedLastMods,
+        initialSince: 42,
         sendGetContacts: (since) async {
           requests.add(since);
-          controller.add(buildContactsStartFrame(total));
-          if (since != null) {
-            controller.add(buildEndOfContactsFrame(lastmod: since));
-            return;
-          }
-          for (var i = 0; i < total; i++) {
-            controller.add(
-              buildSyntheticContactFrame(
-                index: i,
-                name: 'Rep$i',
-                lastMod: 10 + i,
-              ),
-            );
-          }
-          controller.add(buildEndOfContactsFrame(lastmod: 10 + total - 1));
-        },
-        onProgress: progressEvents.add,
-        idleTimeout: const Duration(seconds: 2),
-        retryDelay: Duration.zero,
-        maxAttempts: 3,
-      );
-
-      final result = await future.timeout(const Duration(seconds: 5));
-      expect(requests, [40, null]);
-      expect(result.sawEnd, isTrue);
-      expect(result.timedOut, isFalse);
-      expect(result.isComplete, isTrue);
-      expect(result.contacts.length, total);
-      expect(result.expectedTotal, total);
-      expect(progressEvents.last.statusLabel, 'Contacts $total/$total complete');
-      expect(progressEvents.last.active, isFalse);
-      for (final event in progressEvents.take(progressEvents.length - 1)) {
-        expect(event.active, isTrue);
-      }
-      await controller.close();
-    });
-
-    test('counts emoji, non-Latin, 1-char, and empty names once per prefix', () async {
-      const names = <String>['😀', '节点', 'Q', ''];
-      final controller = StreamController<Uint8List>.broadcast();
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          controller.add(buildContactsStartFrame(names.length));
-          for (var i = 0; i < names.length; i++) {
-            controller.add(
-              buildSyntheticContactFrame(index: i + 1, name: names[i]),
-            );
-          }
-          // Same public-key prefix as the empty name. Must not add a row.
+          controller.add(buildContactsStartFrame(1));
           controller.add(
-            buildSyntheticContactFrame(index: names.length, name: ''),
+            buildSyntheticContactFrame(index: 3, name: 'Rep3', lastMod: 50),
           );
-          controller.add(buildEndOfContactsFrame());
+          controller.add(buildPushAdvertFrame());
+          controller.add(buildEndOfContactsFrame(lastmod: 50));
         },
-        idleTimeout: const Duration(seconds: 2),
-        retryDelay: Duration.zero,
-        maxAttempts: 1,
       );
 
       final result = await future.timeout(const Duration(seconds: 5));
-      expect(result.sawEnd, isTrue);
-      expect(result.contacts.length, names.length);
-      expect(result.isComplete, isTrue);
-      for (var i = 0; i < names.length; i++) {
-        final prefix = syntheticContactPrefix(i + 1);
-        expect(result.contacts.containsKey(prefix), isTrue);
-        expect(result.contacts[prefix], names[i]);
-      }
+      expect(requests, [42]);
+      expect(result.outcome, ContactSyncOutcome.completed);
+      expect(result.contacts.length, 1);
       await controller.close();
     });
+
+    test(
+      'ERR before START is incomplete and does not send a second request',
+      () async {
+        final controller = StreamController<Uint8List>();
+        final requests = <int?>[];
+        final progressEvents = <ContactSyncProgress>[];
+
+        final future = collectContactsFromInbound(
+          inbound: controller.stream,
+          sendGetContacts: (since) async {
+            requests.add(since);
+            controller.add(Uint8List.fromList([respCodeErr]));
+            controller.add(buildPushAdvertFrame());
+          },
+          onProgress: progressEvents.add,
+        );
+
+        final result = await future.timeout(const Duration(seconds: 2));
+        expect(requests, [null]);
+        expect(result.outcome, ContactSyncOutcome.incomplete);
+        expect(result.isComplete, isFalse);
+        expect(result.contacts, isEmpty);
+        expect(progressEvents.last.incomplete, isTrue);
+        expect(progressEvents.last.disconnected, isFalse);
+        expect(progressEvents.last.completed, isFalse);
+        expect(
+          progressEvents.last.statusLabel,
+          isNot('Bluetooth disconnected'),
+        );
+        await controller.close();
+      },
+    );
+
+    test('disconnect mid-stream is disconnected', () async {
+      final controller = StreamController<Uint8List>();
+      final requests = <int?>[];
+      final progressEvents = <ContactSyncProgress>[];
+      const total = 8;
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          controller.add(buildContactsStartFrame(total));
+          controller.add(buildSyntheticContactFrame(index: 0, name: 'Rep0'));
+          controller.add(buildPushAdvertFrame());
+          await controller.close();
+        },
+        onProgress: progressEvents.add,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 2));
+      expect(requests, [null]);
+      expect(result.outcome, ContactSyncOutcome.disconnected);
+      expect(result.isComplete, isFalse);
+      expect(result.contacts.length, 1);
+      expect(result.expectedTotal, total);
+      expect(progressEvents.last.disconnected, isTrue);
+      expect(progressEvents.last.incomplete, isFalse);
+      expect(progressEvents.last.active, isFalse);
+      expect(progressEvents.last.statusLabel, 'Bluetooth disconnected');
+    });
+
+    test('linkClosed mid-pass is disconnected and does not retry', () async {
+      final controller = StreamController<Uint8List>();
+      final link = Completer<void>();
+      final requests = <int?>[];
+      final progressEvents = <ContactSyncProgress>[];
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        linkClosed: link.future,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          controller.add(buildContactsStartFrame(3));
+          controller.add(buildSyntheticContactFrame(index: 2, name: 'Rep2'));
+          await pumpEventQueue();
+          link.complete();
+        },
+        onProgress: progressEvents.add,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 2));
+      expect(requests, [null]);
+      expect(result.outcome, ContactSyncOutcome.disconnected);
+      expect(result.isComplete, isFalse);
+      expect(result.contacts.length, 1);
+      expect(progressEvents.last.statusLabel, 'Bluetooth disconnected');
+      expect(progressEvents.last.incomplete, isFalse);
+      await controller.close();
+    });
+
+    test(
+      'counts emoji, non-Latin, 1-char, and empty names once per prefix',
+      () async {
+        const names = <String>['😀', '节点', 'Q', ''];
+        final controller = StreamController<Uint8List>.broadcast();
+        final future = collectContactsFromInbound(
+          inbound: controller.stream,
+          sendGetContacts: (since) async {
+            controller.add(buildContactsStartFrame(names.length));
+            for (var i = 0; i < names.length; i++) {
+              controller.add(
+                buildSyntheticContactFrame(index: i + 1, name: names[i]),
+              );
+            }
+            // Same public-key prefix as the empty name. Must not add a row.
+            controller.add(
+              buildSyntheticContactFrame(index: names.length, name: ''),
+            );
+            controller.add(buildEndOfContactsFrame());
+          },
+        );
+
+        final result = await future.timeout(const Duration(seconds: 5));
+        expect(result.outcome, ContactSyncOutcome.completed);
+        expect(result.contacts.length, names.length);
+        expect(result.isComplete, isTrue);
+        for (var i = 0; i < names.length; i++) {
+          final prefix = syntheticContactPrefix(i + 1);
+          expect(result.contacts.containsKey(prefix), isTrue);
+          expect(result.contacts[prefix], names[i]);
+        }
+        await controller.close();
+      },
+    );
   });
 
   group('parseContactsStartTotal', () {
@@ -596,39 +367,18 @@ void main() {
       expect(parseContactsStartTotal(Uint8List.fromList([2])), isNull);
     });
 
-    test('PUSH frames reset idle so sync survives advert gaps', () async {
-      final controller = StreamController<Uint8List>();
-      final start = DateTime.now();
-      final future = collectContactsFromInbound(
-        inbound: controller.stream,
-        sendGetContacts: (since) async {
-          controller.add(buildContactsStartFrame(2));
-          controller.add(buildSyntheticContactFrame(index: 0, name: 'Rep0'));
-        },
-        idleTimeout: const Duration(milliseconds: 200),
-        maxAttempts: 1,
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      controller.add(buildPushAdvertFrame());
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      controller.add(buildPushAdvertFrame());
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      controller.add(buildSyntheticContactFrame(index: 1, name: 'Rep1'));
-      controller.add(buildEndOfContactsFrame());
-      final result = await future;
-      await controller.close();
-      expect(result.sawEnd, isTrue);
-      expect(result.contacts.length, 2);
-      expect(DateTime.now().difference(start).inMilliseconds, greaterThan(200));
-    });
-
     test('reads the END frame lastmod', () {
-      expect(parseEndOfContactsLastMod(buildEndOfContactsFrame(lastmod: 99)), 99);
+      expect(
+        parseEndOfContactsLastMod(buildEndOfContactsFrame(lastmod: 99)),
+        99,
+      );
       expect(parseEndOfContactsLastMod(Uint8List.fromList([4])), isNull);
     });
   });
 
-  testWidgets('contacts page shows Contacts n/total while syncing', (tester) async {
+  testWidgets('contacts page shows Contacts n/total while syncing', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       const MaterialApp(
         home: ContactsPage(
@@ -645,39 +395,57 @@ void main() {
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
 
-  testWidgets('contacts page ends with Contacts n/total complete or incomplete', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: ContactsPage(
-          contacts: {'AA': 'Rep'},
-          syncProgress: ContactSyncProgress(
-            active: false,
-            received: 829,
-            expected: 899,
-            incomplete: true,
+  testWidgets(
+    'contacts page ends with Contacts n/total complete or incomplete',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ContactsPage(
+            contacts: {'AA': 'Rep'},
+            syncProgress: ContactSyncProgress(
+              active: false,
+              received: 829,
+              expected: 899,
+              incomplete: true,
+            ),
           ),
         ),
-      ),
-    );
-    expect(find.text('Contacts 829/899 incomplete'), findsOneWidget);
-    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      );
+      expect(find.text('Contacts 829/899 incomplete'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
 
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: ContactsPage(
-          contacts: {'AA': 'Rep'},
-          syncProgress: ContactSyncProgress(
-            active: false,
-            received: 899,
-            expected: 899,
-            completed: true,
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ContactsPage(
+            contacts: {'AA': 'Rep'},
+            syncProgress: ContactSyncProgress(
+              active: false,
+              received: 899,
+              expected: 899,
+              completed: true,
+            ),
           ),
         ),
-      ),
-    );
-    expect(find.text('Contacts 899/899 complete'), findsOneWidget);
-    expect(find.byType(LinearProgressIndicator), findsNothing);
-  });
+      );
+      expect(find.text('Contacts 899/899 complete'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ContactsPage(
+            contacts: {'AA': 'Rep'},
+            syncProgress: ContactSyncProgress(
+              active: false,
+              received: 3,
+              expected: 10,
+              disconnected: true,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Bluetooth disconnected'), findsOneWidget);
+      expect(find.textContaining('incomplete'), findsNothing);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+    },
+  );
 }
