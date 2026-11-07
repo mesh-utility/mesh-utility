@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- update_installer_io.dart saves the APK under getTemporaryDirectory()/updates.
+     path_provider maps that call to Context.getCacheDir(), which is cache-path. -->
 <paths>
     <cache-path name="apk_cache" path="updates/" />
     <external-cache-path name="apk_ext_cache" path="updates/" />

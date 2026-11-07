@@ -8,7 +8,21 @@ import 'package:path_provider/path_provider.dart';
 
 const _updateChannel = MethodChannel('org.meshutility.app/updates');
 
-Future<String> _download(Uri url, File dest, {void Function(String)? onStatus}) async {
+const _unknownSourcesMessage =
+    'Allow installing unknown apps for Mesh Utility, then try again.';
+
+Future<String> _promptToAllowUnknownAppSources() async {
+  try {
+    await _updateChannel.invokeMethod<void>('openUnknownAppSourcesSettings');
+  } catch (_) {}
+  return _unknownSourcesMessage;
+}
+
+Future<String> _download(
+  Uri url,
+  File dest, {
+  void Function(String)? onStatus,
+}) async {
   onStatus?.call('Downloading…');
   final client = http.Client();
   try {
@@ -56,16 +70,15 @@ Future<String?> installAndroidApk({
   final asset = androidApkAssetName(release.alphaNumber);
 
   try {
-    final can = await _updateChannel.invokeMethod<bool>('canRequestPackageInstalls');
+    final can = await _updateChannel.invokeMethod<bool>(
+      'canRequestPackageInstalls',
+    );
     if (can == false) {
-      await _updateChannel.invokeMethod('openUnknownAppSourcesSettings');
-      return 'Allow installing unknown apps for Mesh Utility, then try again.';
+      return await _promptToAllowUnknownAppSources();
     }
   } catch (_) {}
 
-  final dir = Directory(
-    '${(await getTemporaryDirectory()).path}/updates',
-  );
+  final dir = Directory('${(await getTemporaryDirectory()).path}/updates');
   await dir.create(recursive: true);
   final apk = File('${dir.path}/$asset');
   final err = await _download(Uri.parse(url), apk, onStatus: onStatus);
@@ -83,6 +96,11 @@ Future<String?> installAndroidApk({
   try {
     await _updateChannel.invokeMethod('installApk', {'path': apk.path});
     return null;
+  } on PlatformException catch (e) {
+    if (e.code == 'unknown_sources') {
+      return await _promptToAllowUnknownAppSources();
+    }
+    return 'Could not launch installer: $e';
   } catch (e) {
     return 'Could not launch installer: $e';
   }
@@ -135,7 +153,12 @@ Future<String?> installLinuxArchive({
       await staging.delete(recursive: true);
     }
     await staging.create(recursive: true);
-    final tar = await Process.run('tar', ['-xzf', archive.path, '-C', staging.path]);
+    final tar = await Process.run('tar', [
+      '-xzf',
+      archive.path,
+      '-C',
+      staging.path,
+    ]);
     if (tar.exitCode != 0) {
       return 'Extract failed: ${tar.stderr}';
     }

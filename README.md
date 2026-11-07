@@ -4,7 +4,7 @@
 
 Flutter client for MeshCore coverage mapping. It scans over BLE, keeps scans on the device, and syncs coverage to a Cloudflare Worker.
 
-**Current release: Alpha-18** (`pubspec.yaml` version `1.0.0-alpha.18+18`).
+**Current release: Alpha-19** (`pubspec.yaml` version `1.0.0-alpha.19+19`).
 
 Releases are full GitHub releases (not prereleases) tagged `Alpha-N`. The app version in pubspec is `1.0.0-alpha.N+N`. The side nav footer reads **Mesh Utility Alpha-N**, taken from the installed app version.
 
@@ -36,7 +36,7 @@ Add that repo (or open the link on a device with Obtainium). Obtainium tracks fu
 On Android and Linux, open **Settings → App updates**.
 
 - **Check for updates** looks up the latest full GitHub release. On startup the app checks again when the last check was at least 12 hours ago.
-- **Android:** the update downloads the APK, verifies it against `SHA256SUMS.txt`, and opens the system installer.
+- **Android:** the update downloads the APK, verifies it against `SHA256SUMS.txt`, and opens the system installer. Alpha-17 and Alpha-18 cannot open that installer; install Alpha-19 once from the GitHub release or Obtainium.
 - **Linux:** **Install update** downloads the `tar.gz`, verifies the checksum, swaps the install directory while keeping the previous tree as a `.bak`, and restarts the app.
 
 Web, Windows, iOS, and macOS do not offer this updater.
@@ -127,7 +127,7 @@ chmod +x install_mesh_utility.sh
 To install a specific release:
 
 ```bash
-./install_mesh_utility.sh Alpha-18
+./install_mesh_utility.sh Alpha-19
 ```
 
 ## Coverage hex grid
@@ -162,7 +162,8 @@ Details, secrets, and the branch list are in [docs/ci-cd.md](./docs/ci-cd.md).
 
 ## Release notes
 
-- [Alpha 18](./docs/releases/alpha-18.md) (current)
+- [Alpha 19](./docs/releases/alpha-19.md) (current)
+- [Alpha 18](./docs/releases/alpha-18.md)
 - [Alpha 8](./docs/releases/alpha-8.md)
 - [Alpha 7](./docs/releases/alpha-7.md)
 - [Alpha 6](./docs/releases/alpha-6.md)

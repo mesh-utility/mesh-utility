@@ -12,7 +12,7 @@ const String kAppVersionFromEnvironment = String.fromEnvironment('APP_VERSION');
 ///
 /// Native builds prefer [PackageInfo]. Web builds prefer [kAppVersionFromEnvironment].
 /// `test/app_version_test.dart` fails if this drifts from pubspec.yaml.
-const String kGeneratedAppVersion = '1.0.0-alpha.18+18';
+const String kGeneratedAppVersion = '1.0.0-alpha.19+19';
 
 /// Version known at startup, before [loadAppVersion] finishes.
 String get kAppVersionLabel {
@@ -136,7 +136,7 @@ String alphaReleaseLabel(String version) {
   return 'Alpha-$n';
 }
 
-/// Side-nav footer, e.g. `Mesh Utility Alpha-18`.
+/// Side-nav footer, e.g. `Mesh Utility Alpha-19`.
 String meshUtilityFooterLabel(String version) =>
     'Mesh Utility ${alphaReleaseLabel(version)}';
 

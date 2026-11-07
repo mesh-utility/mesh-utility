@@ -74,6 +74,16 @@ class MainActivity : FlutterActivity() {
                             result.error("arg", "path required", null)
                             return@setMethodCallHandler
                         }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()
+                        ) {
+                            result.error(
+                                "unknown_sources",
+                                "Allow installing unknown apps for Mesh Utility, then try again.",
+                                null,
+                            )
+                            return@setMethodCallHandler
+                        }
                         try {
                             val file = File(path)
                             if (!file.exists()) {
