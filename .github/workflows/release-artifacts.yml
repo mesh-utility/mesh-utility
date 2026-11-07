@@ -28,6 +28,9 @@ jobs:
   # TODO: Re-enable macOS and iOS artifact jobs here once platform
   # packaging/signing paths are stable. Keep release artifacts under this
   # single workflow trigger.
+  # Windows is not a supported download as of Alpha-18. The job below may
+  # fail; publish does not require it. Do not document a Windows zip as
+  # available unless that job is actually shipping.
   build-android:
     name: Build Android
     runs-on: ubuntu-latest
@@ -225,7 +228,8 @@ jobs:
       - build-linux
       - build-windows
       - build-web
-    # Publish whatever built, as long as Android did (Windows can fail on plugin issues).
+    # Publish whatever built, as long as Android succeeded.
+    # Windows can fail and is not a current download; a missing Windows zip is expected.
     if: ${{ !cancelled() && needs.build-android.result == 'success' }}
     steps:
       - name: Download staged artifacts

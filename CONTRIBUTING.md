@@ -19,7 +19,7 @@ npm run check
 
 ## Branching and PRs
 
-- Create feature branches from `mesh-utility`.
+- Create feature branches from `main`.
 - Keep PRs focused and small where possible.
 - Include logs/screenshots for UI, BLE, and map behavior changes.
 - Reference issue IDs when applicable.

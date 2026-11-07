@@ -1,119 +1,126 @@
-# CI/CD Setup
+# CI/CD
 
-This repository uses four GitHub Actions workflows:
+This repository has three GitHub Actions workflows:
 
-- `CI` (`.github/workflows/ci.yml`): static checks/tests only, no release builds.
-- `Deploy` (`.github/workflows/deploy.yml`): deploys Cloudflare Worker + Flutter web to Cloudflare Pages.
-- `iOS Archive` (`.github/workflows/ios-ipa.yml`): manual-only workflow for building an unsigned iOS archive for an existing release tag.
-- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): on GitHub `published`/`prereleased` releases, builds Android/Linux/Windows/web and attaches non-web artifacts to the release page.
+- `CI` (`.github/workflows/ci.yml`): analyze and test on pull requests and branch pushes. It does not build release artifacts.
+- `Deploy` (`.github/workflows/deploy.yml`): on a push to `main` (also `master` and `mesh-utility`) or a manual run, deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages.
+- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): when a GitHub release is published or prereleased, or when re-run by hand with a `release_tag`, builds artifacts and attaches the non-web files to that release.
 
-## 1) Required GitHub Secrets
+Publishing a full release tagged `Alpha-N` is what ships Android and Linux downloads. The live site at https://mesh-utility.org updates from the deploy workflow, not from the release-artifact web build.
 
-Add these in **GitHub → Settings → Secrets and variables → Actions**:
+There is no separate iOS archive workflow. macOS and iOS release jobs are not enabled.
+
+## 1) Required GitHub secrets
+
+In **GitHub → Settings → Secrets and variables → Actions**:
+
+Deploy:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
 Recommended Cloudflare token scopes:
 
-- `Workers Scripts:Edit`
-- `Workers KV/D1/Durable Objects` as needed by the worker
-- `Pages:Edit`
-- Account scope limited to your Cloudflare account only
+- Workers Scripts: Edit
+- Workers routes on the zone (zone read, plus Workers Routes edit) so `mesh-utility.org/api/*` can be published
+- D1 as needed by the worker
+- Pages: Edit
+- Limit the token to this Cloudflare account
 
-## 2) Required Cloudflare Worker Secret
+Release signing (Android APK). Names only; never commit the keystore or passwords:
 
-Set this once (outside git):
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Published APKs use that stable upload key starting with Alpha-12. If the keystore secret is missing, the Android job falls back to debug signing.
+
+## 2) Worker secret
+
+Set once, outside git:
 
 ```bash
 cd worker
 npx wrangler secret put GITHUB_TOKEN
 ```
 
-`GITHUB_TOKEN` is consumed by the worker runtime, not GitHub Actions.
+`GITHUB_TOKEN` is read by the Worker at runtime. It is not a GitHub Actions secret.
 
-## 3) Environment Protection
+## 3) Environment
 
-Create a GitHub Environment named `production` and configure:
+The deploy job uses the GitHub Environment `production`.
 
-- Required reviewers for deployment approvals
-- Optional wait timer
-- Restrict deployment branches to `mesh-utility`
+Allow deployments from `main`. The workflow also triggers on `master` and `mesh-utility`, so those branches need to be allowed too if you still push them.
 
-The deploy workflow already targets `environment: production`.
+## 4) Branch protection
 
-## 4) Branch Protection
+Protect `main`:
 
-Protect branch `mesh-utility`:
-
-- Require PR before merge
-- Require status checks to pass:
+- Require a pull request before merge
+- Require status checks:
   - `Flutter Analyze & Test`
   - `Worker Type Check`
-- Restrict force-push and deletion
+- Block force-push and deletion
 
-## 5) Deploy Trigger Behavior
+## 5) Deploy
 
 `deploy.yml` triggers on:
 
-- push to `mesh-utility`
+- push to `main`, `master`, or `mesh-utility`
 - manual `workflow_dispatch`
 
-Deployment steps:
+Steps:
 
-1. Deploy worker (`worker/` via Wrangler)
-2. Build Flutter web (`tool/build_web_cloudflare.sh`)
-3. Deploy `build/web` to Cloudflare Pages project `mesh-utility-tracker` on branch `mesh-utility`
+1. Deploy the Worker from `worker/` with Wrangler (`npm run deploy`).
+2. Build Flutter web with `tool/build_web_cloudflare.sh` and `WORKER_URL=https://mesh-utility.org/api`.
+3. Deploy `build/web` to the Cloudflare Pages project `mesh-utility-tracker`.
 
-## 6) Release Artifact Behavior
+The Pages production branch name in that command is `mesh-utility`. That is the Pages branch, not the git branch. A push to git `main` still deploys Worker and Pages.
+
+The Worker serves `https://mesh-utility.org/api/*` (the `/api` prefix is stripped) and keeps `workers.dev` enabled.
+
+## 6) Release artifacts
 
 `release-artifacts.yml` triggers on:
 
 - `release.published`
 - `release.prereleased`
-- manual `workflow_dispatch` with `release_tag` input (for re-running asset publish on an existing tag)
+- manual `workflow_dispatch` with `release_tag` (rebuild assets for an existing tag)
 
-`ios-ipa.yml` is currently manual-only (`workflow_dispatch`) and requires a `release_tag` input.
-TODO: move iOS (and future macOS re-enable) into `release-artifacts.yml` so all platform release builds are under one trigger.
+Current release tags are full releases named `Alpha-N`. Obtainium and the in-app updater follow those releases.
 
-Build matrix:
+Jobs:
 
-- Android (`flutter build apk --release`)
+- Android (`flutter build apk --release`), signed with the upload keystore when the secrets above are set
 - Linux (`flutter build linux --release`)
-- Windows (`flutter build windows --release`)
-- Web (`flutter build web --release`) for verification only
+- Windows (`flutter build windows --release`) — the job is in the workflow, but a Windows build is not currently available and is not a supported download. The publish job still attaches Android and Linux assets when Android succeeded, even if the Windows job failed.
+- Web (`flutter build web --release`) for verification only. The web build is not attached to the release.
 
-iOS manual archive workflow:
-
-- iOS (`flutter build ipa --release --no-codesign`)
-- Packages the resulting `.xcarchive` as `mesh-utility-<tag>-ios-xcarchive.tar.gz`
-- Uploads that tarball as both a workflow artifact and a GitHub release asset
-- Can be manually dispatched with a `release_tag` input to backfill an existing release
-
-Uploaded to release page (web excluded):
+Attached to the release when the matching job succeeded:
 
 - `mesh-utility-<tag>-android.apk`
 - `mesh-utility-<tag>-linux-x64.tar.gz`
-- `mesh-utility-<tag>-windows-x64.zip`
 - `SHA256SUMS.txt`
+- `mesh-utility-<tag>-windows-x64.zip` only if the Windows job actually produced a file. Do not document or expect that zip while the Windows build is unavailable.
 
-## 7) Open-Source Safety Rules
+macOS and iOS are not built here.
 
-- Never commit secrets, tokens, private keys, or `.env` values.
-- Keep examples only (`.env.example`, docs with placeholders).
+## 7) Open-source safety
+
+- Never commit secrets, tokens, private keys, keystores, or `.env` values.
+- Keep examples only (`wrangler.toml.example`, docs with placeholders).
 - Use GitHub secret scanning and push protection.
-- Rotate secrets immediately if leaked.
+- Rotate a secret immediately if it leaks.
+- Do not put contact names or channel message text in docs, issues, or logs.
 
-## 8) Quick Validation
+## 8) Quick validation
 
-After deploy:
+After a deploy:
 
 ```bash
 curl -I https://mesh-utility.org
-curl -I https://mesh-utility-worker.aaffiliate796.workers.dev/health
+curl -I https://mesh-utility.org/api/health
 ```
 
-From browser console on `https://mesh-utility.org`, verify no CORS errors for:
-
-- `.../history`
-- `.../scans`
+From the browser on `https://mesh-utility.org`, worker calls go to `/api/...` (for example `/api/history` and `/api/scans`) and should not fail CORS.

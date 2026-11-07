@@ -2,6 +2,10 @@
 
 Cloudflare Worker for ingesting scan data, batching writes, and committing scan files to GitHub.
 
+The live app calls it at `https://mesh-utility.org/api`. A single leading `/api` is stripped, so `/api/coverage` is the same handler as `/coverage`. `workers.dev` stays enabled alongside the zone routes.
+
+Pushing to `main` deploys this Worker and the Flutter Pages site (`.github/workflows/deploy.yml`). Publishing a GitHub release builds app artifacts only (`.github/workflows/release-artifacts.yml`); it does not deploy the Worker.
+
 ## What It Does
 - Accepts scan batches from the client (`POST /scans`)
 - Stores scans in D1 immediately
@@ -46,10 +50,12 @@ In `wrangler.toml`:
 
 ```toml
 [vars]
-GITHUB_REPO = "owner/mesh-data"
+GITHUB_REPO = "just-stuff-tm/mesh-data"
 GITHUB_BRANCH = "main"
-ALLOWED_ORIGINS = "https://mesh-utility.org,https://mesh-utility-tracker.pages.dev,https://production.mesh-utility-tracker.pages.dev,http://localhost:5173"
+ALLOWED_ORIGINS = "https://mesh-utility.org,https://www.mesh-utility.org,https://mesh-utility-tracker.pages.dev,https://*.mesh-utility-tracker.pages.dev,http://localhost:8080,http://localhost:5173,http://localhost:4173"
 ```
+
+Keep `workers_dev = true` if you add custom zone routes. Wrangler disables `workers.dev` when routes exist unless that flag is set. See `wrangler.toml.example`. Do not commit `GITHUB_TOKEN` or a production `database_id` into docs.
 
 ### 5. Run locally or deploy
 
@@ -89,12 +95,15 @@ Static-compatible alias for `GET /history`.
 ### `GET /history/:day.ndjson`
 Returns newline-delimited scan rows for a day (`YYYY-MM-DD`).
 
+A dead zone is a scan with no response (`nodes` empty, or no node entry with a numeric RSSI). A weak hearing is not a dead zone.
+
 - Optional query params:
+  - `lat`, `lng`, and `radiusMiles` together limit rows to a box around that point. Omit any one of them and the filter is not applied.
   - `deadzoneDays`:
     - `1..365` = include dead-zone rows only if the requested day is within the most recent N available scan days
     - `0` (default) = include dead-zone rows for any requested day
   - `pageSize`:
-    - `1..5000` = maximum rows per response page (default `2000`)
+    - `1..1000` = maximum rows per response page (default `1000`)
   - `cursorTimestamp` + `cursorId`:
     - keyset pagination cursor from previous response headers
 
@@ -106,12 +115,15 @@ Pagination response headers:
 ### `GET /coverage?days=7`
 Returns aggregated hex coverage zones from D1 for fast map rendering.
 
+`isDeadZone` is true only when that cell has no response. Rows that include a numeric RSSI are not dead zones.
+
 - `days`:
-  - `1..365` = most recent N days
-  - `0` = all available days
+  - `1..365` = most recent N days (default `7` when omitted)
+  - `0` = up to the 90 most recent days (`COVERAGE_MAX_DAYS`), not unbounded history
 - `deadzoneDays` (optional, defaults to `days`):
   - `1..365` = dead-zone rows are included from the most recent N available scan days
-  - `0` = include dead-zone rows from all available days
+  - `0` = same 90-day cap as `days=0`
+- `lat`, `lng`, and `radiusMiles` together limit the aggregate to a box around that point.
 
 ### `GET /coverage.json?days=7`
 Static-compatible alias for `GET /coverage`.
@@ -139,11 +151,17 @@ Request body:
 ### `GET /health`
 Health check.
 
+## What gets stored
+
+The Worker stores coverage scans: radio id, time, location, and heard nodes (id, RSSI, SNR, and a name when the client sent one).
+
+The Flutter client sends saved contact names only for repeaters and room servers. It does not upload the full contacts list, companion destinations, or channel message text. Those stay on the device (Android and Linux). Do not add sample contact names or message text to this repo.
+
 ## Batching Behavior
 - Batch size trigger: 20 scans
 - Time trigger: 5 minutes
 - Commit output: append-only updates to `scans.csv` for successful node detections only
-- Dead-zone scans (`nodes: []`) are persisted in D1 and served via `/history`, but are not written to GitHub CSV
+- Dead-zone scans (no response) are persisted in D1 and served via `/history`, but are not written to GitHub CSV
 - CSV columns:
   `row_id,radioId,timestamp,datetime_utc,latitude,longitude,altitude,nodeId,rssi,snr,observerName,nodeName,snr_repeater_to_observer,snr_observer_to_repeater`
 

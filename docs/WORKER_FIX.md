@@ -1,3 +1,7 @@
+# mesh-utility-worker D1 rows-read fix (historical)
+
+> Historical log from 2026-11-05. It is not the current operator guide. Current behavior is in the root [README.md](../README.md), [ci-cd.md](./ci-cd.md), and [worker/README.md](../worker/README.md). Pushing to `main` deploys the Worker and Pages. Do not copy tokens, account ids, or contact data out of this file.
+
 # mesh-utility-worker D1 rows-read fix (PREP only)
 
 **Date:** 2026-11-05 (America/New_York)  
