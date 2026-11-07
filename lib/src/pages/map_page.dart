@@ -127,10 +127,14 @@ class _MapPageState extends State<MapPage> {
   DateTime? _viewportBurstStart;
   bool _renderPosted = false;
   bool _renderReady = false;
-  int? _datasetToken;
+  int? _filterIdentity;
+  int _renderRequest = 0;
+  final HexRenderSession _hexSession = HexRenderSession();
   List<CoverageZone> _datasetZones = const [];
   int _renderSignature = 0;
   List<Polygon<String>> _renderPolygons = const [];
+  List<MapDrawPolygon> _drawnPolygons = const [];
+  MapDrawPolygon? _clusterPopup;
 
   @override
   void initState() {
@@ -189,10 +193,16 @@ class _MapPageState extends State<MapPage> {
     super.dispose();
   }
 
-  void _noteDataset(List<CoverageZone> zones, int token) {
-    if (token == _datasetToken) return;
-    _datasetToken = token;
+  void _noteDataset(List<CoverageZone> zones, int identity) {
+    if (identity == _filterIdentity) return;
+    _filterIdentity = identity;
     _datasetZones = zones;
+    _renderRequest++;
+    _hexSession.reset(identity);
+    _renderReady = false;
+    _renderPolygons = const [];
+    _drawnPolygons = const [];
+    _clusterPopup = null;
     _scheduleViewportRender(immediate: true);
   }
 
@@ -233,25 +243,23 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
-  void _recomputeViewportRender() {
-    if (!mounted) return;
+  MapRenderViewport? _readViewport() {
     final MapCamera camera;
     try {
       camera = _mapController.camera;
     } catch (_) {
-      return;
+      return null;
     }
     final size = camera.nonRotatedSize;
     if (!size.width.isFinite ||
         !size.height.isFinite ||
         size.width <= 0 ||
         size.height <= 0) {
-      return;
+      return null;
     }
-    final MapRenderViewport viewport;
     try {
       final bounds = camera.visibleBounds;
-      viewport = MapRenderViewport.fromCenterWidth(
+      return MapRenderViewport.fromCenterWidth(
         south: bounds.south,
         north: bounds.north,
         longitudeCenter: bounds.longitudeCenter,
@@ -259,24 +267,86 @@ class _MapPageState extends State<MapPage> {
         zoom: camera.zoom,
       );
     } catch (_) {
-      return;
+      return null;
     }
-    final drawn = selectZonesForMapRender(
-      zones: _datasetZones,
-      viewport: viewport,
-      pinZoneId: _selectedZone?.id,
-    );
-    final signature = mapDrawSignature(drawn);
+  }
+
+  void _recomputeViewportRender() {
+    if (!mounted || _filterIdentity == null) return;
+    if (_readViewport() == null) return;
+    final request = ++_renderRequest;
+    final identity = _filterIdentity!;
+    unawaited(_finishViewportRender(request: request, identity: identity));
+  }
+
+  Future<void> _finishViewportRender({
+    required int request,
+    required int identity,
+  }) async {
+    MapRenderViewport? pending = _readViewport();
+    for (var pass = 0; pass < 4; pass++) {
+      final viewport = pending;
+      if (viewport == null) return;
+      if (!mounted ||
+          request != _renderRequest ||
+          identity != _filterIdentity) {
+        return;
+      }
+      final plan = await _hexSession.render(
+        identity: identity,
+        zones: _datasetZones,
+        viewport: viewport,
+        pinZoneId: _selectedZone?.id,
+      );
+      if (!mounted || plan == null || request != _renderRequest) return;
+      if (identity != _filterIdentity) return;
+      final latest = _readViewport();
+      if (latest == null) return;
+      if (_sameViewport(latest, viewport)) {
+        _applyPlan(plan, viewport);
+        return;
+      }
+      pending = latest;
+    }
+  }
+
+  void _applyPlan(MapRenderPlan plan, MapRenderViewport viewport) {
+    final signature = mapDrawSignature(plan.polygons);
     if (_renderReady && signature == _renderSignature) return;
     _renderReady = true;
     _renderSignature = signature;
-    _renderPolygons = _polygonsForDraw(drawn);
+    _drawnPolygons = plan.polygons;
+    _renderPolygons = _polygonsForDraw(plan.polygons);
     _debugLog.debug(
       'map_render',
       'polygons=${_renderPolygons.length} dataset=${_datasetZones.length} '
-          'zoom=${camera.zoom.toStringAsFixed(2)}',
+          'zoom=${viewport.zoom.toStringAsFixed(2)} '
+          'scale=${plan.scale} nominal=${plan.nominalScale} '
+          'backstop=${plan.usedEmergencyBackstop} '
+          'dropped=${plan.droppedChildren}',
     );
     setState(() {});
+  }
+
+  bool _sameViewport(MapRenderViewport a, MapRenderViewport b) {
+    const epsilon = 1e-9;
+    return (a.zoom - b.zoom).abs() < epsilon &&
+        (a.south - b.south).abs() < epsilon &&
+        (a.north - b.north).abs() < epsilon &&
+        (a.west - b.west).abs() < epsilon &&
+        (a.east - b.east).abs() < epsilon &&
+        a.crossesAntimeridian == b.crossesAntimeridian &&
+        a.spansAllLongitudes == b.spansAllLongitudes;
+  }
+
+  MapDrawPolygon? _drawForZoneId(String zoneId) {
+    for (final draw in _drawnPolygons) {
+      if (draw.hitZoneId == zoneId) return draw;
+    }
+    for (final draw in _drawnPolygons) {
+      if (draw.containsZone(zoneId)) return draw;
+    }
+    return null;
   }
 
   void _handlePolygonTap() {
@@ -296,8 +366,10 @@ class _MapPageState extends State<MapPage> {
     }
     if (zone != null) {
       _disableAutoCenter('popup open');
+      final draw = _drawForZoneId(zoneId);
       setState(() {
         _selectedZone = zone;
+        _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
         _legendExpanded = false;
         _lastPopupDebugSignature = null;
       });
@@ -374,6 +446,7 @@ class _MapPageState extends State<MapPage> {
     if (_selectedZone != null) {
       setState(() {
         _selectedZone = null;
+        _clusterPopup = null;
       });
     }
     final target = LatLng(lat, lng);
@@ -404,6 +477,7 @@ class _MapPageState extends State<MapPage> {
     if (zone == null || !mounted) return;
     setState(() {
       _selectedZone = zone;
+      _clusterPopup = null;
       _legendExpanded = false;
       _lastPopupDebugSignature = null;
     });
@@ -451,6 +525,7 @@ class _MapPageState extends State<MapPage> {
     setState(() {
       // Node-focus mode should not auto-open a zone popup.
       _selectedZone = null;
+      _clusterPopup = null;
       _legendExpanded = false;
       _lastPopupDebugSignature = null;
     });
@@ -590,6 +665,7 @@ class _MapPageState extends State<MapPage> {
             ),
           )) {
         _selectedZone = null;
+        _clusterPopup = null;
         _lastPopupDebugSignature = null;
       }
     });
@@ -638,20 +714,8 @@ class _MapPageState extends State<MapPage> {
             observerLng: widget.observerLng,
             radiusMiles: widget.statsRadiusMiles,
           );
-    final radiusAffectsFilter = widget.statsRadiusMiles != 0;
-    final datasetToken = Object.hash(
-      identityHashCode(widget.zones),
-      widget.zones.length,
-      identityHashCode(widget.scans),
-      widget.scans.length,
-      widget.focusNodeId,
-      widget.statsRadiusMiles,
-      radiusAffectsFilter ? widget.observerLat : null,
-      radiusAffectsFilter ? widget.observerLng : null,
-      _selectedZone?.id,
-      Object.hashAll(_selectedNodeFilters),
-    );
-    _noteDataset(filteredZones, datasetToken);
+    // Filters already ran. Aggregation and the polygon cache see only this list.
+    _noteDataset(filteredZones, coverageFilterIdentity(filteredZones));
     final filteredZoneIds = filteredZones.map((z) => z.id).toSet();
     final scopedNodeIds = <String>{};
     for (final scan in widget.scans) {
@@ -766,6 +830,7 @@ class _MapPageState extends State<MapPage> {
                     );
                     setState(() {
                       _selectedZone = null;
+                      _clusterPopup = null;
                       _lastPopupDebugSignature = null;
                     });
                   },
@@ -1130,6 +1195,7 @@ class _MapPageState extends State<MapPage> {
                     _debugLog.info('ui_click', 'Popup scrim click close popup');
                     setState(() {
                       _selectedZone = null;
+                      _clusterPopup = null;
                       _lastPopupDebugSignature = null;
                     });
                   },
@@ -1174,6 +1240,11 @@ class _MapPageState extends State<MapPage> {
                               rssi: _selectedZone!.avgRssi,
                               snr: _selectedZone!.avgSnr,
                             );
+                      final rawCluster = _clusterPopup;
+                      final MapDrawPolygon? cluster =
+                          rawCluster != null && rawCluster.scale > 1
+                          ? rawCluster
+                          : null;
                       final popupNodeLabel = latest != null
                           ? _stripPopupEntityLabel(
                               _nodeDisplayName(
@@ -1206,8 +1277,12 @@ class _MapPageState extends State<MapPage> {
                           : (latestRaw != null
                                 ? 'zone=${_selectedZone!.id}|raw-fallback|ts=${latestRaw.effectiveTimestamp.toIso8601String()}|node=${latestRaw.nodeId ?? ''}|obs=${_observerDisplayNameRaw(latestRaw, connectedRadioName: widget.connectedRadioName, connectedRadioMeshId: widget.connectedRadioMeshId, resolvedNodeNames: widget.resolvedNodeNames)}|rssi=${latestRaw.rssi?.toStringAsFixed(1) ?? 'N/A'}|snrOut=${latestRaw.snr?.toStringAsFixed(1) ?? 'N/A'}|snrIn=${latestRaw.snrIn?.toStringAsFixed(1) ?? 'N/A'}|alt=${latestRaw.altitude?.toStringAsFixed(1) ?? 'N/A'}|scans=${_selectedZone!.scanCount}|dead=$effectiveDead'
                                 : 'zone=${_selectedZone!.id}|no-scan|scans=${_selectedZone!.scanCount}|dead=$effectiveDead');
-                      if (popupSig != _lastPopupDebugSignature) {
-                        _lastPopupDebugSignature = popupSig;
+                      final clusterSig = cluster == null
+                          ? ''
+                          : '|cluster=${cluster.childCount}|heard=${cluster.coveredCount}|scale=${cluster.scale}';
+                      final popupSignature = '$popupSig$clusterSig';
+                      if (popupSignature != _lastPopupDebugSignature) {
+                        _lastPopupDebugSignature = popupSignature;
                         _debugLog.info('popup', popupSig);
                         if (latest == null &&
                             latestRaw == null &&
@@ -1228,13 +1303,40 @@ class _MapPageState extends State<MapPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    showCoverageTitle
-                                        ? 'Coverage Zone'
-                                        : 'Dead Zone',
+                                    cluster != null
+                                        ? (cluster.coveredCount == 0
+                                              ? 'Dead cluster'
+                                              : 'Coverage cluster')
+                                        : (showCoverageTitle
+                                              ? 'Coverage Zone'
+                                              : 'Dead Zone'),
                                     style: const TextStyle(
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
+                                  if (cluster != null) ...<Widget>[
+                                    const SizedBox(height: 4),
+                                    Text('Cells: ${cluster.childCount}'),
+                                    Text(
+                                      formatCoverageFraction(
+                                        heard: cluster.coveredCount,
+                                        filteredChildren: cluster.childCount,
+                                      ),
+                                    ),
+                                    Text(
+                                      coverageFractionMeaning,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                    const SizedBox(height: 4),
+                                    const Text(
+                                      'Best cell',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
                                   const SizedBox(height: 4),
                                   if (latest == null && latestRaw == null)
                                     Column(

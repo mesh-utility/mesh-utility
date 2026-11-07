@@ -96,7 +96,7 @@ void main() {
         north: 38.0,
         west: -123.0,
         east: -122.0,
-        zoom: 14,
+        zoom: 16,
       );
 
       final drawn = selectZonesForMapRender(
@@ -145,7 +145,7 @@ void main() {
         north: 12,
         longitudeCenter: 0,
         longitudeWidth: 2,
-        zoom: 14,
+        zoom: 16,
       );
 
       expect(viewport.containsLatLng(12.2, 0), isTrue);
@@ -170,7 +170,7 @@ void main() {
           north: 5,
           west: 176,
           east: -176,
-          zoom: 14,
+          zoom: 16,
           crossesAntimeridian: true,
         );
 
@@ -208,7 +208,7 @@ void main() {
         north: 1,
         west: 179.5,
         east: -179.5,
-        zoom: 14,
+        zoom: 16,
         crossesAntimeridian: true,
       );
 
@@ -226,7 +226,7 @@ void main() {
         north: 1,
         longitudeCenter: 179.5,
         longitudeWidth: 3,
-        zoom: 14,
+        zoom: 16,
       );
 
       expect(viewport.crossesAntimeridian, isTrue);
@@ -239,7 +239,7 @@ void main() {
         north: 1,
         longitudeCenter: -179.5,
         longitudeWidth: 3,
-        zoom: 14,
+        zoom: 16,
       );
       expect(otherSide.crossesAntimeridian, isTrue);
       expect(otherSide.containsLatLng(0, -179.6), isTrue);
@@ -250,7 +250,7 @@ void main() {
     test('does not draw zones absent from the selected dataset', () {
       final kept = _zone(id: 'kept', lat: 1, lng: 1);
       final hidden = _zone(id: 'hidden', lat: 1.1, lng: 1.1);
-      final viewport = _box(south: 0, north: 2, west: 0, east: 2, zoom: 14);
+      final viewport = _box(south: 0, north: 2, west: 0, east: 2, zoom: 16);
 
       final drawn = selectZonesForMapRender(
         zones: <CoverageZone>[kept],
@@ -270,7 +270,7 @@ void main() {
         avgRssi: null,
         avgSnr: null,
       );
-      final viewport = _box(south: 0, north: 10, west: 0, east: 10, zoom: 14);
+      final viewport = _box(south: 0, north: 10, west: 0, east: 10, zoom: 16);
 
       final drawn = selectZonesForMapRender(
         zones: <CoverageZone>[dead],
@@ -305,17 +305,23 @@ void main() {
         spansAllLongitudes: true,
       );
 
-      final drawn = selectZonesForMapRender(zones: zones, viewport: viewport);
+      final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
       expect(zones, hasLength(9021));
-      expect(drawn, isNotEmpty);
-      expect(drawn.length, lessThan(9021));
-      expect(drawn.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      expect(drawn.length, greaterThan(1));
+      expect(plan.polygons, isNotEmpty);
+      expect(plan.polygons.length, lessThan(9021));
+      expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
+      expect(plan.polygons.length, greaterThan(1));
+      expect(plan.droppedChildren, isFalse);
+      expect(plan.representedChildren, 9021);
+      expect(plan.scale, greaterThan(1));
       final ids = zones.map((zone) => zone.id).toSet();
-      for (final polygon in drawn) {
-        expect(polygon.points, hasLength(4));
+      final represented = <String>{};
+      for (final polygon in plan.polygons) {
+        expect(polygon.points, hasLength(6));
+        expect(polygon.scale, plan.scale);
         expect(ids, contains(polygon.hitZoneId));
+        represented.addAll(polygon.memberZoneIds);
         for (var i = 0; i < polygon.points.length; i++) {
           final next = polygon.points[(i + 1) % polygon.points.length];
           expect(
@@ -324,6 +330,7 @@ void main() {
           );
         }
       }
+      expect(represented, ids);
     });
 
     test('low zoom viewport does not paint a zone outside it', () {
@@ -446,7 +453,7 @@ void main() {
         _zone(id: 'c', lat: 1.4, lng: 1.1),
         _zone(id: 'far', lat: 40, lng: 40),
       ];
-      final viewport = _box(south: 0, north: 3, west: 0, east: 3, zoom: 14);
+      final viewport = _box(south: 0, north: 3, west: 0, east: 3, zoom: 16);
 
       final drawn = selectZonesForMapRender(zones: zones, viewport: viewport);
 
@@ -458,45 +465,57 @@ void main() {
       expect(drawn.every((polygon) => polygon.points.length == 3), isTrue);
     });
 
-    test('thins a dense detail view without exceeding the cap', () {
+    test('coarsens a dense exact-zoom view instead of dropping cells', () {
       final zones = List<CoverageZone>.generate(2000, (index) {
         final lat = (index % 40) * 0.12;
         final lng = (index ~/ 40) * 0.2;
         return _zone(id: 'd$index', lat: lat, lng: lng);
       });
-      final viewport = _box(south: -1, north: 6, west: -1, east: 12, zoom: 14);
+      final viewport = _box(south: -1, north: 6, west: -1, east: 12, zoom: 16);
 
-      final drawn = selectZonesForMapRender(zones: zones, viewport: viewport);
+      final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
-      expect(drawn.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      expect(drawn.length, greaterThan(1));
-      expect(drawn.every((polygon) => polygon.points.length == 3), isTrue);
-      final byId = <String, CoverageZone>{
-        for (final zone in zones) zone.id: zone,
-      };
-      final lngs = drawn
-          .map((polygon) => byId[polygon.hitZoneId]!.centerLng)
-          .toList();
-      expect(lngs.reduce((a, b) => a < b ? a : b), lessThan(2));
-      expect(lngs.reduce((a, b) => a > b ? a : b), greaterThan(8));
-    });
-
-    test('pins the selected in-view zone when the cap would drop it', () {
-      final zones = List<CoverageZone>.generate(2000, (index) {
-        final lat = (index % 40) * 0.12;
-        final lng = (index ~/ 40) * 0.2;
-        return _zone(id: 'd$index', lat: lat, lng: lng, scanCount: 1);
-      });
-      final viewport = _box(south: -1, north: 6, west: -1, east: 12, zoom: 14);
-
-      final drawn = selectZonesForMapRender(
-        zones: zones,
-        viewport: viewport,
-        pinZoneId: 'd10',
+      expect(plan.nominalScale, 1);
+      expect(plan.usedEmergencyBackstop, isTrue);
+      expect(plan.droppedChildren, isFalse);
+      expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
+      expect(plan.polygons.length, greaterThan(1));
+      expect(plan.representedChildren, zones.length);
+      expect(
+        plan.polygons.every((polygon) => polygon.points.length == 6),
+        isTrue,
       );
-
-      expect(drawn.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      expect(drawn.map((polygon) => polygon.hitZoneId), contains('d10'));
+      final ids = <String>{
+        for (final polygon in plan.polygons) ...polygon.memberZoneIds,
+      };
+      expect(ids, zones.map((zone) => zone.id).toSet());
     });
+
+    test(
+      'keeps a selected cell inside its cluster when the view is coarsened',
+      () {
+        final zones = List<CoverageZone>.generate(2000, (index) {
+          final lat = (index % 40) * 0.12;
+          final lng = (index ~/ 40) * 0.2;
+          return _zone(id: 'd$index', lat: lat, lng: lng, scanCount: 1);
+        });
+        final viewport = _box(
+          south: -1,
+          north: 6,
+          west: -1,
+          east: 12,
+          zoom: 16,
+        );
+
+        final drawn = selectZonesForMapRender(
+          zones: zones,
+          viewport: viewport,
+          pinZoneId: 'd10',
+        );
+
+        expect(drawn.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
+        expect(drawn.any((polygon) => polygon.containsZone('d10')), isTrue);
+      },
+    );
   });
 }

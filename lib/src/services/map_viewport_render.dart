@@ -3,18 +3,34 @@ import 'dart:math' as math;
 import 'package:latlong2/latlong.dart';
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/hex_coverage_aggregate.dart';
+
+export 'package:mesh_utility/src/services/hex_coverage_aggregate.dart'
+    show
+        HexCoverageCluster,
+        HexZoomBand,
+        aggregateCoverageHexes,
+        aggregateCoverageHexesOffUi,
+        coarserHexScale,
+        coverageFilterIdentity,
+        coverageFractionMeaning,
+        formatCoverageFraction,
+        hexClusterScaleForZoom,
+        mapDetailZoom,
+        mapHexClusterMaxScale,
+        mapHexZoomBands;
 
 /// Extra fraction of the camera kept on each edge so hexes do not pop
 /// while the view is still moving.
 const double mapViewportMarginFraction = 0.15;
 
-/// Polygons passed to the map layer. All-time history is about 9k zones;
-/// drawing that set on every frame stalls input.
+/// Emergency ceiling on polygons sent to the map layer.
+///
+/// Zoom bands keep a phone or 1024×768 view of regional coverage under this
+/// count. Above it, the renderer coarsens the parent hex. Dropping clusters
+/// happens only after [mapHexClusterMaxScale] still does not fit, or when a
+/// caller freezes the scale.
 const int mapMaxDrawnPolygons = 700;
-
-/// At or above this zoom, draw the real hex. Below it, bin into cells so
-/// coverage stays visible when a hex is smaller than a pixel.
-const double mapDetailZoom = 12.5;
 
 /// Quiet period before a pan or zoom recomputes the visible set.
 const Duration mapViewportDebounce = Duration(milliseconds: 100);
@@ -166,6 +182,10 @@ class MapDrawPolygon {
     required this.isDeadZone,
     required this.avgRssi,
     required this.avgSnr,
+    this.childCount = 1,
+    this.coveredCount = 0,
+    this.scale = 1,
+    this.memberZoneIds = const <String>[],
   });
 
   final String hitZoneId;
@@ -173,45 +193,275 @@ class MapDrawPolygon {
   final bool isDeadZone;
   final double? avgRssi;
   final double? avgSnr;
+
+  /// Filtered child cells represented by this polygon.
+  final int childCount;
+
+  /// Child cells that heard a repeater. See [coverageFractionMeaning].
+  final int coveredCount;
+
+  /// 1 is an exact stored cell. Larger values are parent hexes.
+  final int scale;
+  final List<String> memberZoneIds;
+
+  bool containsZone(String zoneId) {
+    if (hitZoneId == zoneId) return true;
+    for (final id in memberZoneIds) {
+      if (id == zoneId) return true;
+    }
+    return false;
+  }
+}
+
+/// Polygons for one camera, plus whether the emergency cap had to run.
+class MapRenderPlan {
+  const MapRenderPlan({
+    required this.polygons,
+    required this.nominalScale,
+    required this.scale,
+    required this.usedEmergencyBackstop,
+    required this.droppedChildren,
+  });
+
+  final List<MapDrawPolygon> polygons;
+
+  /// Hex scale the zoom band asked for, before the emergency coarsen.
+  final int nominalScale;
+
+  /// Hex scale actually drawn.
+  final int scale;
+
+  /// True when [scale] is coarser than [nominalScale], or clusters were dropped.
+  final bool usedEmergencyBackstop;
+
+  /// True only when the draw set omitted filtered children to stay at the cap.
+  final bool droppedChildren;
+
+  int get representedChildren {
+    var sum = 0;
+    for (final polygon in polygons) {
+      sum += polygon.childCount;
+    }
+    return sum;
+  }
+}
+
+/// A resolved draw, or the parent scale that still needs to be aggregated.
+sealed class MapRenderAttempt {}
+
+class MapRenderReady extends MapRenderAttempt {
+  MapRenderReady(this.plan);
+
+  final MapRenderPlan plan;
+}
+
+class MapRenderNeedsScale extends MapRenderAttempt {
+  MapRenderNeedsScale(this.scale);
+
+  final int scale;
 }
 
 /// Zones to paint for [viewport].
 ///
 /// The input list is not modified. Stats and filters stay on that full
-/// selection; this only chooses what the layer draws.
+/// selection; this only chooses what the layer draws. Pass an already
+/// filtered list: aggregation never sees zones the caller removed.
 ///
-/// At or above [detailZoom], result polygons are the zone hexes (spatially
-/// thinned if there are more than [maxDrawn] in view). Below [detailZoom],
-/// zones are binned into at most [maxDrawn] world-aligned cells.
+/// At and above [mapDetailZoom], polygons are the stored hexes. Below that,
+/// zones are grouped into parent hexes from [mapHexZoomBands]. Every finite
+/// filtered zone in view belongs to one drawn hex unless [maxDrawn] forces
+/// the last-resort drop ([MapRenderPlan.droppedChildren]).
 List<MapDrawPolygon> selectZonesForMapRender({
   required List<CoverageZone> zones,
   required MapRenderViewport viewport,
   int maxDrawn = mapMaxDrawnPolygons,
-  double detailZoom = mapDetailZoom,
   String? pinZoneId,
+  int? maxScale,
+}) {
+  return planZonesForMapRender(
+    zones: zones,
+    viewport: viewport,
+    maxDrawn: maxDrawn,
+    pinZoneId: pinZoneId,
+    maxScale: maxScale,
+  ).polygons;
+}
+
+/// Full render decision, including the scale that was drawn and whether the
+/// 700-polygon ceiling had to coarsen or drop.
+MapRenderPlan planZonesForMapRender({
+  required List<CoverageZone> zones,
+  required MapRenderViewport viewport,
+  int maxDrawn = mapMaxDrawnPolygons,
+  String? pinZoneId,
+  int? maxScale,
+  Map<int, List<HexCoverageCluster>>? clustersByScale,
+}) {
+  final attempt = resolveMapRender(
+    zones: zones,
+    viewport: viewport,
+    maxDrawn: maxDrawn,
+    pinZoneId: pinZoneId,
+    maxScale: maxScale,
+    allowCompute: true,
+    lookup: (scale) => clustersByScale?[scale],
+  );
+  if (attempt is! MapRenderReady) {
+    throw StateError('Map render did not resolve a polygon set.');
+  }
+  return attempt.plan;
+}
+
+MapRenderAttempt resolveMapRender({
+  required List<CoverageZone> zones,
+  required MapRenderViewport viewport,
+  required List<HexCoverageCluster>? Function(int scale) lookup,
+  int maxDrawn = mapMaxDrawnPolygons,
+  String? pinZoneId,
+  int? maxScale,
+  bool allowCompute = false,
 }) {
   final cap = maxDrawn < 1 ? 1 : maxDrawn;
-  final visible = <CoverageZone>[];
-  for (final zone in zones) {
-    if (_zoneIntersectsViewport(zone, viewport)) visible.add(zone);
+  final nominal = hexClusterScaleForZoom(viewport.zoom);
+  var scale = nominal;
+  for (var guard = 0; guard < 40; guard++) {
+    final found = lookup(scale);
+    if (found == null && !allowCompute) {
+      return MapRenderNeedsScale(scale);
+    }
+    final clusters = found ?? aggregateCoverageHexes(zones, scale: scale);
+    final drawable = <HexCoverageCluster>[];
+    for (final cluster in clusters) {
+      if (cluster.points.length < 3) continue;
+      if (_clusterIntersectsViewport(cluster, viewport)) {
+        drawable.add(cluster);
+      }
+    }
+    final next = coarserHexScale(scale);
+    final frozen = maxScale != null && scale >= maxScale;
+    if (drawable.length <= cap || next == null || frozen) {
+      final polygons = <MapDrawPolygon>[
+        for (final cluster in drawable) _polygonForCluster(cluster),
+      ];
+      final capped = polygons.length > cap;
+      final kept = capped
+          ? _capPolygons(polygons, cap: cap, pinZoneId: pinZoneId)
+          : polygons;
+      return MapRenderReady(
+        MapRenderPlan(
+          polygons: kept,
+          nominalScale: nominal,
+          scale: scale,
+          usedEmergencyBackstop: scale > nominal || capped,
+          droppedChildren: capped,
+        ),
+      );
+    }
+    scale = next;
   }
-  if (visible.isEmpty) return const <MapDrawPolygon>[];
+  throw StateError('Hex scale search did not finish.');
+}
 
-  final zoom = viewport.zoom.isFinite ? viewport.zoom : 0.0;
-  final List<MapDrawPolygon> drawn;
-  if (zoom >= detailZoom && visible.length <= cap) {
-    drawn = _individualPolygons(visible);
-  } else if (zoom >= detailZoom) {
-    drawn = _binnedPolygons(visible, zoom: zoom, cap: cap, asCells: false);
-  } else {
-    drawn = _binnedPolygons(visible, zoom: zoom, cap: cap, asCells: true);
+/// Cached parent-hex aggregates for one filtered dataset.
+///
+/// Pan and zoom inside a scale only cull. A new filter identity drops the
+/// cache and ignores aggregates that were already running.
+class HexRenderSession {
+  HexRenderSession({
+    Future<List<HexCoverageCluster>> Function(
+      List<CoverageZone> zones,
+      int scale,
+    )?
+    aggregate,
+  }) : _aggregate = aggregate ?? _aggregateCoverageOffUi;
+
+  final Future<List<HexCoverageCluster>> Function(
+    List<CoverageZone> zones,
+    int scale,
+  )
+  _aggregate;
+
+  int _generation = 0;
+  int? _identity;
+  final Map<int, List<HexCoverageCluster>> _cache =
+      <int, List<HexCoverageCluster>>{};
+  final Map<int, Future<List<HexCoverageCluster>>> _inflight =
+      <int, Future<List<HexCoverageCluster>>>{};
+
+  int? get identity => _identity;
+
+  void reset(int identity) {
+    if (_identity == identity) return;
+    _identity = identity;
+    _generation++;
+    _cache.clear();
+    _inflight.clear();
   }
-  return _pinZone(
-    drawn: drawn,
-    visible: visible,
-    pinZoneId: pinZoneId,
-    cap: cap,
-  );
+
+  /// Draws [zones] for [viewport]. Returns null when [identity] changed
+  /// before the aggregate finished.
+  Future<MapRenderPlan?> render({
+    required int identity,
+    required List<CoverageZone> zones,
+    required MapRenderViewport viewport,
+    String? pinZoneId,
+    int maxDrawn = mapMaxDrawnPolygons,
+    int? maxScale,
+  }) async {
+    if (_identity != identity) reset(identity);
+    final generation = _generation;
+    for (var guard = 0; guard < 40; guard++) {
+      if (_generation != generation || _identity != identity) return null;
+      final attempt = resolveMapRender(
+        zones: zones,
+        viewport: viewport,
+        lookup: (scale) => _cache[scale],
+        maxDrawn: maxDrawn,
+        pinZoneId: pinZoneId,
+        maxScale: maxScale,
+      );
+      if (attempt is MapRenderReady) return attempt.plan;
+      final needed = (attempt as MapRenderNeedsScale).scale;
+      final loaded = await _load(generation, identity, zones, needed);
+      if (loaded == null) return null;
+    }
+    return null;
+  }
+
+  Future<List<HexCoverageCluster>?> _load(
+    int generation,
+    int identity,
+    List<CoverageZone> zones,
+    int scale,
+  ) async {
+    if (_generation != generation || _identity != identity) return null;
+    final cached = _cache[scale];
+    if (cached != null) return cached;
+    final existing = _inflight[scale];
+    final Future<List<HexCoverageCluster>> future;
+    if (existing != null) {
+      future = existing;
+    } else {
+      future = _aggregate(zones, scale);
+      _inflight[scale] = future;
+    }
+    List<HexCoverageCluster> built;
+    try {
+      built = await future;
+    } finally {
+      if (identical(_inflight[scale], future)) _inflight.remove(scale);
+    }
+    if (_generation != generation || _identity != identity) return null;
+    _cache[scale] = built;
+    return built;
+  }
+}
+
+Future<List<HexCoverageCluster>> _aggregateCoverageOffUi(
+  List<CoverageZone> zones,
+  int scale,
+) {
+  return aggregateCoverageHexesOffUi(zones, scale: scale);
 }
 
 int mapDrawSignature(List<MapDrawPolygon> drawn) {
@@ -223,6 +473,9 @@ int mapDrawSignature(List<MapDrawPolygon> drawn) {
       polygon.isDeadZone,
       polygon.avgRssi,
       polygon.avgSnr,
+      polygon.childCount,
+      polygon.coveredCount,
+      polygon.scale,
       polygon.points.length,
     );
     for (final point in polygon.points) {
@@ -230,6 +483,60 @@ int mapDrawSignature(List<MapDrawPolygon> drawn) {
     }
   }
   return hash;
+}
+
+MapDrawPolygon _polygonForCluster(HexCoverageCluster cluster) {
+  return MapDrawPolygon(
+    hitZoneId: cluster.hitZoneId,
+    points: cluster.points,
+    isDeadZone: cluster.isDeadZone,
+    avgRssi: cluster.avgRssi,
+    avgSnr: cluster.avgSnr,
+    childCount: cluster.childCount,
+    coveredCount: cluster.coveredCount,
+    scale: cluster.scale,
+    memberZoneIds: cluster.memberZoneIds,
+  );
+}
+
+List<MapDrawPolygon> _capPolygons(
+  List<MapDrawPolygon> polygons, {
+  required int cap,
+  required String? pinZoneId,
+}) {
+  final ranked = List<MapDrawPolygon>.of(polygons)
+    ..sort((a, b) {
+      final byCount = b.childCount.compareTo(a.childCount);
+      if (byCount != 0) return byCount;
+      return a.hitZoneId.compareTo(b.hitZoneId);
+    });
+  final kept = ranked.length <= cap ? ranked : ranked.sublist(0, cap);
+  return _withPin(kept: kept, source: polygons, cap: cap, pinZoneId: pinZoneId);
+}
+
+List<MapDrawPolygon> _withPin({
+  required List<MapDrawPolygon> kept,
+  required List<MapDrawPolygon> source,
+  required int cap,
+  required String? pinZoneId,
+}) {
+  if (pinZoneId == null || pinZoneId.isEmpty) return kept;
+  for (final polygon in kept) {
+    if (polygon.containsZone(pinZoneId)) return kept;
+  }
+  MapDrawPolygon? pinned;
+  for (final polygon in source) {
+    if (polygon.containsZone(pinZoneId)) {
+      pinned = polygon;
+      break;
+    }
+  }
+  if (pinned == null) return kept;
+  if (kept.length < cap) return <MapDrawPolygon>[...kept, pinned];
+  if (kept.isEmpty) return <MapDrawPolygon>[pinned];
+  final copy = List<MapDrawPolygon>.of(kept);
+  copy[copy.length - 1] = pinned;
+  return copy;
 }
 
 double _wrapLongitude(double longitude) {
@@ -253,14 +560,31 @@ bool _longitudeInRange(
   return wrapped >= west && wrapped <= east;
 }
 
-bool _zoneIntersectsViewport(CoverageZone zone, MapRenderViewport viewport) {
-  if (!zone.centerLat.isFinite || !zone.centerLng.isFinite) return false;
-  final latitudes = _latitudeSpan(zone);
+bool _clusterIntersectsViewport(
+  HexCoverageCluster cluster,
+  MapRenderViewport viewport,
+) {
+  return _geometryIntersectsViewport(
+    centerLat: cluster.centerLat,
+    centerLng: cluster.centerLng,
+    points: cluster.points,
+    viewport: viewport,
+  );
+}
+
+bool _geometryIntersectsViewport({
+  required double centerLat,
+  required double centerLng,
+  required List<LatLng> points,
+  required MapRenderViewport viewport,
+}) {
+  if (!centerLat.isFinite || !centerLng.isFinite) return false;
+  final latitudes = _latitudeSpan(centerLat, points);
   if (latitudes.$1 > viewport.north || latitudes.$2 < viewport.south) {
     return false;
   }
   if (viewport.spansAllLongitudes) return true;
-  final longitudes = _longitudeSpan(zone);
+  final longitudes = _longitudeSpan(centerLng, points);
   return _longitudeRangesOverlap(
     aWest: viewport.west,
     aEast: viewport.east,
@@ -271,10 +595,10 @@ bool _zoneIntersectsViewport(CoverageZone zone, MapRenderViewport viewport) {
   );
 }
 
-(double, double) _latitudeSpan(CoverageZone zone) {
-  var south = zone.centerLat;
-  var north = zone.centerLat;
-  for (final point in zone.polygon) {
+(double, double) _latitudeSpan(double centerLat, List<LatLng> points) {
+  var south = centerLat;
+  var north = centerLat;
+  for (final point in points) {
     if (!point.latitude.isFinite) continue;
     if (point.latitude < south) south = point.latitude;
     if (point.latitude > north) north = point.latitude;
@@ -283,12 +607,26 @@ bool _zoneIntersectsViewport(CoverageZone zone, MapRenderViewport viewport) {
 }
 
 /// West, east, and whether the ring crosses the antimeridian.
-(double, double, bool) _longitudeSpan(CoverageZone zone) {
-  final longitudes = <double>[_wrapLongitude(zone.centerLng)];
-  for (final point in zone.polygon) {
+(double, double, bool) _longitudeSpan(double centerLng, List<LatLng> points) {
+  final raw = <double>[centerLng];
+  for (final point in points) {
     if (!point.longitude.isFinite) continue;
-    longitudes.add(_wrapLongitude(point.longitude));
+    raw.add(point.longitude);
   }
+  var minL = raw.first;
+  var maxL = raw.first;
+  for (final value in raw) {
+    if (value < minL) minL = value;
+    if (value > maxL) maxL = value;
+  }
+  // A parent hex near ±180 is stored unwrapped so its edges stay short.
+  if (maxL - minL <= 180) {
+    final crosses = minL < -180 || maxL > 180;
+    if (!crosses) return (minL, maxL, false);
+    return (_wrapLongitude(minL), _wrapLongitude(maxL), true);
+  }
+
+  final longitudes = <double>[for (final value in raw) _wrapLongitude(value)];
   longitudes.sort();
   var largestGap = -1.0;
   var gapAfter = 0;
@@ -303,7 +641,6 @@ bool _zoneIntersectsViewport(CoverageZone zone, MapRenderViewport viewport) {
   if (wrapGap >= largestGap) {
     return (longitudes.first, longitudes.last, false);
   }
-  // The empty arc is interior, so the ring crosses ±180.
   return (longitudes[gapAfter + 1], longitudes[gapAfter], true);
 }
 
@@ -345,210 +682,4 @@ bool _longitudeRangesOverlap({
     east: bEast,
     crossesAntimeridian: bCrosses,
   );
-}
-
-List<MapDrawPolygon> _individualPolygons(List<CoverageZone> zones) {
-  final drawn = <MapDrawPolygon>[];
-  for (final zone in zones) {
-    if (zone.polygon.length < 3) continue;
-    drawn.add(_polygonForZone(zone));
-  }
-  return drawn;
-}
-
-MapDrawPolygon _polygonForZone(CoverageZone zone) {
-  return MapDrawPolygon(
-    hitZoneId: zone.id,
-    points: zone.polygon,
-    isDeadZone: zone.isDeadZone,
-    avgRssi: zone.avgRssi,
-    avgSnr: zone.avgSnr,
-  );
-}
-
-double _startCellDegrees(double zoom) {
-  final clamped = zoom < 0 ? 0.0 : (zoom > 22 ? 22.0 : zoom);
-  final worldPixels = 256.0 * math.pow(2.0, clamped).toDouble();
-  final degreesPerPixel = 360.0 / worldPixels;
-  final visibleCell = degreesPerPixel * 10;
-  final hexCell = hexSize * 2;
-  return visibleCell > hexCell ? visibleCell : hexCell;
-}
-
-({int rowCount, int colCount, double cellLat, double cellLng}) _worldGrid(
-  double cellDegrees,
-) {
-  final safe = cellDegrees < 1e-4 ? 1e-4 : cellDegrees;
-  final colCount = math.max(1, (360 / safe).ceil());
-  final rowCount = math.max(1, (180 / safe).ceil());
-  return (
-    rowCount: rowCount,
-    colCount: colCount,
-    cellLat: 180 / rowCount,
-    cellLng: 360 / colCount,
-  );
-}
-
-List<MapDrawPolygon> _binnedPolygons(
-  List<CoverageZone> zones, {
-  required double zoom,
-  required int cap,
-  required bool asCells,
-}) {
-  var cell = _startCellDegrees(zoom);
-  var grid = _worldGrid(cell);
-  var groups = <int, List<CoverageZone>>{};
-  for (var attempt = 0; attempt < 30; attempt++) {
-    grid = _worldGrid(cell);
-    groups = _groupZones(zones, grid);
-    if (groups.length <= cap) break;
-    cell *= 1.7;
-  }
-
-  final keys = groups.keys.toList()..sort();
-  if (keys.length > cap) {
-    final step = keys.length / cap;
-    final sampled = <int>[];
-    for (var i = 0; i < cap; i++) {
-      sampled.add(keys[(i * step).floor()]);
-    }
-    keys
-      ..clear()
-      ..addAll(sampled);
-  }
-
-  final drawn = <MapDrawPolygon>[];
-  for (final key in keys) {
-    if (drawn.length >= cap) break;
-    final group = groups[key];
-    if (group == null || group.isEmpty) continue;
-    if (asCells) {
-      final cellPolygon = _cellPolygon(key, grid, group);
-      if (cellPolygon != null) drawn.add(cellPolygon);
-      continue;
-    }
-    final representative = _representative(group);
-    if (representative.polygon.length < 3) continue;
-    drawn.add(_polygonForZone(representative));
-  }
-  return drawn;
-}
-
-Map<int, List<CoverageZone>> _groupZones(
-  List<CoverageZone> zones,
-  ({int rowCount, int colCount, double cellLat, double cellLng}) grid,
-) {
-  final groups = <int, List<CoverageZone>>{};
-  for (final zone in zones) {
-    var row = ((zone.centerLat + 90) / grid.cellLat).floor();
-    if (row < 0) row = 0;
-    if (row >= grid.rowCount) row = grid.rowCount - 1;
-    var col = ((_wrapLongitude(zone.centerLng) + 180) / grid.cellLng).floor();
-    if (col < 0) col = 0;
-    if (col >= grid.colCount) col = grid.colCount - 1;
-    final key = row * grid.colCount + col;
-    groups.putIfAbsent(key, () => <CoverageZone>[]).add(zone);
-  }
-  return groups;
-}
-
-MapDrawPolygon? _cellPolygon(
-  int key,
-  ({int rowCount, int colCount, double cellLat, double cellLng}) grid,
-  List<CoverageZone> group,
-) {
-  final row = key ~/ grid.colCount;
-  final col = key % grid.colCount;
-  final south = -90 + row * grid.cellLat;
-  final north = math.min(90.0, south + grid.cellLat);
-  final west = -180 + col * grid.cellLng;
-  final east = math.min(180.0, west + grid.cellLng);
-  if (north - south < 1e-9 || east - west < 1e-9) return null;
-  final representative = _representative(group);
-  var heard = 0;
-  var rssiSum = 0.0;
-  var rssiCount = 0;
-  var snrSum = 0.0;
-  var snrCount = 0;
-  for (final zone in group) {
-    if (zone.isDeadZone) continue;
-    heard++;
-    final rssi = zone.avgRssi;
-    if (rssi != null && rssi.isFinite) {
-      rssiSum += rssi;
-      rssiCount++;
-    }
-    final snr = zone.avgSnr;
-    if (snr != null && snr.isFinite) {
-      snrSum += snr;
-      snrCount++;
-    }
-  }
-  final isDeadZone = heard == 0;
-  return MapDrawPolygon(
-    hitZoneId: representative.id,
-    points: <LatLng>[
-      LatLng(south, west),
-      LatLng(south, east),
-      LatLng(north, east),
-      LatLng(north, west),
-    ],
-    isDeadZone: isDeadZone,
-    avgRssi: isDeadZone || rssiCount == 0 ? null : rssiSum / rssiCount,
-    avgSnr: isDeadZone || snrCount == 0 ? null : snrSum / snrCount,
-  );
-}
-
-CoverageZone _representative(List<CoverageZone> group) {
-  var poolIsHeard = false;
-  for (final zone in group) {
-    if (!zone.isDeadZone) {
-      poolIsHeard = true;
-      break;
-    }
-  }
-  CoverageZone? best;
-  for (final zone in group) {
-    if (poolIsHeard && zone.isDeadZone) continue;
-    if (best == null || _outranks(zone, best)) best = zone;
-  }
-  return best ?? group.first;
-}
-
-bool _outranks(CoverageZone candidate, CoverageZone current) {
-  if (candidate.scanCount != current.scanCount) {
-    return candidate.scanCount > current.scanCount;
-  }
-  if (candidate.lastScanned != current.lastScanned) {
-    return candidate.lastScanned.isAfter(current.lastScanned);
-  }
-  return candidate.id.compareTo(current.id) < 0;
-}
-
-List<MapDrawPolygon> _pinZone({
-  required List<MapDrawPolygon> drawn,
-  required List<CoverageZone> visible,
-  required String? pinZoneId,
-  required int cap,
-}) {
-  if (pinZoneId == null || pinZoneId.isEmpty) return drawn;
-  for (final polygon in drawn) {
-    if (polygon.hitZoneId == pinZoneId) return drawn;
-  }
-  CoverageZone? pinned;
-  for (final zone in visible) {
-    if (zone.id == pinZoneId) {
-      pinned = zone;
-      break;
-    }
-  }
-  if (pinned == null || pinned.polygon.length < 3) return drawn;
-  final polygon = _polygonForZone(pinned);
-  if (drawn.length < cap) {
-    return <MapDrawPolygon>[...drawn, polygon];
-  }
-  if (drawn.isEmpty) return <MapDrawPolygon>[polygon];
-  final copy = List<MapDrawPolygon>.of(drawn);
-  copy[copy.length - 1] = polygon;
-  return copy;
 }
