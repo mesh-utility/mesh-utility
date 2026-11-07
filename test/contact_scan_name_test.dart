@@ -227,4 +227,41 @@ void main() {
       expect((payload!['nodes'] as List).single['name'], 'OtherAdv');
     },
   );
+
+  test('large backfill updates a repeater and strips a chat name', () {
+    final state = buildState();
+    final contacts = <String, String>{
+      for (var i = 0; i < 80; i++) _contactKey(i): 'Contact$i',
+      repeaterPrefix: 'TestRep',
+      chatPrefix: 'TestChat',
+    };
+    final types = <String, int>{
+      for (final key in contacts.keys) key: advTypeRepeater,
+      chatPrefix: advTypeChat,
+    };
+    state.debugSeedSessionContacts(contacts, types: types);
+    state.rawScans = <RawScan>[
+      scanFor(nodeId: repeaterShort, senderName: repeaterShort),
+      scanFor(nodeId: chatShort, senderName: 'TestChat'),
+      for (var i = 0; i < 6000; i++)
+        scanFor(
+          nodeId: 'A${i.toRadixString(16).padLeft(7, '0')}',
+          senderName: 'A${i.toRadixString(16).padLeft(7, '0')}',
+        ),
+    ];
+
+    final watch = Stopwatch()..start();
+    final updated = state.debugBackfillScanNamesFromContacts(contacts);
+    expect(watch.elapsedMilliseconds, lessThan(2000));
+    expect(updated, 2);
+    expect(state.rawScans[0].senderName, 'TestRep');
+    expect(state.rawScans[1].senderName, chatShort);
+    expect(state.rawScans[2].senderName, 'A0000000');
+  });
+}
+
+String _contactKey(int index) {
+  final head = 'B${index.toRadixString(16).padLeft(7, '0')}';
+  final tail = index.toRadixString(16).padLeft(8, 'C');
+  return '$head$tail';
 }

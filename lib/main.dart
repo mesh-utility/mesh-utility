@@ -20,6 +20,7 @@ import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
+import 'package:mesh_utility/src/services/mesh_stage_log.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
@@ -199,6 +200,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _index = 0;
+  int _loggedNameRows = -1;
   bool _initialPrivacyDismissedForSession = false;
   bool _initialPrivacyDialogOpen = false;
   bool _requirePrivacyDialogOpen = false;
@@ -1532,11 +1534,24 @@ class _MeshHomePageState extends State<MeshHomePage>
   }
 
   Map<String, String> _buildResolvedNodeNames() {
+    final rows =
+        _appState.scanResults.length +
+        _appState.rawScans.length +
+        _appState.nodes.length;
+    final watch = Stopwatch()..start();
+    final announce = rows != _loggedNameRows;
+    if (announce) meshStageStart('name_labels', count: rows);
     final labels = <String, String>{};
+    // The same observer id is on every scan. Resolving it once per distinct
+    // id and hinted name keeps an all-days history from walking the book
+    // again for every row.
+    final seen = <String>{};
 
     void put(String? id, {String? advertisedName}) {
       final trimmed = (id ?? '').trim();
       if (trimmed.isEmpty) return;
+      final hint = (advertisedName ?? '').trim();
+      if (!seen.add('$trimmed\n$hint')) return;
       final label = _appState.displayNameForNode(
         trimmed,
         advertisedName: advertisedName,
@@ -1558,6 +1573,11 @@ class _MeshHomePageState extends State<MeshHomePage>
     }
     for (final node in _appState.nodes) {
       put(node.nodeId, advertisedName: node.name);
+    }
+    final elapsed = watch.elapsedMilliseconds;
+    if (announce || elapsed >= 50) {
+      meshStageEnd('name_labels', count: rows, ms: elapsed, n2: labels.length);
+      _loggedNameRows = rows;
     }
     return labels;
   }

@@ -9,6 +9,7 @@ import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/map_viewport_render.dart';
+import 'package:mesh_utility/src/services/mesh_stage_log.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
@@ -135,6 +136,8 @@ class _MapPageState extends State<MapPage> {
   List<Polygon<String>> _renderPolygons = const [];
   List<MapDrawPolygon> _drawnPolygons = const [];
   MapDrawPolygon? _clusterPopup;
+  MapRenderViewport? _appliedViewport;
+  _MapDataset? _dataset;
 
   @override
   void initState() {
@@ -203,6 +206,7 @@ class _MapPageState extends State<MapPage> {
     _renderPolygons = const [];
     _drawnPolygons = const [];
     _clusterPopup = null;
+    _appliedViewport = null;
     _scheduleViewportRender(immediate: true);
   }
 
@@ -273,7 +277,16 @@ class _MapPageState extends State<MapPage> {
 
   void _recomputeViewportRender() {
     if (!mounted || _filterIdentity == null) return;
-    if (_readViewport() == null) return;
+    final viewport = _readViewport();
+    if (viewport == null) return;
+    // Camera events keep arriving after a dataset lands even when nothing
+    // moved. Re-entering here copied the zone list and culled it again on
+    // the UI isolate.
+    if (_renderReady &&
+        _appliedViewport != null &&
+        _sameViewport(_appliedViewport!, viewport)) {
+      return;
+    }
     final request = ++_renderRequest;
     final identity = _filterIdentity!;
     unawaited(_finishViewportRender(request: request, identity: identity));
@@ -283,30 +296,48 @@ class _MapPageState extends State<MapPage> {
     required int request,
     required int identity,
   }) async {
-    MapRenderViewport? pending = _readViewport();
-    for (var pass = 0; pass < 4; pass++) {
-      final viewport = pending;
-      if (viewport == null) return;
-      if (!mounted ||
-          request != _renderRequest ||
-          identity != _filterIdentity) {
-        return;
+    final watch = Stopwatch()..start();
+    final zones = _datasetZones.length;
+    final announce = zones >= 250;
+    if (announce) meshStageStart('viewport_render', count: zones);
+    var drawn = -1;
+    try {
+      MapRenderViewport? pending = _readViewport();
+      for (var pass = 0; pass < 4; pass++) {
+        final viewport = pending;
+        if (viewport == null) return;
+        if (!mounted ||
+            request != _renderRequest ||
+            identity != _filterIdentity) {
+          return;
+        }
+        final plan = await _hexSession.render(
+          identity: identity,
+          zones: _datasetZones,
+          viewport: viewport,
+          pinZoneId: _selectedZone?.id,
+        );
+        if (!mounted || plan == null || request != _renderRequest) return;
+        if (identity != _filterIdentity) return;
+        final latest = _readViewport();
+        if (latest == null) return;
+        if (_sameViewport(latest, viewport)) {
+          drawn = plan.polygons.length;
+          _applyPlan(plan, viewport);
+          return;
+        }
+        pending = latest;
       }
-      final plan = await _hexSession.render(
-        identity: identity,
-        zones: _datasetZones,
-        viewport: viewport,
-        pinZoneId: _selectedZone?.id,
-      );
-      if (!mounted || plan == null || request != _renderRequest) return;
-      if (identity != _filterIdentity) return;
-      final latest = _readViewport();
-      if (latest == null) return;
-      if (_sameViewport(latest, viewport)) {
-        _applyPlan(plan, viewport);
-        return;
+    } finally {
+      final elapsed = watch.elapsedMilliseconds;
+      if (announce || elapsed >= 50) {
+        meshStageEnd(
+          'viewport_render',
+          count: zones,
+          ms: elapsed,
+          n2: drawn,
+        );
       }
-      pending = latest;
     }
   }
 
@@ -317,6 +348,7 @@ class _MapPageState extends State<MapPage> {
     _renderSignature = signature;
     _drawnPolygons = plan.polygons;
     _renderPolygons = _polygonsForDraw(plan.polygons);
+    _appliedViewport = viewport;
     _debugLog.debug(
       'map_render',
       'polygons=${_renderPolygons.length} dataset=${_datasetZones.length} '
@@ -675,17 +707,26 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final center = widget.zones.isNotEmpty
-        ? LatLng(widget.zones.first.centerLat, widget.zones.first.centerLng)
-        : const LatLng(39.5, -98.35);
+  _MapDataset _datasetFor({
+    required String? focusNodeId,
+    required Set<String> effectiveNodeFilters,
+  }) {
+    final cached = _dataset;
+    final filterHash = _filterHash(effectiveNodeFilters);
+    if (cached != null &&
+        identical(cached.zones, widget.zones) &&
+        identical(cached.scans, widget.scans) &&
+        cached.radius == widget.statsRadiusMiles &&
+        cached.lat == widget.observerLat &&
+        cached.lng == widget.observerLng &&
+        cached.focusNodeId == focusNodeId &&
+        cached.selectedCount == _selectedNodeFilters.length &&
+        cached.filterHash == filterHash) {
+      _noteDataset(cached.filtered, cached.identity);
+      return cached;
+    }
 
-    final focusNodeId = widget.focusNodeId;
-    final effectiveNodeFilters = _effectiveNodeFilters(
-      focusNodeId: focusNodeId,
-      selectedNodeFilters: _selectedNodeFilters,
-    );
+    final watch = Stopwatch()..start();
     final baseZones = effectiveNodeFilters.isEmpty
         ? widget.zones
         : () {
@@ -714,8 +755,9 @@ class _MapPageState extends State<MapPage> {
             observerLng: widget.observerLng,
             radiusMiles: widget.statsRadiusMiles,
           );
+    final identity = coverageFilterIdentity(filteredZones);
     // Filters already ran. Aggregation and the polygon cache see only this list.
-    _noteDataset(filteredZones, coverageFilterIdentity(filteredZones));
+    _noteDataset(filteredZones, identity);
     final filteredZoneIds = filteredZones.map((z) => z.id).toSet();
     final scopedNodeIds = <String>{};
     for (final scan in widget.scans) {
@@ -730,7 +772,6 @@ class _MapPageState extends State<MapPage> {
       }
       scopedNodeIds.add(nodeKey);
     }
-    final scopedNodesCount = scopedNodeIds.length;
     if (effectiveNodeFilters.isNotEmpty) {
       final filterLabel = _selectedNodeFilters.isNotEmpty
           ? 'custom(${effectiveNodeFilters.length})'
@@ -747,16 +788,77 @@ class _MapPageState extends State<MapPage> {
     } else {
       _lastNodeFilterDebugSignature = null;
     }
-    final activeZones = filteredZones.where((z) => !z.isDeadZone).toList();
-    final deadZones = filteredZones.where((z) => z.isDeadZone).toList();
-    final avgRssi = activeZones.isNotEmpty
-        ? activeZones.fold<double>(0, (sum, z) => sum + (z.avgRssi ?? 0)) /
-              activeZones.length
-        : 0.0;
-    final avgSnr = activeZones.isNotEmpty
-        ? activeZones.fold<double>(0, (sum, z) => sum + (z.avgSnr ?? 0)) /
-              activeZones.length
-        : 0.0;
+    var active = 0;
+    var dead = 0;
+    var rssiSum = 0.0;
+    var snrSum = 0.0;
+    for (final zone in filteredZones) {
+      if (zone.isDeadZone) {
+        dead += 1;
+        continue;
+      }
+      active += 1;
+      rssiSum += zone.avgRssi ?? 0;
+      snrSum += zone.avgSnr ?? 0;
+    }
+    final next = _MapDataset(
+      zones: widget.zones,
+      scans: widget.scans,
+      radius: widget.statsRadiusMiles,
+      lat: widget.observerLat,
+      lng: widget.observerLng,
+      focusNodeId: focusNodeId,
+      selectedCount: _selectedNodeFilters.length,
+      filterHash: filterHash,
+      filtered: filteredZones,
+      identity: identity,
+      scopedNodes: scopedNodeIds.length,
+      active: active,
+      dead: dead,
+      avgRssi: active == 0 ? 0 : rssiSum / active,
+      avgSnr: active == 0 ? 0 : snrSum / active,
+    );
+    _dataset = next;
+    final elapsed = watch.elapsedMilliseconds;
+    if (widget.zones.length >= 250 ||
+        widget.scans.length >= 250 ||
+        elapsed >= 50) {
+      meshStageEnd(
+        'map_dataset',
+        count: widget.zones.length,
+        ms: elapsed,
+        n2: widget.scans.length,
+      );
+    }
+    return next;
+  }
+
+  int _filterHash(Set<String> filters) {
+    if (filters.isEmpty) return 0;
+    final ordered = filters.toList()..sort();
+    return Object.hashAll(ordered);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final center = widget.zones.isNotEmpty
+        ? LatLng(widget.zones.first.centerLat, widget.zones.first.centerLng)
+        : const LatLng(39.5, -98.35);
+
+    final focusNodeId = widget.focusNodeId;
+    final effectiveNodeFilters = _effectiveNodeFilters(
+      focusNodeId: focusNodeId,
+      selectedNodeFilters: _selectedNodeFilters,
+    );
+    final dataset = _datasetFor(
+      focusNodeId: focusNodeId,
+      effectiveNodeFilters: effectiveNodeFilters,
+    );
+    final scopedNodesCount = dataset.scopedNodes;
+    final activeZonesLength = dataset.active;
+    final deadZonesLength = dataset.dead;
+    final avgRssi = dataset.avgRssi;
+    final avgSnr = dataset.avgSnr;
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewWidth = constraints.hasBoundedWidth
@@ -1171,8 +1273,8 @@ class _MapPageState extends State<MapPage> {
                     child: ScanStatsPanel(
                       nodesCount: scopedNodesCount,
                       isConnected: widget.bleConnected,
-                      activeZones: activeZones.length,
-                      deadZones: deadZones.length,
+                      activeZones: activeZonesLength,
+                      deadZones: deadZonesLength,
                       avgRssi: avgRssi,
                       avgSnr: avgSnr,
                       statsRadiusMiles: widget.statsRadiusMiles,
@@ -2327,4 +2429,40 @@ List<CoverageZone> _filterZonesByRadius({
     final d = distanceMiles(observerLat, observerLng, z.centerLat, z.centerLng);
     return d <= radiusMiles;
   }).toList();
+}
+
+class _MapDataset {
+  const _MapDataset({
+    required this.zones,
+    required this.scans,
+    required this.radius,
+    required this.lat,
+    required this.lng,
+    required this.focusNodeId,
+    required this.selectedCount,
+    required this.filterHash,
+    required this.filtered,
+    required this.identity,
+    required this.scopedNodes,
+    required this.active,
+    required this.dead,
+    required this.avgRssi,
+    required this.avgSnr,
+  });
+
+  final List<CoverageZone> zones;
+  final List<ScanResult> scans;
+  final int radius;
+  final double? lat;
+  final double? lng;
+  final String? focusNodeId;
+  final int selectedCount;
+  final int filterHash;
+  final List<CoverageZone> filtered;
+  final int identity;
+  final int scopedNodes;
+  final int active;
+  final int dead;
+  final double avgRssi;
+  final double avgSnr;
 }

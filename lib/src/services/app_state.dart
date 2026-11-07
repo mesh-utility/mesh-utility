@@ -15,7 +15,9 @@ import 'package:mesh_utility/src/services/location_service.dart';
 import 'package:mesh_utility/src/services/sync_service.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/hex_name_index.dart';
 import 'package:mesh_utility/src/services/history_pipeline.dart';
+import 'package:mesh_utility/src/services/mesh_stage_log.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/mesh_database_path.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
@@ -109,6 +111,7 @@ class AppState extends ChangeNotifier {
             _lastSelfInfoText = null;
             _sessionRadioContacts.clear();
             _sessionRadioContactTypes.clear();
+            _invalidateSessionContactLookup();
             // An in-flight contact sync owns the final status. Clearing it
             // here would replace "Bluetooth disconnected" with idle.
             if (!_contactSyncInFlight) {
@@ -737,6 +740,12 @@ class AppState extends ChangeNotifier {
   List<CoverageZone> coverageZones = const [];
   List<MeshNode> nodes = const [];
   List<ScanResult> scanResults = const [];
+  List<MeshNode>? _advertisedNodes;
+  List<ScanResult>? _advertisedResults;
+  List<RawScan>? _advertisedRaw;
+  FirstAdvertisedNameIndex? _advertisedNames;
+  LongestHexNameIndex? _sessionNameIndex;
+  int _sessionNameCount = -1;
   List<AppDebugLogEntry> get debugLogs => _debugLog.entries;
   String? get connectedRadioName {
     if (!bleConnected) return null;
@@ -845,6 +854,7 @@ class AppState extends ChangeNotifier {
     if (types != null) {
       _sessionRadioContactTypes.addAll(types);
     }
+    _invalidateSessionContactLookup();
   }
 
   @visibleForTesting
@@ -1234,6 +1244,8 @@ class AppState extends ChangeNotifier {
         }
         if (cancelled()) throw const HistoryLoadCancelled();
 
+        final fetchWatch = Stopwatch()..start();
+        meshStageStart('sync_fetch', count: settings.historyDays);
         final workerScans = await api.fetchRawScans(
           historyDays: settings.historyDays,
           deadzoneDays: settings.deadzoneDays,
@@ -1248,14 +1260,26 @@ class AppState extends ChangeNotifier {
           },
           isCancelled: cancelled,
         );
+        meshStageEnd(
+          'sync_fetch',
+          count: workerScans.length,
+          ms: fetchWatch.elapsedMilliseconds,
+        );
         if (cancelled()) throw const HistoryLoadCancelled();
 
+        final prepareWatch = Stopwatch()..start();
+        meshStageStart('sync_prepare', count: workerScans.length);
         final workerPrepared =
             await runOffUi(prepareRawScansWorker, <String, Object?>{
               'scans': workerScans,
               'connectedRadioId': connectedRadioId,
               'sanitizeDeadzoneRadios': true,
             }, weight: workerScans.length);
+        meshStageEnd(
+          'sync_prepare',
+          count: workerPrepared.scans.length,
+          ms: prepareWatch.elapsedMilliseconds,
+        );
         _logSuppressedDeadzoneRows(workerPrepared.suppressedRows, 'worker');
         if (workerPrepared.suppressedHexes.isNotEmpty) {
           await _cleanupWorkerDeadzoneRows(api, workerPrepared.suppressedHexes);
@@ -1263,6 +1287,12 @@ class AppState extends ChangeNotifier {
         if (cancelled()) throw const HistoryLoadCancelled();
 
         if (workerPrepared.scans.isNotEmpty) {
+          final mergeWatch = Stopwatch()..start();
+          meshStageStart(
+            'sync_merge',
+            count: workerPrepared.scans.length,
+            n2: localOnlyBeforeSync.length,
+          );
           final merged = await runOffUi(
             mergeWorkerAndLocalScansWorker,
             <String, Object?>{
@@ -1270,6 +1300,11 @@ class AppState extends ChangeNotifier {
               'localScans': localOnlyBeforeSync,
             },
             weight: workerPrepared.scans.length + localOnlyBeforeSync.length,
+          );
+          meshStageEnd(
+            'sync_merge',
+            count: merged.scans.length,
+            ms: mergeWatch.elapsedMilliseconds,
           );
           if (cancelled()) throw const HistoryLoadCancelled();
           rawScans = merged.scans;
@@ -1290,6 +1325,8 @@ class AppState extends ChangeNotifier {
         }
 
         var zonesFromWorker = false;
+        final coverageWatch = Stopwatch()..start();
+        meshStageStart('sync_coverage');
         try {
           final workerZones = await api.fetchCoverageZones(
             historyDays: settings.historyDays,
@@ -1322,9 +1359,24 @@ class AppState extends ChangeNotifier {
           }
           coverageZones = preparedZones.zones;
           zonesFromWorker = true;
+          meshStageEnd(
+            'sync_coverage',
+            count: preparedZones.zones.length,
+            ms: coverageWatch.elapsedMilliseconds,
+          );
         } on HistoryLoadCancelled {
+          meshStageEnd(
+            'sync_coverage',
+            count: 0,
+            ms: coverageWatch.elapsedMilliseconds,
+          );
           rethrow;
         } catch (_) {
+          meshStageEnd(
+            'sync_coverage',
+            count: 0,
+            ms: coverageWatch.elapsedMilliseconds,
+          );
           _debugLog.warn(
             'sync',
             'Coverage zones endpoint failed, falling back to local aggregation',
@@ -1354,6 +1406,12 @@ class AppState extends ChangeNotifier {
       } finally {
         historyLoadLabel = null;
         _debugLog.info('sync', 'Worker sync finished');
+        meshStage(
+          'sync_finish',
+          event: 'end',
+          count: rawScans.length,
+          n2: coverageZones.length,
+        );
         notifyListeners();
       }
     } finally {
@@ -1585,6 +1643,7 @@ class AppState extends ChangeNotifier {
     _lastSelfInfoHex = null;
     _lastSelfInfoText = null;
     _sessionRadioContacts.clear();
+    _invalidateSessionContactLookup();
     // Keep a sync that already finished as disconnected. The link callback
     // completes that sync before this line runs.
     if (contactsSyncProgress.active && !contactsSyncProgress.disconnected) {
@@ -2230,6 +2289,7 @@ class AppState extends ChangeNotifier {
         _sessionRadioContactTypes[c.publicKeyPrefix] = c.type;
         _radioContactsByPrefix[c.publicKeyPrefix] = c.name;
       }
+      _invalidateSessionContactLookup();
       final id = _connectedRadioMeshId8();
       // The book stays on device. Only REPEATER/ROOM names are eligible for
       // upload, and that gating is unchanged.
@@ -2341,6 +2401,7 @@ class AppState extends ChangeNotifier {
       _sessionRadioContactTypes
         ..clear()
         ..addAll(sessionTypes);
+      _invalidateSessionContactLookup();
     }
 
     // Final merge covers anything still buffered and records lastmod for the
@@ -2382,6 +2443,7 @@ class AppState extends ChangeNotifier {
       _sessionRadioContactTypes
         ..clear()
         ..addAll({for (final c in merged.values) c.publicKeyPrefix: c.type});
+      _invalidateSessionContactLookup();
       _debugLog.warn(
         'contacts',
         'Local store merge received=${sessionContacts.length} stored=${merged.length}',
@@ -2413,6 +2475,7 @@ class AppState extends ChangeNotifier {
     if (p.isEmpty) return;
     if (n.isNotEmpty) {
       _sessionRadioContacts[p] = n;
+      _invalidateSessionContactLookup();
     }
     if (type != 0) {
       _sessionRadioContactTypes[p] = type;
@@ -2448,6 +2511,7 @@ class AppState extends ChangeNotifier {
             if (session.containsKey(c.publicKeyPrefix))
               c.publicKeyPrefix: c.type,
         });
+        _invalidateSessionContactLookup();
         // One-time migrate legacy SharedPreferences book if present.
         final legacy = settings.contactsByRadioId[radioId];
         if (legacy != null && legacy.isNotEmpty) {
@@ -2473,6 +2537,7 @@ class AppState extends ChangeNotifier {
     _pruneSelfContact(session);
     if (session.isEmpty) return;
     _sessionRadioContacts.addAll(session);
+    _invalidateSessionContactLookup();
     notifyListeners();
   }
 
@@ -2593,7 +2658,20 @@ class AppState extends ChangeNotifier {
   }
 
   int _backfillScanNamesFromContacts(Map<String, String> contacts) {
+    final watch = Stopwatch()..start();
+    meshStageStart(
+      'backfill',
+      count: rawScans.length,
+      n2: contacts.length,
+    );
     final storeable = _namesAllowedOnScans(contacts);
+    final names = LongestHexNameIndex.fromMap(storeable);
+    final sessionNames = _sessionContactNames();
+    final bookNames = <LongestHexNameIndex>[
+      for (final book in settings.contactsByRadioId.values)
+        if (book.isNotEmpty) LongestHexNameIndex.fromMap(book),
+    ];
+    final types = LongestHexTypeIndex(_sessionRadioContactTypes);
     var updates = 0;
     List<RawScan>? next;
     final connectedMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
@@ -2601,44 +2679,42 @@ class AppState extends ChangeNotifier {
     var globalNodeContactMatches = 0;
     var globalSenderBackfillable = 0;
     var globalReceiverBackfillable = 0;
-    final contactIdCache = storeable.keys
-        .map(normalizeHexId)
-        .where((v) => v.isNotEmpty)
-        .toList(growable: false);
+
+    bool nameInContactBook(String id, String name) {
+      if (sessionNames.lookup(id) == name) return true;
+      for (final book in bookNames) {
+        if (book.lookup(id) == name) return true;
+      }
+      return false;
+    }
+
+    bool leakedCompanion(String id, String name) {
+      if (name.isEmpty || !nameInContactBook(id, name)) return false;
+      final type = types.lookup(id);
+      if (type == null) return true;
+      return !isInfrastructureAdvertType(type);
+    }
+
     for (final scan in rawScans) {
       final senderId = (scan.nodeId ?? '').trim().toUpperCase();
       final observerId = (scan.observerId ?? '').trim().toUpperCase();
       final senderCurrent = (scan.senderName ?? '').trim();
       final receiverCurrent = (scan.receiverName ?? '').trim();
-      final senderMatchGlobal = _bestContactNameForId(storeable, senderId);
-      final observerMatchGlobal = _bestContactNameForId(storeable, observerId);
-      final senderNeedsBackfill =
-          senderMatchGlobal != null && senderCurrent != senderMatchGlobal;
-      final receiverNeedsBackfill =
-          observerMatchGlobal != null && receiverCurrent != observerMatchGlobal;
-      if (senderNeedsBackfill) {
+      final senderMatch = names.lookup(senderId);
+      final observerMatch = names.lookup(observerId);
+      if (senderMatch != null && senderCurrent != senderMatch) {
         globalSenderBackfillable += 1;
       }
-      if (receiverNeedsBackfill) {
+      if (observerMatch != null && receiverCurrent != observerMatch) {
         globalReceiverBackfillable += 1;
       }
       final nodeNorm = normalizeHexId(scan.nodeId ?? '');
-      if (nodeNorm.isNotEmpty) {
-        for (final contactId in contactIdCache) {
-          if (idsLikelySameDevice(nodeNorm, contactId)) {
-            globalNodeContactMatches += 1;
-            break;
-          }
-        }
+      if (nodeNorm.isNotEmpty && names.matchesId(nodeNorm)) {
+        globalNodeContactMatches += 1;
       }
       candidateScans += 1;
-      final senderMatch = _bestContactNameForId(storeable, senderId);
-      final observerMatch = _bestContactNameForId(storeable, observerId);
 
-      final senderLeakedCompanion = _isNonInfrastructureContactName(
-        senderId,
-        senderCurrent,
-      );
+      final senderLeakedCompanion = leakedCompanion(senderId, senderCurrent);
       final newSenderName = senderLeakedCompanion
           ? (senderMatch ?? _shortNodeId(senderId))
           : (senderMatch ?? scan.senderName);
@@ -2687,6 +2763,12 @@ class AppState extends ChangeNotifier {
           'nodeMatches=$globalNodeContactMatches '
           'globalSenderBackfillable=$globalSenderBackfillable '
           'globalReceiverBackfillable=$globalReceiverBackfillable',
+    );
+    meshStageEnd(
+      'backfill',
+      count: rawScans.length,
+      ms: watch.elapsedMilliseconds,
+      n2: updates,
     );
     return updates;
   }
@@ -2764,62 +2846,65 @@ class AppState extends ChangeNotifier {
 
   String? _bestContactNameForId(Map<String, String> contacts, String id) {
     if (id.isEmpty || contacts.isEmpty) return null;
-    final upper = normalizeHexId(id);
-    if (upper.isEmpty) return null;
-
-    // Contact keys are often the full public-key prefix (16 hex) while scans
-    // store the short id (8 hex). An exact short-key hit can be the id itself
-    // from an advert cache, so keep the longest non-placeholder match.
-    String? bestName;
-    var bestLength = -1;
-    for (final entry in contacts.entries) {
-      final prefix = normalizeHexId(entry.key);
-      if (prefix.isEmpty) continue;
-      if (prefix != upper && !idsLikelySameDevice(prefix, upper)) continue;
-      final name = entry.value.trim();
-      if (name.isEmpty || isPlaceholderNodeName(name, upper)) continue;
-      if (prefix.length > bestLength) {
-        bestLength = prefix.length;
-        bestName = name;
-      }
+    if (identical(contacts, _sessionRadioContacts)) {
+      return _sessionContactNames().lookup(id);
     }
-    return bestName;
+    return LongestHexNameIndex.fromMap(contacts).lookup(id);
   }
 
   String? _storedAdvertisedName(String nodeId) {
-    final target = normalizeHexId(nodeId);
-    if (target.isEmpty && nodeId.trim().isEmpty) return null;
+    if (nodeId.trim().isEmpty) return null;
+    return _advertisedNameIndex().lookup(nodeId);
+  }
 
-    bool matches(String candidate) {
-      if (target.isEmpty) return candidate.trim() == nodeId.trim();
-      final hex = normalizeHexId(candidate);
-      return hex.isNotEmpty &&
-          (hex == target || idsLikelySameDevice(hex, target));
+  /// One pass over the current history. The root build used to call this
+  /// once per scan, and each call walked every row again.
+  FirstAdvertisedNameIndex _advertisedNameIndex() {
+    if (_advertisedNames != null &&
+        identical(_advertisedNodes, nodes) &&
+        identical(_advertisedResults, scanResults) &&
+        identical(_advertisedRaw, rawScans)) {
+      return _advertisedNames!;
     }
-
-    String? usable(String? name, String id) {
-      final trimmed = (name ?? '').trim();
-      if (trimmed.isEmpty || isPlaceholderNodeName(trimmed, id)) return null;
-      return trimmed;
-    }
-
+    final watch = Stopwatch()..start();
+    final rows = nodes.length + scanResults.length + rawScans.length;
+    meshStageStart('advertised_name_index', count: rows);
+    final index = FirstAdvertisedNameIndex();
     for (final node in nodes) {
-      if (!matches(node.nodeId)) continue;
-      final name = usable(node.name, node.nodeId);
-      if (name != null) return name;
+      index.add(node.nodeId, node.name);
     }
     for (final scan in scanResults) {
-      if (!matches(scan.nodeId)) continue;
-      final name = usable(scan.senderName, scan.nodeId);
-      if (name != null) return name;
+      index.add(scan.nodeId, scan.senderName);
     }
     for (final scan in rawScans) {
-      final id = scan.nodeId ?? '';
-      if (!matches(id)) continue;
-      final name = usable(scan.senderName, id);
-      if (name != null) return name;
+      index.add(scan.nodeId ?? '', scan.senderName);
     }
-    return null;
+    _advertisedNames = index;
+    _advertisedNodes = nodes;
+    _advertisedResults = scanResults;
+    _advertisedRaw = rawScans;
+    meshStageEnd(
+      'advertised_name_index',
+      count: rows,
+      ms: watch.elapsedMilliseconds,
+    );
+    return index;
+  }
+
+  void _invalidateSessionContactLookup() {
+    _sessionNameIndex = null;
+    _sessionNameCount = -1;
+  }
+
+  LongestHexNameIndex _sessionContactNames() {
+    if (_sessionNameIndex != null &&
+        _sessionNameCount == _sessionRadioContacts.length) {
+      return _sessionNameIndex!;
+    }
+    final index = LongestHexNameIndex.fromMap(_sessionRadioContacts);
+    _sessionNameIndex = index;
+    _sessionNameCount = _sessionRadioContacts.length;
+    return index;
   }
 
   String _shortNodeId(String nodeId) => shortNodeId(nodeId);
@@ -3474,10 +3559,18 @@ class AppState extends ChangeNotifier {
   Future<void> _rebuildDerivedData({bool skipZones = false}) async {
     final generation = ++_derivedGeneration;
     final scans = rawScans;
+    final derivedWatch = Stopwatch()..start();
+    meshStageStart('derived', count: scans.length, n2: skipZones ? 0 : 1);
     final derived = await runOffUi(
       buildDerivedScanDataWorker,
       <String, Object?>{'scans': scans, 'includeZones': !skipZones},
       weight: scans.length,
+    );
+    meshStageEnd(
+      'derived',
+      count: scans.length,
+      ms: derivedWatch.elapsedMilliseconds,
+      n2: derived.zones.length,
     );
     if (generation != _derivedGeneration) return;
     if (!skipZones) {

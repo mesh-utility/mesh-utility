@@ -310,6 +310,55 @@ void main() {
       expect(remote.single.radioId, 'RADIO123');
     },
   );
+
+  test('a large history payload round-trips through a real isolate', () async {
+    final scans = _bulkHistory(1800);
+    expect(scans.length, greaterThanOrEqualTo(1500));
+    expect(scans.length, lessThanOrEqualTo(2000));
+
+    final before = _isolateEpoch;
+    final encoded = await runOffUi(
+      encodeRawScansForStorage,
+      scans,
+      weight: scans.length,
+    );
+    expect(_isolateEpoch, before);
+    expect(encoded, encodeRawScansForStorage(scans));
+
+    final decoded = await runOffUi(
+      decodeStoredRawScansWorker,
+      encoded,
+      weight: encoded.length,
+    );
+    expect(_isolateEpoch, before);
+    final decodedLocal = decodeStoredRawScans(encoded);
+    expect(decoded.length, decodedLocal.length);
+    expect(decoded.length, scans.length);
+    expect(decoded.first.nodeId, decodedLocal.first.nodeId);
+    expect(decoded.first.senderName, decodedLocal.first.senderName);
+    expect(decoded.last.nodeId, decodedLocal.last.nodeId);
+    expect(decoded[900].rssi, decodedLocal[900].rssi);
+    expect(decoded[900].timestamp, decodedLocal[900].timestamp);
+
+    final message = <String, Object?>{
+      'scans': scans,
+      'connectedRadioId': 'AAAA1111',
+      'sanitizeDeadzoneRadios': false,
+    };
+    final preparedLocal = prepareRawScans(
+      scans,
+      connectedRadioId: 'AAAA1111',
+      sanitizeDeadzoneRadios: false,
+    );
+    final prepared = await Isolate.run(() => prepareRawScansWorker(message));
+    expect(_isolateEpoch, before);
+    expect(prepared.scans.length, preparedLocal.scans.length);
+    expect(prepared.scans.length, scans.length);
+    expect(prepared.scans[123].nodeId, preparedLocal.scans[123].nodeId);
+    expect(prepared.scans[123].senderName, scans[123].senderName);
+    expect(prepared.scans[123].radioId, preparedLocal.scans[123].radioId);
+    expect(prepared.suppressedRows, preparedLocal.suppressedRows);
+  });
 }
 
 List<RawScan> _representativeScans() {
@@ -363,6 +412,31 @@ List<RawScan> _representativeScans() {
       downloadedFromWorker: true,
     ),
   );
+  return scans;
+}
+
+List<RawScan> _bulkHistory(int count) {
+  final scans = <RawScan>[];
+  for (var i = 0; i < count; i++) {
+    scans.add(
+      RawScan(
+        observerId: i.isEven ? 'AAAA1111' : 'BBBB2222',
+        nodeId: i.toRadixString(16).padLeft(8, '0'),
+        latitude: 37.0 + (i % 50) * 0.01,
+        longitude: -122.0 - (i % 40) * 0.01,
+        rssi: -40.0 - (i % 50),
+        snr: (i % 10) - 2,
+        snrIn: 1.25,
+        altitude: 10.0 + i,
+        timestamp: DateTime.utc(2024, 1, 1).add(Duration(minutes: i)),
+        receivedAt: DateTime.utc(2024, 1, 1, 3).add(Duration(minutes: i)),
+        senderName: 'Node $i',
+        receiverName: 'Radio',
+        radioId: i.isEven ? 'AAAA1111' : 'BBBB2222',
+        downloadedFromWorker: i.isOdd,
+      ),
+    );
+  }
   return scans;
 }
 
