@@ -4,6 +4,7 @@ This repository has three GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): analyze and test on pull requests and branch pushes. It does not build release artifacts.
 - `Deploy` (`.github/workflows/deploy.yml`): when a full release is published (or on a manual run), deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages. Pushes to `main` do not deploy.
+- `Announce Release on Discord` (`.github/workflows/discord-release.yml`): when a full release is published, posts its name, notes and download links to Discord using the `DISCORD_RELEASE_WEBHOOK` repository secret. Skipped for prereleases, drafts, or if the secret is missing.
 - `Release Artifacts` (`.github/workflows/release-artifacts.yml`): when a GitHub release is published or prereleased, or when re-run by hand with a `release_tag`, builds artifacts and attaches the non-web files to that release.
 
 Publishing a full release tagged `Alpha-N` is what ships Android and Linux downloads. The live site at https://mesh-utility.org updates from the deploy workflow, not from the release-artifact web build.
