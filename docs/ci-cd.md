@@ -3,7 +3,7 @@
 This repository has three GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): analyze and test on pull requests and branch pushes. It does not build release artifacts.
-- `Deploy` (`.github/workflows/deploy.yml`): on a push to `main` (also `master` and `mesh-utility`) or a manual run, deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages.
+- `Deploy` (`.github/workflows/deploy.yml`): when a full release is published (or on a manual run), deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages. Pushes to `main` do not deploy.
 - `Release Artifacts` (`.github/workflows/release-artifacts.yml`): when a GitHub release is published or prereleased, or when re-run by hand with a `release_tag`, builds artifacts and attaches the non-web files to that release.
 
 Publishing a full release tagged `Alpha-N` is what ships Android and Linux downloads. The live site at https://mesh-utility.org updates from the deploy workflow, not from the release-artifact web build.
@@ -51,7 +51,7 @@ npx wrangler secret put GITHUB_TOKEN
 
 The deploy job uses the GitHub Environment `production`.
 
-Allow deployments from `main`. The workflow also triggers on `master` and `mesh-utility`, so those branches need to be allowed too if you still push them.
+Deploys run from release tags, so if you add deployment branch rules to the `production` environment, allow tags (for example `Alpha-*`) as well as `main`.
 
 ## 4) Branch protection
 
@@ -76,7 +76,7 @@ Steps:
 2. Build Flutter web with `tool/build_web_cloudflare.sh` and `WORKER_URL=https://mesh-utility.org/api`.
 3. Deploy `build/web` to the Cloudflare Pages project `mesh-utility-tracker`.
 
-The Pages production branch name in that command is `mesh-utility`. That is the Pages branch, not the git branch. A push to git `main` still deploys Worker and Pages.
+The Pages production branch name in that command is `mesh-utility`. That is the Pages branch, not the git branch. Publishing a release deploys Worker and Pages; a push to git `main` does not.
 
 The Worker serves `https://mesh-utility.org/api/*` (the `/api` prefix is stripped) and keeps `workers.dev` enabled.
 

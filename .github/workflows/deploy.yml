@@ -1,11 +1,11 @@
 name: Deploy
 
+# Deploys only when a full release is published (not on pushes to main).
+# Manual runs are still possible from the Actions tab.
 on:
-  push:
-    branches:
-      - main
-      - master
-      - mesh-utility
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:

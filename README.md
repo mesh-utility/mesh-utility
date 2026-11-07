@@ -154,7 +154,7 @@ Dead zones and live zones share that key. A zone is a dead zone when that cell h
 
 ## Deploy
 
-Pushing to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages.
+Publishing a full release runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages.
 
 Publishing a GitHub release runs [`.github/workflows/release-artifacts.yml`](.github/workflows/release-artifacts.yml), which builds release artifacts and attaches them to that release.
 
