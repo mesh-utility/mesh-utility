@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -50,13 +51,9 @@ Uint8List buildSyntheticContactFrame({
     frame[contactPubKeyOffset + i] = (0xA5 ^ i) & 0xff;
   }
   frame[contactTypeOffset] = type;
-  final nameBytes = name.codeUnits;
-  final max = maxNameSize - 1;
-  final len = nameBytes.length > max ? max : nameBytes.length;
-  for (var i = 0; i < len; i++) {
-    frame[contactNameOffset + i] = nameBytes[i];
-  }
-  frame[contactNameOffset + len] = 0;
+  final nameBytes = utf8.encode(name);
+  final len = nameBytes.length > maxNameSize ? maxNameSize : nameBytes.length;
+  frame.setRange(contactNameOffset, contactNameOffset + len, nameBytes);
   frame.setRange(contactLastModOffset, contactLastModOffset + 4, _le32(lastMod));
   return frame;
 }
@@ -553,6 +550,41 @@ void main() {
       expect(progressEvents.last.active, isFalse);
       for (final event in progressEvents.take(progressEvents.length - 1)) {
         expect(event.active, isTrue);
+      }
+      await controller.close();
+    });
+
+    test('counts emoji, non-Latin, 1-char, and empty names once per prefix', () async {
+      const names = <String>['😀', '节点', 'Q', ''];
+      final controller = StreamController<Uint8List>.broadcast();
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: (since) async {
+          controller.add(buildContactsStartFrame(names.length));
+          for (var i = 0; i < names.length; i++) {
+            controller.add(
+              buildSyntheticContactFrame(index: i + 1, name: names[i]),
+            );
+          }
+          // Same public-key prefix as the empty name. Must not add a row.
+          controller.add(
+            buildSyntheticContactFrame(index: names.length, name: ''),
+          );
+          controller.add(buildEndOfContactsFrame());
+        },
+        idleTimeout: const Duration(seconds: 2),
+        retryDelay: Duration.zero,
+        maxAttempts: 1,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 5));
+      expect(result.sawEnd, isTrue);
+      expect(result.contacts.length, names.length);
+      expect(result.isComplete, isTrue);
+      for (var i = 0; i < names.length; i++) {
+        final prefix = syntheticContactPrefix(i + 1);
+        expect(result.contacts.containsKey(prefix), isTrue);
+        expect(result.contacts[prefix], names[i]);
       }
       await controller.close();
     });

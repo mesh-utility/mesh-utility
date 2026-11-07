@@ -436,8 +436,18 @@ RadioContact? parseRadioContact(Uint8List frame) {
       .join()
       .toUpperCase();
 
-  final name = _extractBestContactName(frame);
-  if (name.isEmpty) return null;
+  // RESP_CONTACT is a fixed 148-byte frame. The name is always the
+  // 32-byte NUL-terminated field at byte 100. Any UTF-8 sequence is kept,
+  // including empty, so a name cannot drop the contact.
+  final nameStart = contactNameOffset;
+  final nameLimit = nameStart + maxNameSize;
+  var nameEnd = nameStart;
+  while (nameEnd < nameLimit && nameEnd < frame.length && frame[nameEnd] != 0) {
+    nameEnd++;
+  }
+  final name = utf8
+      .decode(frame.sublist(nameStart, nameEnd), allowMalformed: true)
+      .trim();
 
   final type = frame[contactTypeOffset];
   final lastMod = frame.length >= contactLastModOffset + 4
@@ -449,42 +459,6 @@ RadioContact? parseRadioContact(Uint8List frame) {
     type: type,
     lastMod: lastMod,
   );
-}
-
-String _extractBestContactName(Uint8List frame) {
-  String best = '';
-  var bestScore = 0;
-
-  // Known/observed layout offsets across protocol variants.
-  const candidateOffsets = <int>[contactNameOffset, 112, 108, 104, 96];
-  for (final offset in candidateOffsets) {
-    final candidate = readCString(
-      frame,
-      offset,
-      (frame.length - offset).clamp(0, maxNameSize),
-    ).trim();
-    final score = _contactNameScore(candidate);
-    if (score > bestScore) {
-      best = candidate;
-      bestScore = score;
-    }
-  }
-
-  // Fallback: scan for a likely printable C-string in the latter half.
-  final searchStart = frame.length > 72 ? 72 : 0;
-  final searchEnd = frame.length > 8 ? frame.length - 8 : frame.length;
-  for (var i = searchStart; i < searchEnd; i++) {
-    final maxLen = (frame.length - i).clamp(0, maxNameSize);
-    if (maxLen < 4) continue;
-    final candidate = readCString(frame, i, maxLen).trim();
-    final score = _contactNameScore(candidate);
-    if (score > bestScore) {
-      best = candidate;
-      bestScore = score;
-    }
-  }
-
-  return bestScore >= 8 ? best : '';
 }
 
 int _contactNameScore(String value) {

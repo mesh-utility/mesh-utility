@@ -195,7 +195,8 @@ Future<ContactSyncResult> collectContactsFromInbound({
   void remember(RadioContact contact) {
     final prefix = contact.publicKeyPrefix.trim().toUpperCase();
     final name = contact.name.trim();
-    if (prefix.isEmpty || name.isEmpty) return;
+    // Identity is the public-key prefix. An empty name is still a contact.
+    if (prefix.isEmpty) return;
     final previousLast = lastMods[prefix] ?? 0;
     final changed =
         contacts[prefix] != name ||

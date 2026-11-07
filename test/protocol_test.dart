@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -275,7 +276,9 @@ void main() {
         0xDD,
       ]);
       frame[contactTypeOffset] = type;
-      frame.setAll(contactNameOffset, name.codeUnits);
+      final encoded = utf8.encode(name);
+      final len = encoded.length > maxNameSize ? maxNameSize : encoded.length;
+      frame.setRange(contactNameOffset, contactNameOffset + len, encoded);
       return frame;
     }
 
@@ -324,6 +327,18 @@ void main() {
 
     test('parseRadioContact returns null for a short frame', () {
       expect(parseRadioContact(Uint8List(10)), isNull);
+    });
+
+    test('parseRadioContact keeps emoji, non-Latin, 1-char, and empty names', () {
+      const names = <String>['😀', '节点', 'Q', ''];
+      for (final name in names) {
+        final parsed = parseRadioContact(
+          contactFrame(type: advTypeChat, name: name),
+        );
+        expect(parsed, isNotNull, reason: 'name length ${name.runes.length}');
+        expect(parsed!.name, name);
+        expect(parsed.publicKeyPrefix, '1052A930AABBCCDD');
+      }
     });
   });
 }
