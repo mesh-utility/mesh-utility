@@ -183,15 +183,31 @@ List<HexCoverageCluster> aggregateCoverageHexes(
   ];
 }
 
+/// Isolate entry for [aggregateCoverageHexes]. Message keys: `zones`, `scale`.
+List<HexCoverageCluster> aggregateCoverageHexesWorker(
+  Map<String, Object?> message,
+) {
+  final scale = message['scale'];
+  if (scale is! int) {
+    throw ArgumentError.value(scale, 'scale', 'Expected an int hex scale');
+  }
+  return aggregateCoverageHexes(_zonesArg(message['zones']), scale: scale);
+}
+
+List<CoverageZone> _zonesArg(Object? raw) {
+  if (raw is List<CoverageZone>) return raw;
+  if (raw is List) return List<CoverageZone>.from(raw);
+  throw ArgumentError.value(raw, 'zones', 'Expected a coverage zone list');
+}
+
 /// Same grouping as [aggregateCoverageHexes], off the UI isolate.
 Future<List<HexCoverageCluster>> aggregateCoverageHexesOffUi(
   List<CoverageZone> zones, {
   required int scale,
 }) {
-  final zoneCopy = zones;
-  final scaleCopy = scale;
   return runOffUi(
-    () => aggregateCoverageHexes(zoneCopy, scale: scaleCopy),
+    aggregateCoverageHexesWorker,
+    <String, Object?>{'zones': zones, 'scale': scale},
     force: true,
     weight: zones.length,
   );

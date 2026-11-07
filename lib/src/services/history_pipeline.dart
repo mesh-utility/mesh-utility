@@ -428,3 +428,72 @@ List<CoverageZone>? parseCoverageZoneBytes(List<int> bytes) {
   }
   return zones;
 }
+
+/// Isolate entry for [prepareRawScans]. Message keys: `scans`,
+/// `connectedRadioId`, `sanitizeDeadzoneRadios`.
+PreparedScans prepareRawScansWorker(Map<String, Object?> message) {
+  return prepareRawScans(
+    _rawScansArg(message['scans']),
+    connectedRadioId: message['connectedRadioId'] as String?,
+    sanitizeDeadzoneRadios: message['sanitizeDeadzoneRadios'] == true,
+  );
+}
+
+/// Isolate entry for [mergeWorkerAndLocalScans]. Message keys:
+/// `workerScans`, `localScans`.
+MergedScanHistory mergeWorkerAndLocalScansWorker(Map<String, Object?> message) {
+  return mergeWorkerAndLocalScans(
+    workerScans: _rawScansArg(message['workerScans']),
+    localScans: _rawScansArg(message['localScans']),
+  );
+}
+
+/// Isolate entry for [prepareCoverageZones]. Message keys: `zones`,
+/// `connectedRadioId`.
+PreparedZones prepareCoverageZonesWorker(Map<String, Object?> message) {
+  return prepareCoverageZones(
+    _zonesArg(message['zones']),
+    message['connectedRadioId'] as String?,
+  );
+}
+
+/// Isolate entry for [buildDerivedScanData]. Message keys: `scans`,
+/// `includeZones` (defaults to true).
+DerivedScanData buildDerivedScanDataWorker(Map<String, Object?> message) {
+  return buildDerivedScanData(
+    _rawScansArg(message['scans']),
+    includeZones: message['includeZones'] != false,
+  );
+}
+
+/// Isolate entry for [decodeStoredRawScans].
+List<RawScan> decodeStoredRawScansWorker(Object? raw) {
+  return decodeStoredRawScans(raw);
+}
+
+/// Isolate entry for [parseRawScanBytes]. Message keys: `bytes`,
+/// `downloadedFromWorker`.
+List<RawScan> parseRawScanBytesWorker(Map<String, Object?> message) {
+  return parseRawScanBytes(
+    _bytesArg(message['bytes']),
+    downloadedFromWorker: message['downloadedFromWorker'] == true,
+  );
+}
+
+List<RawScan> _rawScansArg(Object? raw) {
+  if (raw is List<RawScan>) return raw;
+  if (raw is List) return List<RawScan>.from(raw);
+  throw ArgumentError.value(raw, 'scans', 'Expected a raw scan list');
+}
+
+List<CoverageZone> _zonesArg(Object? raw) {
+  if (raw is List<CoverageZone>) return raw;
+  if (raw is List) return List<CoverageZone>.from(raw);
+  throw ArgumentError.value(raw, 'zones', 'Expected a coverage zone list');
+}
+
+List<int> _bytesArg(Object? raw) {
+  if (raw is List<int>) return raw;
+  if (raw is List) return List<int>.from(raw);
+  throw ArgumentError.value(raw, 'bytes', 'Expected scan bytes');
+}

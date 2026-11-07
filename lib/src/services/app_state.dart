@@ -1045,10 +1045,9 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     try {
       final stored = await _localStore.loadRawScans();
-      final prepared = await runOffUi(
-        () => prepareRawScans(stored),
-        weight: stored.length,
-      );
+      final prepared = await runOffUi(prepareRawScansWorker, <String, Object?>{
+        'scans': stored,
+      }, weight: stored.length);
       rawScans = prepared.scans;
       _logSuppressedDeadzoneRows(prepared.suppressedRows, 'local_cache');
       if (prepared.changed) {
@@ -1251,14 +1250,12 @@ class AppState extends ChangeNotifier {
         );
         if (cancelled()) throw const HistoryLoadCancelled();
 
-        final workerPrepared = await runOffUi(
-          () => prepareRawScans(
-            workerScans,
-            connectedRadioId: connectedRadioId,
-            sanitizeDeadzoneRadios: true,
-          ),
-          weight: workerScans.length,
-        );
+        final workerPrepared =
+            await runOffUi(prepareRawScansWorker, <String, Object?>{
+              'scans': workerScans,
+              'connectedRadioId': connectedRadioId,
+              'sanitizeDeadzoneRadios': true,
+            }, weight: workerScans.length);
         _logSuppressedDeadzoneRows(workerPrepared.suppressedRows, 'worker');
         if (workerPrepared.suppressedHexes.isNotEmpty) {
           await _cleanupWorkerDeadzoneRows(api, workerPrepared.suppressedHexes);
@@ -1267,10 +1264,11 @@ class AppState extends ChangeNotifier {
 
         if (workerPrepared.scans.isNotEmpty) {
           final merged = await runOffUi(
-            () => mergeWorkerAndLocalScans(
-              workerScans: workerPrepared.scans,
-              localScans: localOnlyBeforeSync,
-            ),
+            mergeWorkerAndLocalScansWorker,
+            <String, Object?>{
+              'workerScans': workerPrepared.scans,
+              'localScans': localOnlyBeforeSync,
+            },
             weight: workerPrepared.scans.length + localOnlyBeforeSync.length,
           );
           if (cancelled()) throw const HistoryLoadCancelled();
@@ -1303,7 +1301,11 @@ class AppState extends ChangeNotifier {
           );
           if (cancelled()) throw const HistoryLoadCancelled();
           final preparedZones = await runOffUi(
-            () => prepareCoverageZones(workerZones, connectedRadioId),
+            prepareCoverageZonesWorker,
+            <String, Object?>{
+              'zones': workerZones,
+              'connectedRadioId': connectedRadioId,
+            },
             weight: workerZones.length,
           );
           if (cancelled()) throw const HistoryLoadCancelled();
@@ -2111,10 +2113,9 @@ class AppState extends ChangeNotifier {
     }
     if (appended.isNotEmpty) {
       final combined = <RawScan>[...appended, ...rawScans];
-      final prepared = await runOffUi(
-        () => prepareRawScans(combined),
-        weight: combined.length,
-      );
+      final prepared = await runOffUi(prepareRawScansWorker, <String, Object?>{
+        'scans': combined,
+      }, weight: combined.length);
       rawScans = prepared.scans;
       if (prepared.suppressedRows > 0) {
         _debugLog.info(
@@ -3474,7 +3475,8 @@ class AppState extends ChangeNotifier {
     final generation = ++_derivedGeneration;
     final scans = rawScans;
     final derived = await runOffUi(
-      () => buildDerivedScanData(scans, includeZones: !skipZones),
+      buildDerivedScanDataWorker,
+      <String, Object?>{'scans': scans, 'includeZones': !skipZones},
       weight: scans.length,
     );
     if (generation != _derivedGeneration) return;

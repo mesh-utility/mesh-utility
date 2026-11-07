@@ -12,7 +12,8 @@ class LocalStore {
     if (raw is! String && raw is! List) return const <RawScan>[];
     final stored = raw;
     return runOffUi(
-      () => decodeStoredRawScans(stored),
+      decodeStoredRawScansWorker,
+      stored,
       weight: raw is String ? raw.length : (raw as List).length,
     );
   }
@@ -21,7 +22,8 @@ class LocalStore {
     final db = await ReaxDatabase.instance();
     if (!kIsWeb && scans.length >= heavyScanCount) {
       final encoded = await runOffUi(
-        () => encodeRawScansForStorage(scans),
+        encodeRawScansForStorage,
+        scans,
         weight: scans.length,
       );
       await db.put(rawScansStorageKey, encoded);

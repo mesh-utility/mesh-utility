@@ -365,7 +365,7 @@ class WorkerApi {
   }
 
   Future<List<CoverageZone>?> _parseCoverageOffUi(List<int> bytes) {
-    return runOffUi(() => parseCoverageZoneBytes(bytes), force: true);
+    return runOffUi(parseCoverageZoneBytes, bytes, force: true);
   }
 
   String? _normalizeRadioId8(String? value) {
@@ -461,10 +461,10 @@ class WorkerApi {
     List<int> bytes, {
     required bool markDownloaded,
   }) {
-    return runOffUi(
-      () => parseRawScanBytes(bytes, downloadedFromWorker: markDownloaded),
-      force: true,
-    );
+    return runOffUi(parseRawScanBytesWorker, <String, Object?>{
+      'bytes': bytes,
+      'downloadedFromWorker': markDownloaded,
+    }, force: true);
   }
 
   Future<int> uploadScans(List<Map<String, dynamic>> scans) async {

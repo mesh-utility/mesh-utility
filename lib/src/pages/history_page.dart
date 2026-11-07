@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/history_scan_filter.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/history_csv_exporter.dart'
     as csv_export;
@@ -133,10 +134,12 @@ class _HistoryPageState extends State<HistoryPage> {
     if (_filteringInProgress) return;
     setState(() => _filteringInProgress = true);
 
-    final filtered = await compute(_filterScansIsolate, {
+    final range = _selectedDateRange;
+    final filtered = await compute(filterHistoryScansOffUi, <String, Object?>{
       'scans': _radiusFilteredScans,
       'selectedNodeIds': _selectedNodeIds.toList(growable: false),
-      'selectedDateRange': _selectedDateRange,
+      if (range != null) 'rangeStart': range.start,
+      if (range != null) 'rangeEnd': range.end,
       'startHour': _startHour,
       'endHour': _endHour,
       'selectedHexId': _selectedHexId,
@@ -564,60 +567,6 @@ class _HistoryPageState extends State<HistoryPage> {
       ),
     );
   }
-}
-
-List<ScanResult> _filterScansIsolate(Map<String, dynamic> params) {
-  final List<ScanResult> scans = params['scans'];
-  final List<String> selectedNodeIds =
-      ((params['selectedNodeIds'] as List?) ?? const <dynamic>[])
-          .cast<String>();
-  final DateTimeRange? selectedDateRange = params['selectedDateRange'];
-  final int? startHour = params['startHour'];
-  final int? endHour = params['endHour'];
-  final String? selectedHexId = params['selectedHexId'];
-  final selectedNodeIdSet = selectedNodeIds.toSet();
-
-  return scans.where((s) {
-    if (selectedNodeIdSet.isNotEmpty && !selectedNodeIdSet.contains(s.nodeId)) {
-      return false;
-    }
-    final localTs = s.timestamp.toLocal();
-    if (selectedDateRange != null) {
-      final start = DateTime(
-        selectedDateRange.start.year,
-        selectedDateRange.start.month,
-        selectedDateRange.start.day,
-      );
-      final end = DateTime(
-        selectedDateRange.end.year,
-        selectedDateRange.end.month,
-        selectedDateRange.end.day,
-        23,
-        59,
-        59,
-        999,
-      );
-      if (localTs.isBefore(start) || localTs.isAfter(end)) {
-        return false;
-      }
-    }
-    if (startHour != null || endHour != null) {
-      final hour = localTs.hour;
-      final start = startHour ?? 0;
-      final end = endHour ?? 23;
-      final inRange = start <= end
-          ? (hour >= start && hour <= end)
-          : (hour >= start || hour <= end);
-      if (!inRange) {
-        return false;
-      }
-    }
-    if (selectedHexId != null &&
-        hexKey(s.latitude, s.longitude) != selectedHexId) {
-      return false;
-    }
-    return true;
-  }).toList();
 }
 
 String _csvRow(List<String> cells) {

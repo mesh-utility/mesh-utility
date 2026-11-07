@@ -7,19 +7,27 @@ import 'package:flutter/foundation.dart';
 /// isolate startup.
 const int heavyScanCount = 250;
 
-/// Runs [computation] away from the platform UI isolate.
+/// Runs [worker] away from the platform UI isolate.
 ///
-/// Web has no background isolate for this work, so the computation stays on
-/// the caller there. Android is the target of the all-days ANR: parsing and
-/// aggregating a full public history on the UI isolate blocks input for
-/// minutes without an out-of-memory kill.
-Future<T> runOffUi<T>(
-  T Function() computation, {
+/// [worker] must be a top-level or static function. The closure passed to
+/// [Isolate.run] is created in this function and closes over only [worker]
+/// and [message]. A closure created in a method that also touches `this`
+/// shares that method's context, and sending it copies the app state, the
+/// widget tree, and other unsendable objects.
+///
+/// [message] and the value returned by [worker] must themselves be sendable
+/// (lists, maps, primitives, typed data, or plain data objects of those).
+/// Web has no background isolate, so the work stays on the caller there.
+/// Heavy and forced calls use [Isolate.run] under tests as well; nothing
+/// here checks `FLUTTER_TEST`.
+Future<R> runOffUi<M, R>(
+  R Function(M message) worker,
+  M message, {
   bool force = false,
   int weight = 0,
 }) {
   if (kIsWeb || (!force && weight < heavyScanCount)) {
-    return Future<T>.sync(computation);
+    return Future<R>.sync(() => worker(message));
   }
-  return Isolate.run(computation);
+  return Isolate.run(() => worker(message), debugName: 'mesh-off-ui');
 }
