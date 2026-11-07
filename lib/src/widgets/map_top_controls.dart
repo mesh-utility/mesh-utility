@@ -1,7 +1,13 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
+
+/// How long one map tip stays on screen before the next one replaces it.
+///
+/// A per-frame marquee schedules a raster frame for the whole map surface.
+/// This interval is a single [Timer] tick, then one instant text swap.
+const Duration mapUsageTipInterval = Duration(seconds: 10);
 
 class MapTopControls extends StatelessWidget {
   const MapTopControls({
@@ -154,19 +160,17 @@ class MapTopControls extends StatelessWidget {
               SizedBox(
                 width: rowWidth,
                 height: _tipSlotHeight,
-                child: bleUiEnabled
-                    ? Padding(
-                        padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
-                        child: _TipsMarquee(
-                          tips: _usageTips,
-                          enabled: true,
-                          pixelsPerSecond: 34,
-                          gapPixels: 72,
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: Colors.white70),
-                        ),
-                      )
-                    : const SizedBox.shrink(),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
+                  child: _RotatingUsageTip(
+                    key: const ValueKey<String>('map-usage-tips'),
+                    tips: _usageTips,
+                    enabled: bleUiEnabled,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.labelSmall?.copyWith(color: Colors.white70),
+                  ),
+                ),
               ),
             ],
           ),
@@ -176,79 +180,202 @@ class MapTopControls extends StatelessWidget {
   }
 }
 
-class _TipsMarquee extends StatefulWidget {
-  const _TipsMarquee({
+class _RotatingUsageTip extends StatefulWidget {
+  const _RotatingUsageTip({
+    super.key,
     required this.tips,
     required this.enabled,
-    required this.pixelsPerSecond,
-    required this.gapPixels,
     this.style,
   });
 
   final List<String> tips;
   final bool enabled;
-  final double pixelsPerSecond;
-  final double gapPixels;
   final TextStyle? style;
 
   @override
-  State<_TipsMarquee> createState() => _TipsMarqueeState();
+  State<_RotatingUsageTip> createState() => _RotatingUsageTipState();
 }
 
-class _TipsMarqueeState extends State<_TipsMarquee> {
-  static const String _tipSeparator = '        ';
+class _RotatingUsageTipState extends State<_RotatingUsageTip>
+    with WidgetsBindingObserver {
   final Random _random = Random();
-  String _cycleText = '';
+  Timer? _timer;
+  List<String> _order = const [];
+  int _index = 0;
+  bool _active = true;
 
   @override
   void initState() {
     super.initState();
-    _rebuildCycleText();
+    WidgetsBinding.instance.addObserver(this);
+    _resetOrder();
+    _syncTimer();
   }
 
   @override
-  void didUpdateWidget(covariant _TipsMarquee oldWidget) {
+  void didUpdateWidget(covariant _RotatingUsageTip oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.enabled != widget.enabled ||
-        oldWidget.tips.length != widget.tips.length) {
-      _rebuildCycleText();
+    final tipsChanged = !_sameTips(oldWidget.tips, widget.tips);
+    if (tipsChanged) {
+      _resetOrder();
+    }
+    if (tipsChanged || oldWidget.enabled != widget.enabled) {
+      _syncTimer();
     }
   }
 
-  void _rebuildCycleText() {
-    if (!widget.enabled || widget.tips.isEmpty) {
-      _cycleText = '';
+  @override
+  void activate() {
+    super.activate();
+    _active = true;
+    _syncTimer();
+  }
+
+  @override
+  void deactivate() {
+    _active = false;
+    _cancelTimer();
+    super.deactivate();
+  }
+
+  @override
+  void dispose() {
+    _active = false;
+    _cancelTimer();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _syncTimer();
+  }
+
+  bool get _appInForeground {
+    final state = WidgetsBinding.instance.lifecycleState;
+    // Null is the binding default before the first lifecycle event.
+    return state == null || state == AppLifecycleState.resumed;
+  }
+
+  bool get _shouldRotate {
+    return _active &&
+        mounted &&
+        widget.enabled &&
+        _order.length > 1 &&
+        _appInForeground;
+  }
+
+  bool _sameTips(List<String> a, List<String> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  void _resetOrder() {
+    _order = List<String>.from(widget.tips);
+    if (_order.length > 1) {
+      _order.shuffle(_random);
+    }
+    _index = 0;
+  }
+
+  void _syncTimer() {
+    if (!_shouldRotate) {
+      _cancelTimer();
       return;
     }
-    final segments = <String>[];
-    String? previousTail;
-    const rounds = 4;
-    for (var i = 0; i < rounds; i++) {
-      final shuffled = List<String>.from(widget.tips);
-      shuffled.shuffle(_random);
-      if (previousTail != null &&
-          shuffled.length > 1 &&
-          shuffled.first == previousTail) {
-        final swap = shuffled.first;
-        shuffled[0] = shuffled[1];
-        shuffled[1] = swap;
-      }
-      segments.addAll(shuffled);
-      previousTail = shuffled.isEmpty ? previousTail : shuffled.last;
+    _timer ??= Timer.periodic(mapUsageTipInterval, _onTick);
+  }
+
+  void _cancelTimer() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void _onTick(Timer timer) {
+    if (!identical(timer, _timer)) return;
+    if (!_shouldRotate || _order.isEmpty) {
+      _cancelTimer();
+      return;
     }
-    _cycleText = segments.join(_tipSeparator);
+    setState(() {
+      _index = (_index + 1) % _order.length;
+    });
+  }
+
+  bool _tipTruncated(BuildContext context, String tip, double maxWidth) {
+    final painter = TextPainter(
+      text: TextSpan(text: tip, style: widget.style),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      locale: Localizations.maybeLocaleOf(context),
+    )..layout(maxWidth: maxWidth);
+    final truncated = painter.didExceedMaxLines;
+    painter.dispose();
+    return truncated;
+  }
+
+  void _showFullTip(String tip) {
+    if (!mounted) return;
+    unawaited(
+      showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            key: const ValueKey<String>('map-usage-tip-dialog'),
+            scrollable: true,
+            content: Text(tip),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.enabled || _cycleText.isEmpty) {
+    if (!widget.enabled || _order.isEmpty) {
       return const SizedBox.shrink();
     }
-    return OverflowMarqueeText(
-      text: _cycleText,
-      pixelsPerSecond: widget.pixelsPerSecond,
-      gapPixels: widget.gapPixels,
-      style: widget.style,
+    final tip = _order[_index % _order.length];
+    return RepaintBoundary(
+      key: const ValueKey<String>('map-usage-tip'),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth = constraints.maxWidth;
+          final truncated =
+              maxWidth.isFinite &&
+              maxWidth > 0 &&
+              _tipTruncated(context, tip, maxWidth);
+          final line = Text(
+            tip,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: widget.style,
+          );
+          final child = truncated
+              ? GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _showFullTip(tip),
+                  child: line,
+                )
+              : line;
+          return SizedBox(
+            width: maxWidth.isFinite ? maxWidth : null,
+            height: constraints.hasBoundedHeight ? constraints.maxHeight : null,
+            child: Align(alignment: Alignment.centerLeft, child: child),
+          );
+        },
+      ),
     );
   }
 }
