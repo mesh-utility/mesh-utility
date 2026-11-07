@@ -2077,6 +2077,7 @@ class AppState extends ChangeNotifier {
         if (jumped ||
             expectedChanged ||
             progress.completed ||
+            progress.incomplete ||
             progress.timedOut) {
           lastNotifiedReceived = progress.received;
           notifyListeners();
@@ -2084,17 +2085,20 @@ class AppState extends ChangeNotifier {
       },
     );
 
+    final syncComplete = result.isComplete;
     contactsSyncProgress = ContactSyncProgress(
       active: false,
       received: result.contacts.length,
       expected: result.expectedTotal,
       timedOut: result.timedOut,
-      completed: true,
+      completed: syncComplete,
+      incomplete: result.expectedTotal != null && !syncComplete,
     );
 
     _debugLog.warn(
       'contacts',
-      'sync done received=${result.contacts.length} '
+      'sync ${syncComplete ? 'complete' : 'incomplete'} '
+      'stored=${result.contacts.length} '
       'expected=${result.expectedTotal ?? -1} '
       'sawEnd=${result.sawEnd} timedOut=${result.timedOut} '
       'attempts=${result.attempts} since=${initialSince ?? 0} '

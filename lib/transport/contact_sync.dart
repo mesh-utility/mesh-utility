@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:mesh_utility/transport/protocol.dart';
 
 /// Progress for an in-flight GET_CONTACTS sync.
@@ -11,13 +11,19 @@ class ContactSyncProgress {
     this.expected,
     this.timedOut = false,
     this.completed = false,
+    this.incomplete = false,
   });
 
   final bool active;
   final int received;
   final int? expected;
   final bool timedOut;
+
+  /// The sync finished and the stored book reached the radio total.
   final bool completed;
+
+  /// The sync finished short of the radio total.
+  final bool incomplete;
 
   static const idle = ContactSyncProgress(active: false, received: 0);
 
@@ -25,6 +31,18 @@ class ContactSyncProgress {
   String get progressLabel {
     if (expected != null) return 'Contacts $received/$expected';
     return 'Contacts $received';
+  }
+
+  /// True once the sync has stopped and the radio reported a book size.
+  bool get hasOutcome =>
+      !active && expected != null && (completed || incomplete || timedOut);
+
+  /// [progressLabel] while running. After the sync stops, appends
+  /// `complete` or `incomplete`.
+  String get statusLabel {
+    if (!hasOutcome) return progressLabel;
+    final outcome = received >= expected! ? 'complete' : 'incomplete';
+    return '$progressLabel $outcome';
   }
 }
 
@@ -68,19 +86,31 @@ class ContactSyncResult {
 
   /// Newest positive lastmod collected, including contacts seeded from the
   /// on-device store. This is the next CMD_GET_CONTACTS `since`.
+  ///
+  /// Lastmod is not arrival order. A resume from this value skips contacts
+  /// that were never stored when their lastmod is older.
   final int? newestLastMod;
+
+  /// Stored unique contacts reached the radio total. When the radio sent no
+  /// total, this is true only after RESP_END_OF_CONTACTS without an idle stop.
+  bool get isComplete {
+    final expected = expectedTotal;
+    if (expected == null) return sawEnd && !timedOut;
+    return contacts.length >= expected;
+  }
 }
 
 /// Runs GET_CONTACTS with a per-frame idle timeout and no total timeout.
 ///
 /// [idleTimeout] resets on every inbound frame, including PUSH adverts, so a
-/// slow phone can take as long as the link stays alive. If frames stop before
-/// RESP_END_OF_CONTACTS and the merged book is still short of the START total,
-/// the next attempt sends CMD_GET_CONTACTS with `since` set to the newest
-/// lastmod already collected. A filtered END that still falls short of the
-/// START total is retried once as a full dump (`since` omitted). Stops when
-/// END is seen, the merged count reaches the START total, or [maxAttempts]
-/// is exhausted.
+/// slow phone can take as long as the link stays alive. The sync is complete
+/// only when the merged unique book is at least the START total. A short
+/// RESP_END_OF_CONTACTS and an idle timeout both retry. The retry sends
+/// CMD_GET_CONTACTS with `since` set to the newest lastmod already collected.
+/// If that filtered resume adds no contacts, or a filtered END is still short
+/// of the total, the next attempt is a full dump (`since` omitted). Lastmod
+/// is not arrival order, so a since cursor cannot fill gaps it skips. Stops
+/// when the merged count reaches the START total or [maxAttempts] is exhausted.
 ///
 /// [onContacts] receives newly accepted contacts in batches so the caller can
 /// merge them into the per-radio store without blocking the frame parser.
@@ -106,22 +136,23 @@ Future<ContactSyncResult> collectContactsFromInbound({
   var timedOut = false;
   var attemptsUsed = 0;
   var wantFull = false;
-  int? lastRequestSince;
 
   final pending = <SyncedContact>[];
   Future<void>? flushing;
   var flushQueued = false;
 
-  void emit({bool completed = false, bool timedOutFlag = false}) {
+  void emit() {
     onProgress?.call(
       ContactSyncProgress(
-        active: !completed && !timedOutFlag,
+        active: true,
         received: contacts.length,
         expected: expectedTotal,
-        timedOut: timedOutFlag,
-        completed: completed,
       ),
     );
+  }
+
+  void logSync(String message) {
+    debugPrint('contact sync $message');
   }
 
   Future<void> deliver(List<SyncedContact> batch) async {
@@ -166,7 +197,8 @@ Future<ContactSyncResult> collectContactsFromInbound({
     final name = contact.name.trim();
     if (prefix.isEmpty || name.isEmpty) return;
     final previousLast = lastMods[prefix] ?? 0;
-    final changed = contacts[prefix] != name ||
+    final changed =
+        contacts[prefix] != name ||
         contactTypes[prefix] != contact.type ||
         contact.lastMod > previousLast;
     contacts[prefix] = name;
@@ -180,7 +212,9 @@ Future<ContactSyncResult> collectContactsFromInbound({
         publicKeyPrefix: prefix,
         name: name,
         type: contact.type,
-        lastMod: contact.lastMod > previousLast ? contact.lastMod : previousLast,
+        lastMod: contact.lastMod > previousLast
+            ? contact.lastMod
+            : previousLast,
       ),
     );
     if (pending.length >= checkpointEvery) scheduleFlush();
@@ -234,33 +268,23 @@ Future<ContactSyncResult> collectContactsFromInbound({
   emit();
   try {
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (attempt > 1) {
-        final reached = reachedTotal();
-        final filteredShort =
-            sawEnd && !reached && (lastRequestSince ?? 0) > 0;
-        if (sawEnd && !filteredShort) {
-          timedOut = false;
-          break;
-        }
-        if (!sawEnd && reached) {
-          timedOut = false;
-          break;
-        }
-        if (filteredShort) {
-          wantFull = true;
-          sawEnd = false;
-        }
-      }
-
+      final countBefore = contacts.length;
       final newest = _newestPositive(lastMods);
       final int? requestSince = wantFull
           ? null
           : (attempt == 1 ? (_positiveSince(initialSince) ?? newest) : newest);
       wantFull = false;
-      lastRequestSince = requestSince;
       sawEnd = false;
       timedOut = false;
       attemptsUsed = attempt;
+
+      // Stay visible across resumes. END and idle must not clear the bar
+      // until the whole sync stops.
+      emit();
+      logSync(
+        'attempt=$attempt/$maxAttempts since=${requestSince ?? 0} '
+        'stored=${contacts.length} expected=${expectedTotal ?? -1}',
+      );
 
       final attemptDone = Completer<void>();
       done = attemptDone;
@@ -275,32 +299,49 @@ Future<ContactSyncResult> collectContactsFromInbound({
       }
       await flushNow();
 
+      final added = contacts.length - countBefore;
       final reached = reachedTotal();
-      if (sawEnd) {
-        final filteredShort =
-            !reached && expectedTotal != null && (requestSince ?? 0) > 0;
-        if (filteredShort && attempt < maxAttempts) {
-          wantFull = true;
-          sawEnd = false;
-          timedOut = false;
-          if (retryDelay > Duration.zero) {
-            await Future<void>.delayed(retryDelay);
-          }
-          continue;
-        }
-        timedOut = false;
-        break;
-      }
+      final wasSince = (requestSince ?? 0) > 0;
+      logSync(
+        'attempt=$attempt added=$added stored=${contacts.length} '
+        'expected=${expectedTotal ?? -1} sawEnd=$sawEnd '
+        'idle=${!sawEnd && !reached}',
+      );
+
       if (reached) {
         timedOut = false;
         break;
       }
-      timedOut = true;
-      if (attempt < maxAttempts) {
-        timedOut = false;
-        if (retryDelay > Duration.zero) {
-          await Future<void>.delayed(retryDelay);
-        }
+
+      // Still short of the radio total. A since cursor of the newest stored
+      // lastmod misses contacts that have not arrived yet when their lastmod
+      // is older, so a resume that adds nothing cannot make progress.
+      if (wasSince && (added == 0 || sawEnd)) {
+        wantFull = true;
+        logSync(
+          'next=full stored=${contacts.length} '
+          'expected=${expectedTotal ?? -1} '
+          'reason=${added == 0 ? 'since-added-none' : 'filtered-end-short'}',
+        );
+      } else if (sawEnd) {
+        logSync(
+          'next=retry stored=${contacts.length} '
+          'expected=${expectedTotal ?? -1} reason=end-short',
+        );
+      } else {
+        timedOut = true;
+        logSync(
+          'next=retry stored=${contacts.length} '
+          'expected=${expectedTotal ?? -1} reason=idle',
+        );
+      }
+
+      emit();
+      if (attempt >= maxAttempts) break;
+      sawEnd = false;
+      timedOut = false;
+      if (retryDelay > Duration.zero) {
+        await Future<void>.delayed(retryDelay);
       }
     }
   } finally {
@@ -310,21 +351,32 @@ Future<ContactSyncResult> collectContactsFromInbound({
   await flushNow();
 
   final newest = _newestPositive(lastMods);
+  final stored = contacts.length;
+  final expected = expectedTotal;
+  final idleStop = timedOut && !sawEnd;
+  final short = expected != null && stored < expected;
+  final complete = !short && (expected != null || (sawEnd && !idleStop));
+  logSync(
+    'done stored=$stored expected=${expected ?? -1} '
+    '${complete ? 'complete' : 'incomplete'} '
+    'attempts=$attemptsUsed sawEnd=$sawEnd idle=$idleStop',
+  );
   onProgress?.call(
     ContactSyncProgress(
       active: false,
-      received: contacts.length,
-      expected: expectedTotal,
-      timedOut: timedOut && !sawEnd,
-      completed: true,
+      received: stored,
+      expected: expected,
+      timedOut: idleStop,
+      completed: complete,
+      incomplete: short,
     ),
   );
   return ContactSyncResult(
     contacts: contacts,
     contactTypes: contactTypes,
     lastMods: lastMods,
-    expectedTotal: expectedTotal,
-    timedOut: timedOut && !sawEnd,
+    expectedTotal: expected,
+    timedOut: idleStop,
     sawEnd: sawEnd,
     attempts: attemptsUsed,
     newestLastMod: newest,

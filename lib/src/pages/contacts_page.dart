@@ -54,11 +54,19 @@ class _ContactsPageState extends State<ContactsPage> {
     final filtered = showSearch ? filterLocalContacts(all, _query) : all;
     filtered.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
-    final countLabel = widget.syncProgress.active
-        ? widget.syncProgress.progressLabel
-        : (showSearch && _query.trim().isNotEmpty
-            ? 'Contacts (${filtered.length}/${widget.contacts.length})'
-            : 'Contacts (${widget.contacts.length})');
+    final progress = widget.syncProgress;
+    final searching = showSearch && _query.trim().isNotEmpty;
+    final String countLabel;
+    if (progress.active) {
+      countLabel = progress.progressLabel;
+    } else if (searching) {
+      countLabel = 'Contacts (${filtered.length}/${widget.contacts.length})';
+    } else if (progress.hasOutcome) {
+      countLabel = progress.statusLabel;
+    } else {
+      countLabel = 'Contacts (${widget.contacts.length})';
+    }
+    final showSyncBar = progress.active || progress.incomplete;
 
     if (widget.syncProgress.active && widget.contacts.isEmpty) {
       return Scaffold(
@@ -88,7 +96,7 @@ class _ContactsPageState extends State<ContactsPage> {
         title: Text(countLabel),
         bottom: PreferredSize(
           preferredSize: Size.fromHeight(
-            (showSearch ? 56.0 : 0) + (widget.syncProgress.active ? 4.0 : 0),
+            (showSearch ? 56.0 : 0) + (showSyncBar ? 4.0 : 0),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -106,14 +114,11 @@ class _ContactsPageState extends State<ContactsPage> {
                     onChanged: (v) => setState(() => _query = v),
                   ),
                 ),
-              if (widget.syncProgress.active)
+              if (showSyncBar)
                 LinearProgressIndicator(
-                  value: widget.syncProgress.expected == null ||
-                          widget.syncProgress.expected == 0
+                  value: progress.expected == null || progress.expected == 0
                       ? null
-                      : (widget.syncProgress.received /
-                              widget.syncProgress.expected!)
-                          .clamp(0.0, 1.0),
+                      : (progress.received / progress.expected!).clamp(0.0, 1.0),
                 ),
             ],
           ),

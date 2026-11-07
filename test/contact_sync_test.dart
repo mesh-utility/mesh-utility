@@ -367,6 +367,193 @@ void main() {
       expect(result.timedOut, isTrue);
       expect(result.sawEnd, isFalse);
       expect(result.contacts.length, 5);
+      expect(result.isComplete, isFalse);
+      await controller.close();
+    });
+
+    test('end frame arriving short is incomplete and keeps progress up', () async {
+      final controller = StreamController<Uint8List>.broadcast();
+      final requests = <int?>[];
+      final progressEvents = <ContactSyncProgress>[];
+      const total = 10;
+      const partial = 6;
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          controller.add(buildContactsStartFrame(total));
+          for (var i = 0; i < partial; i++) {
+            controller.add(
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                lastMod: 1000 + i,
+              ),
+            );
+          }
+          controller.add(buildEndOfContactsFrame(lastmod: 1000 + partial - 1));
+        },
+        onProgress: progressEvents.add,
+        idleTimeout: const Duration(seconds: 2),
+        retryDelay: Duration.zero,
+        maxAttempts: 3,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 5));
+      // Full dump ends short, since resume adds nothing new, then one full
+      // dump still ends short. END is not success while stored < total.
+      expect(requests, [null, 1000 + partial - 1, null]);
+      expect(result.sawEnd, isTrue);
+      expect(result.timedOut, isFalse);
+      expect(result.attempts, 3);
+      expect(result.contacts.length, partial);
+      expect(result.expectedTotal, total);
+      expect(result.isComplete, isFalse);
+      expect(progressEvents, isNotEmpty);
+      expect(progressEvents.last.active, isFalse);
+      expect(progressEvents.last.incomplete, isTrue);
+      expect(progressEvents.last.completed, isFalse);
+      expect(
+        progressEvents.last.statusLabel,
+        'Contacts $partial/$total incomplete',
+      );
+      for (final event in progressEvents.take(progressEvents.length - 1)) {
+        expect(event.active, isTrue);
+        expect(event.completed, isFalse);
+      }
+      await controller.close();
+    });
+
+    test('out-of-order lastmod is recovered by a full dump', () async {
+      final controller = StreamController<Uint8List>.broadcast();
+      final requests = <int?>[];
+      const total = 4;
+      // Not sorted by arrival. Newest lastmod is the first contact, so a
+      // since resume skips the contact that has not been sent yet.
+      const lastMods = <int>[80, 10, 50, 20];
+      const missingIndex = 3;
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          controller.add(buildContactsStartFrame(total));
+          if (requests.length == 1) {
+            for (var i = 0; i < missingIndex; i++) {
+              controller.add(
+                buildSyntheticContactFrame(
+                  index: i,
+                  name: 'Rep$i',
+                  lastMod: lastMods[i],
+                ),
+              );
+            }
+            controller.add(buildEndOfContactsFrame(lastmod: lastMods.first));
+            return;
+          }
+          if (since != null) {
+            for (var i = 0; i < total; i++) {
+              if (lastMods[i] <= since) continue;
+              controller.add(
+                buildSyntheticContactFrame(
+                  index: i,
+                  name: 'Rep$i',
+                  lastMod: lastMods[i],
+                ),
+              );
+            }
+            controller.add(buildEndOfContactsFrame(lastmod: since));
+            return;
+          }
+          for (var i = 0; i < total; i++) {
+            controller.add(
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                lastMod: lastMods[i],
+              ),
+            );
+          }
+          controller.add(buildEndOfContactsFrame(lastmod: lastMods.first));
+        },
+        idleTimeout: const Duration(seconds: 2),
+        retryDelay: Duration.zero,
+        maxAttempts: 4,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 5));
+      expect(requests, [null, lastMods.first, null]);
+      expect(result.isComplete, isTrue);
+      expect(result.contacts.length, total);
+      final missing = syntheticContactPrefix(missingIndex);
+      expect(result.contacts[missing], 'Rep$missingIndex');
+      expect(result.lastMods[missing], lastMods[missingIndex]);
+      await controller.close();
+    });
+
+    test('since resume that adds no contacts falls back to a full dump', () async {
+      final controller = StreamController<Uint8List>.broadcast();
+      final requests = <int?>[];
+      final progressEvents = <ContactSyncProgress>[];
+      const total = 5;
+      final seedContacts = <String, String>{};
+      final seedTypes = <String, int>{};
+      final seedLastMods = <String, int>{};
+      for (var i = 0; i < 2; i++) {
+        final frame = buildSyntheticContactFrame(
+          index: i,
+          name: 'Rep$i',
+          lastMod: i == 0 ? 10 : 40,
+        );
+        final parsed = parseRadioContact(frame)!;
+        seedContacts[parsed.publicKeyPrefix] = parsed.name;
+        seedTypes[parsed.publicKeyPrefix] = parsed.type;
+        seedLastMods[parsed.publicKeyPrefix] = parsed.lastMod;
+      }
+
+      final future = collectContactsFromInbound(
+        inbound: controller.stream,
+        initialSince: 40,
+        seedContacts: seedContacts,
+        seedTypes: seedTypes,
+        seedLastMods: seedLastMods,
+        sendGetContacts: (since) async {
+          requests.add(since);
+          controller.add(buildContactsStartFrame(total));
+          if (since != null) {
+            controller.add(buildEndOfContactsFrame(lastmod: since));
+            return;
+          }
+          for (var i = 0; i < total; i++) {
+            controller.add(
+              buildSyntheticContactFrame(
+                index: i,
+                name: 'Rep$i',
+                lastMod: 10 + i,
+              ),
+            );
+          }
+          controller.add(buildEndOfContactsFrame(lastmod: 10 + total - 1));
+        },
+        onProgress: progressEvents.add,
+        idleTimeout: const Duration(seconds: 2),
+        retryDelay: Duration.zero,
+        maxAttempts: 3,
+      );
+
+      final result = await future.timeout(const Duration(seconds: 5));
+      expect(requests, [40, null]);
+      expect(result.sawEnd, isTrue);
+      expect(result.timedOut, isFalse);
+      expect(result.isComplete, isTrue);
+      expect(result.contacts.length, total);
+      expect(result.expectedTotal, total);
+      expect(progressEvents.last.statusLabel, 'Contacts $total/$total complete');
+      expect(progressEvents.last.active, isFalse);
+      for (final event in progressEvents.take(progressEvents.length - 1)) {
+        expect(event.active, isTrue);
+      }
       await controller.close();
     });
   });
@@ -423,5 +610,42 @@ void main() {
       ),
     );
     expect(find.text('Contacts 441/891'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+  });
+
+  testWidgets('contacts page ends with Contacts n/total complete or incomplete', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ContactsPage(
+          contacts: {'AA': 'Rep'},
+          syncProgress: ContactSyncProgress(
+            active: false,
+            received: 829,
+            expected: 899,
+            incomplete: true,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Contacts 829/899 incomplete'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ContactsPage(
+          contacts: {'AA': 'Rep'},
+          syncProgress: ContactSyncProgress(
+            active: false,
+            received: 899,
+            expected: 899,
+            completed: true,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Contacts 899/899 complete'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
   });
 }

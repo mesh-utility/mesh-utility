@@ -1010,7 +1010,9 @@ class _MeshHomePageState extends State<MeshHomePage>
                 .toDouble();
             String scanHeaderLabel() {
               final sync = _appState.contactsSyncProgress;
-              if (sync.active) return sync.progressLabel;
+              // Stay on the contact status through resumes and after a short
+              // finish. A completed book returns this pill to the scan status.
+              if (sync.active || sync.incomplete) return sync.statusLabel;
               if (!_appState.bleConnected) return 'Idle';
               if (!_appState.bleScanning) return 'Paused';
               final liveStatus = _appState.bleStatus.trim();
