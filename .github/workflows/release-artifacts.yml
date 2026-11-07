@@ -40,12 +40,31 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - name: Derive version from tag
+      # versionName is the pubspec name (1.0.0-alpha.N), not the Alpha-N tag.
+      # versionCode is the pubspec build number, or N parsed from an Alpha-N tag.
+      - name: Derive version from pubspec
         run: |
-          TAG="${RELEASE_TAG#v}"
-          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
-          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
-          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
+          PUBSPEC_VERSION=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1 || true)
+          PUBSPEC_VERSION=$(printf '%s' "$PUBSPEC_VERSION" | tr -d '\r' | sed "s/[[:space:]]*#.*//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//")
+          BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+          BUILD_NUMBER=""
+          if [ "$PUBSPEC_VERSION" != "$BUILD_NAME" ]; then
+            BUILD_NUMBER=$(printf '%s' "${PUBSPEC_VERSION#*+}" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            TAG_BODY="${RELEASE_TAG#v}"
+            BUILD_NUMBER=$(printf '%s' "$TAG_BODY" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=$(printf '%s' "$BUILD_NAME" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NAME" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo "Could not derive versionName and versionCode from pubspec '${PUBSPEC_VERSION}' and tag '${RELEASE_TAG}'." >&2
+            exit 1
+          fi
+          echo "BUILD_NAME=${BUILD_NAME}" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          echo "versionName=${BUILD_NAME} versionCode=${BUILD_NUMBER}"
 
       - name: Setup Java 17 (Gradle 8.14 can't run on runner default JDK 25)
         uses: actions/setup-java@v5
@@ -80,6 +99,42 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
 
+      - name: Fail if APK versionCode is 1
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "Release APK not found at ${APK}." >&2
+            exit 1
+          fi
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-${ANDROID_SDK_HOME:-}}}"
+          if [ -z "$SDK" ] && [ -f android/local.properties ]; then
+            SDK=$(sed -n 's/^sdk\.dir=//p' android/local.properties | head -n1 || true)
+            SDK=$(printf '%s' "$SDK" | tr -d '\r' | sed 's/\\:/:/g; s/\\\\/\\/g')
+          fi
+          BADGING=""
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            BADGING=$(apkanalyzer dump badging "$APK" 2>/dev/null || true)
+          fi
+          if ! printf '%s\n' "$BADGING" | grep -q "versionCode="; then
+            AAPT2=""
+            if [ -n "$SDK" ] && [ -d "$SDK/build-tools" ]; then
+              AAPT2=$(find "$SDK/build-tools" -type f -name aapt2 | sort | tail -n1)
+            fi
+            if [ -z "$AAPT2" ]; then
+              echo "aapt2/apkanalyzer dump badging could not run (no apkanalyzer badging output and no aapt2 under the Android SDK)." >&2
+              exit 1
+            fi
+            BADGING=$("$AAPT2" dump badging "$APK")
+          fi
+          printf '%s\n' "$BADGING" | grep '^package:' || true
+          CODE=$(printf '%s\n' "$BADGING" | sed -n "s/.*versionCode=['\"]\\([0-9][0-9]*\\)['\"].*/\\1/p" | head -n1 || true)
+          NAME=$(printf '%s\n' "$BADGING" | sed -n "s/.*versionName=['\"]\\([^'\"]*\\)['\"].*/\\1/p" | head -n1 || true)
+          echo "APK versionCode=${CODE:-missing} versionName=${NAME:-missing} (expected versionCode=${BUILD_NUMBER} versionName=${BUILD_NAME})"
+          if [ -z "$CODE" ] || [ "$CODE" -le 1 ]; then
+            echo "APK versionCode must be greater than 1 (pubspec build number or Alpha-N). Got '${CODE:-missing}'." >&2
+            exit 1
+          fi
+
       - name: Stage release artifact
         run: |
           mkdir -p dist
@@ -103,12 +158,31 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - name: Derive version from tag
+      # versionName is the pubspec name (1.0.0-alpha.N), not the Alpha-N tag.
+      # versionCode is the pubspec build number, or N parsed from an Alpha-N tag.
+      - name: Derive version from pubspec
         run: |
-          TAG="${RELEASE_TAG#v}"
-          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
-          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
-          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
+          PUBSPEC_VERSION=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1 || true)
+          PUBSPEC_VERSION=$(printf '%s' "$PUBSPEC_VERSION" | tr -d '\r' | sed "s/[[:space:]]*#.*//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//")
+          BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+          BUILD_NUMBER=""
+          if [ "$PUBSPEC_VERSION" != "$BUILD_NAME" ]; then
+            BUILD_NUMBER=$(printf '%s' "${PUBSPEC_VERSION#*+}" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            TAG_BODY="${RELEASE_TAG#v}"
+            BUILD_NUMBER=$(printf '%s' "$TAG_BODY" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=$(printf '%s' "$BUILD_NAME" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NAME" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo "Could not derive versionName and versionCode from pubspec '${PUBSPEC_VERSION}' and tag '${RELEASE_TAG}'." >&2
+            exit 1
+          fi
+          echo "BUILD_NAME=${BUILD_NAME}" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          echo "versionName=${BUILD_NAME} versionCode=${BUILD_NUMBER}"
 
       - name: Install Linux build dependencies
         run: |
@@ -155,13 +229,32 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - name: Derive version from tag
+      # versionName is the pubspec name (1.0.0-alpha.N), not the Alpha-N tag.
+      # versionCode is the pubspec build number, or N parsed from an Alpha-N tag.
+      - name: Derive version from pubspec
         shell: bash
         run: |
-          TAG="${RELEASE_TAG#v}"
-          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
-          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
-          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
+          PUBSPEC_VERSION=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1 || true)
+          PUBSPEC_VERSION=$(printf '%s' "$PUBSPEC_VERSION" | tr -d '\r' | sed "s/[[:space:]]*#.*//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//")
+          BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+          BUILD_NUMBER=""
+          if [ "$PUBSPEC_VERSION" != "$BUILD_NAME" ]; then
+            BUILD_NUMBER=$(printf '%s' "${PUBSPEC_VERSION#*+}" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            TAG_BODY="${RELEASE_TAG#v}"
+            BUILD_NUMBER=$(printf '%s' "$TAG_BODY" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=$(printf '%s' "$BUILD_NAME" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NAME" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo "Could not derive versionName and versionCode from pubspec '${PUBSPEC_VERSION}' and tag '${RELEASE_TAG}'." >&2
+            exit 1
+          fi
+          echo "BUILD_NAME=${BUILD_NAME}" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          echo "versionName=${BUILD_NAME} versionCode=${BUILD_NUMBER}"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -210,12 +303,31 @@ jobs:
       - name: Install Flutter dependencies
         run: flutter pub get
 
-      - name: Derive version from tag
+      # versionName is the pubspec name (1.0.0-alpha.N), not the Alpha-N tag.
+      # versionCode is the pubspec build number, or N parsed from an Alpha-N tag.
+      - name: Derive version from pubspec
         run: |
-          TAG="${RELEASE_TAG#v}"
-          echo "BUILD_NAME=${TAG%%+*}" >> "$GITHUB_ENV"
-          BUILD_NUM=$(echo "$TAG" | grep -oP '\+\K\d+' || true)
-          echo "BUILD_NUMBER=${BUILD_NUM:-1}" >> "$GITHUB_ENV"
+          PUBSPEC_VERSION=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1 || true)
+          PUBSPEC_VERSION=$(printf '%s' "$PUBSPEC_VERSION" | tr -d '\r' | sed "s/[[:space:]]*#.*//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//")
+          BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+          BUILD_NUMBER=""
+          if [ "$PUBSPEC_VERSION" != "$BUILD_NAME" ]; then
+            BUILD_NUMBER=$(printf '%s' "${PUBSPEC_VERSION#*+}" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            TAG_BODY="${RELEASE_TAG#v}"
+            BUILD_NUMBER=$(printf '%s' "$TAG_BODY" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=$(printf '%s' "$BUILD_NAME" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*alpha[^0-9]*\([0-9][0-9]*\).*/\1/p')
+          fi
+          if [ -z "$BUILD_NAME" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo "Could not derive versionName and versionCode from pubspec '${PUBSPEC_VERSION}' and tag '${RELEASE_TAG}'." >&2
+            exit 1
+          fi
+          echo "BUILD_NAME=${BUILD_NAME}" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          echo "versionName=${BUILD_NAME} versionCode=${BUILD_NUMBER}"
 
       - name: Build Web (release)
         run: flutter build web --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" --dart-define=WORKER_URL=$WORKER_URL --dart-define=APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"

@@ -31,6 +31,38 @@ val hasReleaseKeystore = !releaseStorePath.isNullOrEmpty() &&
     !releaseKeyAlias.isNullOrEmpty() &&
     !releaseKeyPassword.isNullOrEmpty()
 
+// pubspec `version: 1.0.0-alpha.N+N` is the Android versionName / versionCode.
+// Release tags are `Alpha-N` and have no `+build`, so N from that tag is the fallback.
+// The Flutter plugin defaults versionCode to 1 when local.properties has no code.
+fun readPubspecVersionRaw(): String? {
+    val pubspec = rootProject.file("../pubspec.yaml")
+    if (!pubspec.isFile) return null
+    for (line in pubspec.readLines()) {
+        val trimmed = line.trim()
+        if (!trimmed.startsWith("version:")) continue
+        return trimmed.removePrefix("version:")
+            .substringBefore("#")
+            .trim()
+            .trim('"', '\'')
+            .takeIf { it.isNotEmpty() }
+    }
+    return null
+}
+
+fun alphaReleaseNumber(text: String?): Int? {
+    if (text.isNullOrBlank()) return null
+    val match = Regex("(?i)alpha[^0-9]*([0-9]+)").find(text) ?: return null
+    return match.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
+}
+
+val pubspecVersionRaw = readPubspecVersionRaw()
+val pubspecVersionName = pubspecVersionRaw?.substringBefore('+')?.takeIf { it.isNotEmpty() }
+val pubspecVersionCode = pubspecVersionRaw
+    ?.substringAfter('+', "")
+    ?.toIntOrNull()
+    ?.takeIf { it > 0 }
+val releaseTagVersionCode = alphaReleaseNumber(System.getenv("RELEASE_TAG"))
+
 android {
     namespace = "org.meshutility.app"
     compileSdk = flutter.compileSdkVersion
@@ -53,8 +85,11 @@ android {
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = pubspecVersionCode
+            ?: releaseTagVersionCode
+            ?: alphaReleaseNumber(pubspecVersionName)
+            ?: flutter.versionCode
+        versionName = pubspecVersionName ?: flutter.versionName
     }
 
     if (hasReleaseKeystore) {
