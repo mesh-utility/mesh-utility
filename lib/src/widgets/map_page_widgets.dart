@@ -103,6 +103,8 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
   bool _restartRequested = false;
   late final VoidCallback _tickListener;
   double _lastControllerValue = 0;
+  TextPainter? _textPainter;
+  bool _applyingOverflow = false;
 
   @override
   void initState() {
@@ -114,12 +116,21 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
       if (controller == null) return;
       final current = controller.value;
       if (_overflow > 0 && current < _lastControllerValue && mounted) {
+        var textChanged = false;
         if (_queuedText != null) {
           _displayText = _queuedText!;
           _queuedText = null;
           _restartRequested = true;
+          textChanged = true;
         }
         widget.onLoopComplete?.call();
+        // A loop is seconds apart. Rebuilding here picks up deferred text.
+        // The per-frame scroll must not setState: this state owns a
+        // LayoutBuilder, and any descendant rebuild marks that builder dirty
+        // and repaints the page layer that holds the map.
+        if (textChanged && !_applyingOverflow) {
+          setState(() {});
+        }
       }
       _lastControllerValue = current;
     };
@@ -131,6 +142,8 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
     _controller?.removeListener(_tickListener);
     _controller?.dispose();
     _controller = null;
+    _textPainter?.dispose();
+    _textPainter = null;
     super.dispose();
   }
 
@@ -158,6 +171,15 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
   }
 
   void _updateOverflow(double overflow, double loopDistance) {
+    _applyingOverflow = true;
+    try {
+      _applyOverflow(overflow, loopDistance);
+    } finally {
+      _applyingOverflow = false;
+    }
+  }
+
+  void _applyOverflow(double overflow, double loopDistance) {
     final next = overflow < 0 ? 0.0 : overflow;
     final overflowChanged = (next - _overflow).abs() >= 0.5;
     if (!overflowChanged &&
@@ -187,13 +209,17 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
     _restartRequested = false;
   }
 
-  double _measureTextWidth(String text, TextStyle style) {
-    final painter = TextPainter(
-      text: TextSpan(text: text, style: style),
+  TextPainter _syncTextPainter(TextStyle style) {
+    final painter = _textPainter ??= TextPainter(
       maxLines: 1,
       textDirection: ui.TextDirection.ltr,
-    )..layout(minWidth: 0, maxWidth: double.infinity);
-    return painter.width;
+    );
+    final current = painter.text;
+    if (current?.toPlainText() != _displayText || current?.style != style) {
+      painter.text = TextSpan(text: _displayText, style: style);
+      painter.layout(minWidth: 0, maxWidth: double.infinity);
+    }
+    return painter;
   }
 
   @override
@@ -212,21 +238,31 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
             style: style,
           );
         }
-        final textWidth = _measureTextWidth(
-          _displayText,
-          style ?? const TextStyle(),
-        );
+        final paintStyle = style ?? const TextStyle();
+        var textPainter = _syncTextPainter(paintStyle);
+        var textWidth = textPainter.width;
         final configuredGap = widget.gapPixels ?? 28;
         final gap = configuredGap < 0 ? 0.0 : configuredGap;
-        final shouldScroll =
+        var shouldScroll =
             widget.alwaysScroll || textWidth > (constraints.maxWidth + 0.5);
         // Travel one full viewport width in addition to text width so the
         // line fully exits left before looping back from the right.
-        final loopDistance = constraints.maxWidth + textWidth + gap;
+        var loopDistance = constraints.maxWidth + textWidth + gap;
         _updateOverflow(
           shouldScroll ? max(1.0, textWidth - constraints.maxWidth) : 0,
           loopDistance,
         );
+        if (textPainter.text?.toPlainText() != _displayText) {
+          textPainter = _syncTextPainter(paintStyle);
+          textWidth = textPainter.width;
+          shouldScroll =
+              widget.alwaysScroll || textWidth > (constraints.maxWidth + 0.5);
+          loopDistance = constraints.maxWidth + textWidth + gap;
+          _updateOverflow(
+            shouldScroll ? max(1.0, textWidth - constraints.maxWidth) : 0,
+            loopDistance,
+          );
+        }
         if (!shouldScroll || _overflow <= 0) {
           if (_queuedText != null && _queuedText != _displayText) {
             _displayText = _queuedText!;
@@ -246,46 +282,107 @@ class _OverflowMarqueeTextState extends State<OverflowMarqueeText>
             style: style,
           );
         }
-        return SizedBox(
-          height: lineHeight,
-          width: constraints.maxWidth,
-          child: ClipRect(
-            child: AnimatedBuilder(
-              animation: _controller!,
-              builder: (context, child) {
-                final dx =
-                    constraints.maxWidth - (loopDistance * _controller!.value);
-                return Stack(
-                  clipBehavior: Clip.hardEdge,
-                  children: [
-                    Positioned(
-                      left: dx,
-                      top: 0,
-                      child: Text(
-                        _displayText,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: style,
-                      ),
-                    ),
-                    Positioned(
-                      left: dx + loopDistance,
-                      top: 0,
-                      child: Text(
-                        _displayText,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: style,
-                      ),
-                    ),
-                  ],
-                );
-              },
+        final controller = _controller;
+        if (controller == null) {
+          return Text(
+            _displayText,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          );
+        }
+        // LayoutBuilder rebuilds every descendant that setStates, then marks
+        // itself needs-paint. That walk hits the page layer and re-rasters the
+        // static map on every tick. Paint from the ticker instead, and keep
+        // that picture in its own layer.
+        return RepaintBoundary(
+          child: SizedBox(
+            height: lineHeight,
+            width: constraints.maxWidth,
+            child: Semantics(
+              label: _displayText,
+              child: CustomPaint(
+                painter: _OverflowMarqueePainter(
+                  animation: controller,
+                  textPainter: textPainter,
+                  loopDistance: loopDistance,
+                ),
+                child: const SizedBox.expand(),
+              ),
             ),
           ),
         );
       },
     );
+  }
+}
+
+class _OverflowMarqueePainter extends CustomPainter {
+  _OverflowMarqueePainter({
+    required this.animation,
+    required this.textPainter,
+    required this.loopDistance,
+  }) : super(repaint: animation);
+
+  final Animation<double> animation;
+  final TextPainter textPainter;
+  final double loopDistance;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if ((textPainter.text?.toPlainText() ?? '').isEmpty) return;
+    final dx = size.width - (loopDistance * animation.value);
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    _paintCopy(canvas, size, dx);
+    _paintCopy(canvas, size, dx + loopDistance);
+    canvas.restore();
+  }
+
+  void _paintCopy(Canvas canvas, Size size, double originX) {
+    final text = textPainter.text?.toPlainText() ?? '';
+    final textWidth = textPainter.width;
+    if (text.isEmpty || originX >= size.width || originX + textWidth <= 0) {
+      return;
+    }
+    final localLeft = max(0.0, -originX);
+    final localRight = min(textWidth, size.width - originX);
+    if (localRight <= localLeft) return;
+
+    final probeY = textPainter.height / 2;
+    var start = textPainter
+        .getPositionForOffset(Offset(localLeft, probeY))
+        .offset;
+    var end = textPainter
+        .getPositionForOffset(Offset(max(localLeft, localRight - 0.1), probeY))
+        .offset;
+    if (start > 0) start -= 1;
+    if (end < text.length) end += 1;
+    if (end <= start) return;
+
+    final slicePainter = TextPainter(
+      text: TextSpan(
+        text: text.substring(start, end),
+        style: textPainter.text?.style,
+      ),
+      maxLines: 1,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(minWidth: 0, maxWidth: double.infinity);
+    final sliceX = textPainter
+        .getOffsetForCaret(TextPosition(offset: start), Rect.zero)
+        .dx;
+    slicePainter.paint(canvas, Offset(originX + sliceX, 0));
+    slicePainter.dispose();
+  }
+
+  @override
+  bool shouldRepaint(covariant _OverflowMarqueePainter oldDelegate) {
+    return animation != oldDelegate.animation ||
+        textPainter != oldDelegate.textPainter ||
+        loopDistance != oldDelegate.loopDistance ||
+        textPainter.text?.toPlainText() !=
+            oldDelegate.textPainter.text?.toPlainText() ||
+        textPainter.text?.style != oldDelegate.textPainter.text?.style;
   }
 }
 

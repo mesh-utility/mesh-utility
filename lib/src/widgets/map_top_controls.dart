@@ -133,10 +133,12 @@ class MapTopControls extends StatelessWidget {
                     if (syncing)
                       const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                        child: RepaintBoundary(
+                          child: SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
                         ),
                       )
                     else
