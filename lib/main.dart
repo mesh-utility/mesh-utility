@@ -1009,6 +1009,10 @@ class _MeshHomePageState extends State<MeshHomePage>
                 .clamp(224.0, 280.0)
                 .toDouble();
             String scanHeaderLabel() {
+              final historyLabel = _appState.historyLoadLabel;
+              if (historyLabel != null && historyLabel.isNotEmpty) {
+                return historyLabel;
+              }
               final sync = _appState.contactsSyncProgress;
               // Keep an in-flight, incomplete, or disconnected contact sync
               // on this pill. A completed book returns to the scan status.

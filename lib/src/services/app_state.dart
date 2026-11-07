@@ -7,6 +7,7 @@ import 'package:mesh_utility/src/models/mesh_node.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/config/app_config.dart';
+import 'package:mesh_utility/src/services/all_days_load_guard.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/scan_data_utils.dart';
@@ -14,11 +15,15 @@ import 'package:mesh_utility/src/services/location_service.dart';
 import 'package:mesh_utility/src/services/sync_service.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/history_pipeline.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
+import 'package:mesh_utility/src/services/mesh_database_path.dart';
+import 'package:mesh_utility/src/services/off_ui.dart';
+import 'package:mesh_utility/src/services/persisted_history_loader.dart';
 import 'package:mesh_utility/src/services/contact_store.dart';
 import 'package:mesh_utility/src/models/local_contact.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
-import 'package:mesh_utility/src/services/scan_aggregator.dart';
+import 'package:mesh_utility/src/services/reax_database.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/services/worker_api.dart';
@@ -158,8 +163,14 @@ class AppState extends ChangeNotifier {
   final ProtocolCommandRegistry _protocol = const ProtocolCommandRegistry();
 
   final SyncService _syncService = SyncService();
+  final AllDaysLoadGuard _allDaysGuard = AllDaysLoadGuard();
   AppSettings settings = AppSettings.defaults;
   bool loading = true;
+  int _historyLoadToken = 0;
+  int _derivedGeneration = 0;
+  bool _lastWorkerSyncSucceeded = false;
+  bool _workerSyncStarting = false;
+  String? historyLoadLabel;
   bool get syncing => _syncService.syncing;
   String? get error => _syncService.error;
   DateTime? get lastSyncAt => _syncService.lastSyncAt;
@@ -914,6 +925,17 @@ class AppState extends ChangeNotifier {
     if (settingsDirty) {
       await _settingsStore.save(settings);
     }
+    final startup = await _allDaysGuard.resolveInterruptedStartup(
+      settings: settings,
+      saveSettings: _settingsStore.save,
+    );
+    settings = startup.settings;
+    if (startup.fellBackToLast7) {
+      _debugLog.info(
+        'app_state',
+        'Interrupted all-days history fell back to last 7 days',
+      );
+    }
     // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
@@ -922,27 +944,130 @@ class AppState extends ChangeNotifier {
     for (final contacts in settings.contactsByRadioId.values) {
       _radioContactsByPrefix.addAll(contacts);
     }
-    rawScans = normalizeRawScans(await _localStore.loadRawScans());
-    rawScans = _applyDeadzoneSuccessPrecedence(rawScans, source: 'local_cache');
-    await _localStore.saveRawScans(rawScans);
-    _rebuildDerivedData();
-    _seedKnownBleScanDevices();
-    _primePreferredBleDeviceForScan();
 
+    // Settings must be reachable before the legacy cache parse. An interrupted
+    // all-days load is already fallen back; a first upgrade still parses the
+    // full cache, but off the UI isolate and only after the guard is armed.
     loading = false;
     notifyListeners();
+    await Future<void>.delayed(Duration.zero);
 
-    if (settings.bleAutoConnect && settings.knownBleDeviceIds.isNotEmpty) {
-      bleSelectedDeviceId = settings.knownBleDeviceIds.first;
-      if (_transport is BleTransport) {
-        (_transport).preferredDeviceId = bleSelectedDeviceId;
+    var runtimeStarted = false;
+    void startRuntime() {
+      if (runtimeStarted) return;
+      runtimeStarted = true;
+      _seedKnownBleScanDevices();
+      _primePreferredBleDeviceForScan();
+      notifyListeners();
+      if (settings.bleAutoConnect && settings.knownBleDeviceIds.isNotEmpty) {
+        bleSelectedDeviceId = settings.knownBleDeviceIds.first;
+        if (_transport is BleTransport) {
+          (_transport).preferredDeviceId = bleSelectedDeviceId;
+        }
+        unawaited(connectBle());
       }
-      unawaited(connectBle());
+      unawaited(_locationService.startTracking());
     }
 
-    unawaited(_locationService.startTracking());
-    await syncFromWorker();
+    try {
+      await _allDaysGuard.guardedAllDaysLoad(
+        settings: settings,
+        load: () async {
+          await _loadCachedHistory();
+          startRuntime();
+          if (settings.forceOffline) return;
+          await syncFromWorker();
+          if (requestsAllDays(
+                historyDays: settings.historyDays,
+                deadzoneDays: settings.deadzoneDays,
+              ) &&
+              !_lastWorkerSyncSucceeded) {
+            _debugLog.warn(
+              'app_state',
+              'All-days history load did not finish; '
+                  'next startup falls back to last 7',
+            );
+            throw const AllDaysLoadIncomplete();
+          }
+        },
+      );
+    } catch (e) {
+      _debugLog.error('app_state', 'History startup failed: $e');
+      startRuntime();
+    }
     _configurePeriodicSyncTimer();
+  }
+
+  Future<void> _loadCachedHistory() async {
+    final path = currentMeshDatabasePath();
+    if (!kIsWeb && path != null) {
+      await _loadCachedHistoryFromDatabase(path);
+      return;
+    }
+    await _loadCachedHistoryInline();
+  }
+
+  Future<void> _loadCachedHistoryFromDatabase(String path) async {
+    historyLoadLabel = 'Loading saved history (0)';
+    notifyListeners();
+    try {
+      await ReaxDatabase.beginExclusiveDatabaseAccess();
+      try {
+        final loaded = await loadPersistedHistory(
+          path,
+          onLoaded: (count) {
+            historyLoadLabel = 'Loading saved history ($count)';
+            notifyListeners();
+          },
+        );
+        rawScans = loaded.scans;
+        coverageZones = loaded.zones;
+        nodes = loaded.nodes;
+        scanResults = loaded.scanResults;
+        _logSuppressedDeadzoneRows(loaded.suppressedRows, 'local_cache');
+        if (loaded.persistedChanges) {
+          _debugLog.info(
+            'app_state',
+            'Rewrote cached history after normalization',
+          );
+        }
+      } finally {
+        await ReaxDatabase.endExclusiveDatabaseAccess();
+      }
+    } finally {
+      historyLoadLabel = null;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadCachedHistoryInline() async {
+    historyLoadLabel = 'Loading saved history';
+    notifyListeners();
+    try {
+      final stored = await _localStore.loadRawScans();
+      final prepared = await runOffUi(
+        () => prepareRawScans(stored),
+        weight: stored.length,
+      );
+      rawScans = prepared.scans;
+      _logSuppressedDeadzoneRows(prepared.suppressedRows, 'local_cache');
+      if (prepared.changed) {
+        await _localStore.saveRawScans(rawScans);
+      }
+      await _rebuildDerivedData();
+    } finally {
+      historyLoadLabel = null;
+      notifyListeners();
+    }
+  }
+
+  void _logSuppressedDeadzoneRows(int suppressedRows, String source) {
+    if (suppressedRows <= 0) return;
+    _debugLog.info(
+      'sync',
+      'Suppressed $suppressedRows deadzone row(s) in hexes with '
+          'successful scans ($source)',
+    );
   }
 
   Future<void> _maybePersistRadioSettings(AppSettings next) async {
@@ -975,7 +1100,21 @@ class AppState extends ChangeNotifier {
     // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
+    final windowChanged =
+        previous.historyDays != settings.historyDays ||
+        previous.deadzoneDays != settings.deadzoneDays ||
+        previous.forceOffline != settings.forceOffline;
+    if (windowChanged) {
+      _historyLoadToken++;
+    }
     await _settingsStore.save(settings);
+    if (windowChanged &&
+        !requestsAllDays(
+          historyDays: settings.historyDays,
+          deadzoneDays: settings.deadzoneDays,
+        )) {
+      await _allDaysGuard.clear();
+    }
     await _maybePersistRadioSettings(settings);
     notifyListeners();
 
@@ -1044,143 +1183,179 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> syncFromWorker() async {
-    if (syncing) return;
-    _debugLog.info('sync', 'Starting worker sync');
-    _syncService.beginSync();
-
+    if (syncing || _workerSyncStarting) return;
+    _workerSyncStarting = true;
     try {
-      if (settings.forceOffline) {
-        _debugLog.warn(
-          'sync',
-          'Skipped worker sync because offline mode is enabled',
-        );
-        _syncService.completeSync(0);
-        return;
-      }
+      final token = ++_historyLoadToken;
+      final allDays = requestsAllDays(
+        historyDays: settings.historyDays,
+        deadzoneDays: settings.deadzoneDays,
+      );
+      _lastWorkerSyncSucceeded = false;
+      bool cancelled() => token != _historyLoadToken;
 
-      final api = WorkerApi(
-        AppConfig.deployedWorkerUrl,
-        fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
-        staticDataBaseUrl: AppConfig.staticDataUrl,
-      );
-      final connectedRadioId = _connectedRadioMeshId8();
-      final localOnlyBeforeSync = rawScans
-          .where((scan) => !scan.downloadedFromWorker)
-          .toList(growable: false);
-      if (localOnlyBeforeSync.isNotEmpty) {
-        await _uploadPendingScans(api, localOnlyBeforeSync);
-      }
-      final workerScans = await api
-          .fetchRawScans(
-            historyDays: settings.historyDays,
-            deadzoneDays: settings.deadzoneDays,
-            connectedRadioId: connectedRadioId,
-            centerLat: deviceLatitude,
-            centerLng: deviceLongitude,
-            radiusMiles: settings.syncRadiusMiles,
-          )
-          .then(
-            (value) => value
-                .map((scan) => scan.copyWith(downloadedFromWorker: true))
-                .toList(growable: false),
-          );
-      final normalizedWorkerScans = normalizeRawScans(
-        sanitizeDeadzoneRadioIds(workerScans, connectedRadioId),
-      );
-      final workerPrecedence = _applyDeadzoneSuccessPrecedenceDetailed(
-        normalizedWorkerScans,
-        source: 'worker',
-      );
-      final workerScansWithPrecedence = workerPrecedence.scans;
-      if (workerPrecedence.suppressedHexes.isNotEmpty) {
-        await _cleanupWorkerDeadzoneRows(api, workerPrecedence.suppressedHexes);
-      }
-
-      if (workerScansWithPrecedence.isNotEmpty) {
-        _debugLog.info(
-          'sync',
-          'Fetched ${workerScansWithPrecedence.length} raw scans from worker',
-        );
-        final mergedScans = <String, RawScan>{};
-        for (final scan in workerScansWithPrecedence) {
-          mergedScans[scanIdentity(scan)] = scan;
+      if (allDays && !settings.forceOffline) {
+        await _allDaysGuard.arm();
+        if (cancelled() &&
+            !requestsAllDays(
+              historyDays: settings.historyDays,
+              deadzoneDays: settings.deadzoneDays,
+            )) {
+          await _allDaysGuard.clear();
+          return;
         }
-
-        var preservedLocal = 0;
-        for (final local in localOnlyBeforeSync) {
-          final key = scanIdentity(local);
-          final existing = mergedScans[key];
-          if (existing == null) {
-            mergedScans[key] = local;
-            preservedLocal += 1;
-          } else {
-            final workerName = (existing.senderName ?? '').trim();
-            final localName = (local.senderName ?? '').trim();
-            final workerIsPlaceholder =
-                workerName.isEmpty ||
-                isPlaceholderNodeName(workerName, existing.nodeId ?? '');
-            final localIsPlaceholder =
-                localName.isEmpty ||
-                isPlaceholderNodeName(localName, local.nodeId ?? '');
-
-            if (workerIsPlaceholder && !localIsPlaceholder) {
-              mergedScans[key] = existing.copyWith(senderName: localName);
-            }
-          }
-        }
-        final merged = mergedScans.values.toList();
-        rawScans = _applyDeadzoneSuccessPrecedence(
-          normalizeRawScans(merged),
-          source: 'merged',
-        );
-        _debugLog.info(
-          'sync',
-          'Merged ${workerScansWithPrecedence.length} worker scans with '
-              '$preservedLocal preserved local scan(s) => ${rawScans.length} total',
-        );
-        _applyKnownContactsBackfill();
-        await _localStore.saveRawScans(rawScans);
+        if (cancelled()) return;
       }
 
+      _debugLog.info('sync', 'Starting worker sync');
+      _syncService.beginSync();
       try {
-        final workerZones = await api.fetchCoverageZones(
+        if (cancelled()) throw const HistoryLoadCancelled();
+        if (settings.forceOffline) {
+          _debugLog.warn(
+            'sync',
+            'Skipped worker sync because offline mode is enabled',
+          );
+          _lastWorkerSyncSucceeded = true;
+          _syncService.completeSync(0);
+          return;
+        }
+
+        final api = WorkerApi(
+          AppConfig.deployedWorkerUrl,
+          fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+          staticDataBaseUrl: AppConfig.staticDataUrl,
+        );
+        final connectedRadioId = _connectedRadioMeshId8();
+        final localOnlyBeforeSync = rawScans
+            .where((scan) => !scan.downloadedFromWorker)
+            .toList(growable: false);
+        if (localOnlyBeforeSync.isNotEmpty) {
+          await _uploadPendingScans(api, localOnlyBeforeSync);
+        }
+        if (cancelled()) throw const HistoryLoadCancelled();
+
+        final workerScans = await api.fetchRawScans(
           historyDays: settings.historyDays,
           deadzoneDays: settings.deadzoneDays,
           connectedRadioId: connectedRadioId,
           centerLat: deviceLatitude,
           centerLng: deviceLongitude,
           radiusMiles: settings.syncRadiusMiles,
+          markDownloaded: true,
+          onDayProgress: (done, total) {
+            historyLoadLabel = 'Loading history $done/$total days';
+            notifyListeners();
+          },
+          isCancelled: cancelled,
         );
-        _debugLog.info(
-          'sync',
-          'Fetched ${workerZones.length} coverage zones from worker',
-        );
-        coverageZones = _applyZoneDeadzonePrecedence(
-          sanitizeDeadzoneZoneRadioIds(workerZones, connectedRadioId),
-          source: 'worker',
-        );
-      } catch (_) {
-        _debugLog.warn(
-          'sync',
-          'Coverage zones endpoint failed, falling back to local aggregation',
-        );
-        coverageZones = aggregateScansToZones(rawScans);
-      }
+        if (cancelled()) throw const HistoryLoadCancelled();
 
-      _rebuildDerivedData(skipZones: true);
-      _syncService.captureInternetTimeAnchor(api.lastServerDateUtc);
-      final internetNow = _syncService.estimatedInternetNowUtc();
-      if (internetNow != null) {
-        _syncService.recordPeriodicSyncTime(internetNow);
+        final workerPrepared = await runOffUi(
+          () => prepareRawScans(
+            workerScans,
+            connectedRadioId: connectedRadioId,
+            sanitizeDeadzoneRadios: true,
+          ),
+          weight: workerScans.length,
+        );
+        _logSuppressedDeadzoneRows(workerPrepared.suppressedRows, 'worker');
+        if (workerPrepared.suppressedHexes.isNotEmpty) {
+          await _cleanupWorkerDeadzoneRows(api, workerPrepared.suppressedHexes);
+        }
+        if (cancelled()) throw const HistoryLoadCancelled();
+
+        if (workerPrepared.scans.isNotEmpty) {
+          final merged = await runOffUi(
+            () => mergeWorkerAndLocalScans(
+              workerScans: workerPrepared.scans,
+              localScans: localOnlyBeforeSync,
+            ),
+            weight: workerPrepared.scans.length + localOnlyBeforeSync.length,
+          );
+          if (cancelled()) throw const HistoryLoadCancelled();
+          rawScans = merged.scans;
+          _debugLog.info(
+            'sync',
+            'Fetched ${workerPrepared.scans.length} raw scans from worker',
+          );
+          _logSuppressedDeadzoneRows(merged.suppressedRows, 'merged');
+          _debugLog.info(
+            'sync',
+            'Merged ${workerPrepared.scans.length} worker scans with '
+                '${merged.preservedLocal} preserved local scan(s) '
+                '=> ${rawScans.length} total',
+          );
+          _applyKnownContactsBackfill();
+          await _localStore.saveRawScans(rawScans);
+          if (cancelled()) throw const HistoryLoadCancelled();
+        }
+
+        var zonesFromWorker = false;
+        try {
+          final workerZones = await api.fetchCoverageZones(
+            historyDays: settings.historyDays,
+            deadzoneDays: settings.deadzoneDays,
+            connectedRadioId: connectedRadioId,
+            centerLat: deviceLatitude,
+            centerLng: deviceLongitude,
+            radiusMiles: settings.syncRadiusMiles,
+          );
+          if (cancelled()) throw const HistoryLoadCancelled();
+          final preparedZones = await runOffUi(
+            () => prepareCoverageZones(workerZones, connectedRadioId),
+            weight: workerZones.length,
+          );
+          if (cancelled()) throw const HistoryLoadCancelled();
+          _debugLog.info(
+            'sync',
+            'Fetched ${workerZones.length} coverage zones from worker',
+          );
+          if (preparedZones.suppressedRows > 0) {
+            _debugLog.info(
+              'sync',
+              'Suppressed ${preparedZones.suppressedRows} deadzone coverage '
+                  'row(s) in successful hexes (worker)',
+            );
+          }
+          coverageZones = preparedZones.zones;
+          zonesFromWorker = true;
+        } on HistoryLoadCancelled {
+          rethrow;
+        } catch (_) {
+          _debugLog.warn(
+            'sync',
+            'Coverage zones endpoint failed, falling back to local aggregation',
+          );
+        }
+
+        if (cancelled()) throw const HistoryLoadCancelled();
+        await _rebuildDerivedData(skipZones: zonesFromWorker);
+        if (allDays && !cancelled()) {
+          await _allDaysGuard.clear();
+        }
+        _lastWorkerSyncSucceeded = true;
+        _syncService.captureInternetTimeAnchor(api.lastServerDateUtc);
+        final internetNow = _syncService.estimatedInternetNowUtc();
+        if (internetNow != null) {
+          _syncService.recordPeriodicSyncTime(internetNow);
+        }
+        _syncService.completeSync(workerScans.length);
+      } on HistoryLoadCancelled {
+        _debugLog.info('sync', 'History load cancelled');
+        await _rebuildDerivedData();
+        _syncService.abandonSync();
+      } catch (e) {
+        _debugLog.error('sync', 'Worker sync failed: $e');
+        await _rebuildDerivedData();
+        _syncService.failSync(e.toString());
+      } finally {
+        historyLoadLabel = null;
+        _debugLog.info('sync', 'Worker sync finished');
+        notifyListeners();
       }
-      _syncService.completeSync(workerScans.length);
-    } catch (e) {
-      _debugLog.error('sync', 'Worker sync failed: $e');
-      _rebuildDerivedData();
-      _syncService.failSync(e.toString());
     } finally {
-      _debugLog.info('sync', 'Worker sync finished');
-      notifyListeners();
+      _workerSyncStarting = false;
     }
   }
 
@@ -1600,12 +1775,14 @@ class AppState extends ChangeNotifier {
         name: advert.name,
         source: 'discover',
       );
-      unawaited(_upsertHeardContact(
-        prefix: advert.publicKeyPrefix,
-        name: advert.name,
-        type: advert.nodeType,
-        source: 'advert',
-      ));
+      unawaited(
+        _upsertHeardContact(
+          prefix: advert.publicKeyPrefix,
+          name: advert.name,
+          type: advert.nodeType,
+          source: 'advert',
+        ),
+      );
       final resolvedAdvertName = _resolveDiscoverName(
         nodeId: advert.publicKeyPrefix,
         incomingName: advert.name,
@@ -1756,12 +1933,12 @@ class AppState extends ChangeNotifier {
       final persistedDiscoverResponses = byPrefix.values.where(
         (response) => directDiscoverPrefixes.contains(response.publicKeyPrefix),
       );
-      final appended = _appendDiscoverScansWithOsLocation(
+      final appended = await _appendDiscoverScansWithOsLocation(
         persistedDiscoverResponses,
       );
       if (appended > 0) {
         await _localStore.saveRawScans(rawScans);
-        _rebuildDerivedData();
+        await _rebuildDerivedData();
         _debugLog.info(
           'ble_discover',
           'Stored $appended local scan(s) with OS location',
@@ -1770,7 +1947,7 @@ class AppState extends ChangeNotifier {
         final recorded = _recordDeadZoneScan();
         if (recorded) {
           await _localStore.saveRawScans(rawScans);
-          _rebuildDerivedData();
+          await _rebuildDerivedData();
         }
       }
       bleScanStatus = 'done';
@@ -1852,9 +2029,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  int _appendDiscoverScansWithOsLocation(
+  Future<int> _appendDiscoverScansWithOsLocation(
     Iterable<NodeDiscoverResponse> responses,
-  ) {
+  ) async {
     final lat = deviceLatitude;
     final lng = deviceLongitude;
     if (lat == null || lng == null) {
@@ -1933,17 +2110,17 @@ class AppState extends ChangeNotifier {
       );
     }
     if (appended.isNotEmpty) {
-      rawScans = [...appended, ...rawScans];
-      final beforeDelete = rawScans.length;
-      rawScans = _applyDeadzoneSuccessPrecedence(
-        rawScans,
-        source: 'local_discover',
+      final combined = <RawScan>[...appended, ...rawScans];
+      final prepared = await runOffUi(
+        () => prepareRawScans(combined),
+        weight: combined.length,
       );
-      final deleted = beforeDelete - rawScans.length;
-      if (deleted > 0) {
+      rawScans = prepared.scans;
+      if (prepared.suppressedRows > 0) {
         _debugLog.info(
           'scan_store',
-          'Deleted $deleted local deadzone row(s) after successful discover scan(s)',
+          'Deleted ${prepared.suppressedRows} local deadzone row(s) '
+              'after successful discover scan(s)',
         );
       }
     }
@@ -2193,7 +2370,10 @@ class AppState extends ChangeNotifier {
             source: 'sync',
           ),
       ];
-      final merged = await _contactStore.mergeContacts(persistedRadioId, incoming);
+      final merged = await _contactStore.mergeContacts(
+        persistedRadioId,
+        incoming,
+      );
       // Reflect full local book (includes previously heard companions).
       _sessionRadioContacts
         ..clear()
@@ -2210,7 +2390,7 @@ class AppState extends ChangeNotifier {
     final updated = _backfillScanNamesFromContacts(_radioContactsByPrefix);
     if (updated > 0) {
       await _localStore.saveRawScans(rawScans);
-      _rebuildDerivedData();
+      await _rebuildDerivedData();
     }
     notifyListeners();
     _debugLog.warn(
@@ -2219,7 +2399,6 @@ class AppState extends ChangeNotifier {
     );
     _logKnownNodeContactMatches();
   }
-
 
   Future<void> _upsertHeardContact({
     required String prefix,
@@ -2265,25 +2444,23 @@ class AppState extends ChangeNotifier {
         _sessionRadioContacts.addAll(session);
         _sessionRadioContactTypes.addAll({
           for (final c in stored.values)
-            if (session.containsKey(c.publicKeyPrefix)) c.publicKeyPrefix: c.type,
+            if (session.containsKey(c.publicKeyPrefix))
+              c.publicKeyPrefix: c.type,
         });
         // One-time migrate legacy SharedPreferences book if present.
         final legacy = settings.contactsByRadioId[radioId];
         if (legacy != null && legacy.isNotEmpty) {
           final now = DateTime.now().toUtc();
-          await _contactStore.mergeContacts(
-            radioId,
-            [
-              for (final e in legacy.entries)
-                LocalContact(
-                  publicKeyPrefix: e.key,
-                  name: e.value,
-                  type: 0,
-                  lastHeard: now,
-                  source: 'sync',
-                ),
-            ],
-          );
+          await _contactStore.mergeContacts(radioId, [
+            for (final e in legacy.entries)
+              LocalContact(
+                publicKeyPrefix: e.key,
+                name: e.value,
+                type: 0,
+                lastHeard: now,
+                source: 'sync',
+              ),
+          ]);
         }
         notifyListeners();
         return;
@@ -2417,7 +2594,7 @@ class AppState extends ChangeNotifier {
   int _backfillScanNamesFromContacts(Map<String, String> contacts) {
     final storeable = _namesAllowedOnScans(contacts);
     var updates = 0;
-    final next = <RawScan>[];
+    List<RawScan>? next;
     final connectedMesh = normalizeHexId(_connectedRadioMeshIdPrefix ?? '');
     var candidateScans = 0;
     var globalNodeContactMatches = 0;
@@ -2472,11 +2649,12 @@ class AppState extends ChangeNotifier {
       final receiverChanged =
           observerMatch != null && receiverCurrent != observerMatch;
       if (!senderChanged && !receiverChanged) {
-        next.add(scan);
+        next?.add(scan);
         continue;
       }
 
       updates += (senderChanged ? 1 : 0) + (receiverChanged ? 1 : 0);
+      next ??= rawScans.sublist(0, candidateScans - 1).toList();
       next.add(
         normalizeRawScanIds(
           RawScan(
@@ -2498,7 +2676,7 @@ class AppState extends ChangeNotifier {
         ),
       );
     }
-    if (updates > 0) {
+    if (updates > 0 && next != null) {
       rawScans = next;
     }
     _debugLog.debug(
@@ -2645,50 +2823,6 @@ class AppState extends ChangeNotifier {
 
   String _shortNodeId(String nodeId) => shortNodeId(nodeId);
 
-  _DeadzonePrecedenceResult _applyDeadzoneSuccessPrecedenceDetailed(
-    List<RawScan> scans, {
-    required String source,
-  }) {
-    if (scans.isEmpty) return const _DeadzonePrecedenceResult([]);
-    final hexesWithSuccess = <String>{};
-    for (final scan in scans) {
-      if (isSuccessfulScan(scan)) {
-        hexesWithSuccess.add(hexKey(scan.latitude, scan.longitude));
-      }
-    }
-    if (hexesWithSuccess.isEmpty) return _DeadzonePrecedenceResult(scans);
-
-    var suppressed = 0;
-    final suppressedHexes = <String>{};
-    final filtered = <RawScan>[];
-    for (final scan in scans) {
-      final hex = hexKey(scan.latitude, scan.longitude);
-      if (isDeadLikeScan(scan) && hexesWithSuccess.contains(hex)) {
-        suppressed += 1;
-        suppressedHexes.add(hex);
-        continue;
-      }
-      filtered.add(scan);
-    }
-    if (suppressed > 0) {
-      _debugLog.info(
-        'sync',
-        'Suppressed $suppressed deadzone row(s) in hexes with successful scans ($source)',
-      );
-    }
-    return _DeadzonePrecedenceResult(
-      filtered,
-      suppressedHexes: suppressedHexes,
-    );
-  }
-
-  List<RawScan> _applyDeadzoneSuccessPrecedence(
-    List<RawScan> scans, {
-    required String source,
-  }) {
-    return _applyDeadzoneSuccessPrecedenceDetailed(scans, source: source).scans;
-  }
-
   Future<void> _cleanupWorkerDeadzoneRows(
     WorkerApi api,
     Set<String> hexes,
@@ -2704,34 +2838,6 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _debugLog.warn('sync', 'Worker deadzone cleanup failed: $e');
     }
-  }
-
-  List<CoverageZone> _applyZoneDeadzonePrecedence(
-    List<CoverageZone> zones, {
-    required String source,
-  }) {
-    if (zones.isEmpty) return zones;
-    final successfulZoneIds = zones
-        .where((zone) => !zone.isDeadZone)
-        .map((zone) => zone.id)
-        .toSet();
-    if (successfulZoneIds.isEmpty) return zones;
-    var suppressed = 0;
-    final filtered = <CoverageZone>[];
-    for (final zone in zones) {
-      if (zone.isDeadZone && successfulZoneIds.contains(zone.id)) {
-        suppressed += 1;
-        continue;
-      }
-      filtered.add(zone);
-    }
-    if (suppressed > 0) {
-      _debugLog.info(
-        'sync',
-        'Suppressed $suppressed deadzone coverage row(s) in successful hexes ($source)',
-      );
-    }
-    return filtered;
   }
 
   String? _connectedRadioMeshId8() {
@@ -3364,13 +3470,19 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  void _rebuildDerivedData({bool skipZones = false}) {
+  Future<void> _rebuildDerivedData({bool skipZones = false}) async {
+    final generation = ++_derivedGeneration;
+    final scans = rawScans;
+    final derived = await runOffUi(
+      () => buildDerivedScanData(scans, includeZones: !skipZones),
+      weight: scans.length,
+    );
+    if (generation != _derivedGeneration) return;
     if (!skipZones) {
-      coverageZones = aggregateScansToZones(rawScans);
+      coverageZones = derived.zones;
     }
-    nodes = extractNodes(rawScans);
-    scanResults = convertToScanResults(rawScans)
-      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    nodes = derived.nodes;
+    scanResults = derived.scanResults;
   }
 
   void markHostDetaching() {
@@ -3536,7 +3648,7 @@ class AppState extends ChangeNotifier {
           .toList(growable: false);
       final removedLocal = rawScans.length - next.length;
       rawScans = next;
-      _rebuildDerivedData();
+      await _rebuildDerivedData();
       await _localStore.saveRawScans(rawScans);
 
       _debugLog.info(
@@ -3672,12 +3784,4 @@ class _SmartScanDecision {
   final bool skip;
   final String reason;
   final String? zoneId;
-}
-
-class _DeadzonePrecedenceResult {
-  const _DeadzonePrecedenceResult(this.scans, {Set<String>? suppressedHexes})
-    : suppressedHexes = suppressedHexes ?? const <String>{};
-
-  final List<RawScan> scans;
-  final Set<String> suppressedHexes;
 }

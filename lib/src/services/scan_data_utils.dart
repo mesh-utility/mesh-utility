@@ -21,12 +21,20 @@ bool isDeadLikeScan(RawScan scan) {
 /// Returns true when [scan] has a real node ID and RSSI.
 bool isSuccessfulScan(RawScan scan) => !isDeadLikeScan(scan);
 
-/// Returns a copy of [scan] with observer/node/radio IDs normalised via
-/// [safePublicRadioId].
+/// Returns [scan] unchanged when its ids are already normalised, otherwise a
+/// copy with observer/node/radio ids passed through [safePublicRadioId].
 RawScan normalizeRawScanIds(RawScan scan) {
+  final observerId = safePublicRadioId(scan.observerId ?? '');
+  final nodeId = safePublicRadioId(scan.nodeId ?? '');
+  final radioId = safePublicRadioId(scan.radioId ?? '');
+  if (observerId == scan.observerId &&
+      nodeId == scan.nodeId &&
+      radioId == scan.radioId) {
+    return scan;
+  }
   return RawScan(
-    observerId: safePublicRadioId(scan.observerId ?? ''),
-    nodeId: safePublicRadioId(scan.nodeId ?? ''),
+    observerId: observerId,
+    nodeId: nodeId,
     latitude: scan.latitude,
     longitude: scan.longitude,
     rssi: scan.rssi,
@@ -37,7 +45,7 @@ RawScan normalizeRawScanIds(RawScan scan) {
     receivedAt: scan.receivedAt,
     senderName: scan.senderName,
     receiverName: scan.receiverName,
-    radioId: safePublicRadioId(scan.radioId ?? ''),
+    radioId: radioId,
     downloadedFromWorker: scan.downloadedFromWorker,
   );
 }

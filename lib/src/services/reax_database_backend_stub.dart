@@ -14,4 +14,7 @@ class _InMemoryKvDatabase implements AppKvDatabase {
   Future<void> put(String key, dynamic value) async {
     _store[key] = value;
   }
+
+  @override
+  Future<void> close() async {}
 }

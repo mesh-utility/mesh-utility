@@ -3,15 +3,18 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:reaxdb_dart/reaxdb_dart.dart';
 
+import 'package:mesh_utility/src/services/mesh_database_path_io.dart';
 import 'package:mesh_utility/src/services/reax_database_backend_base.dart';
 
 Future<AppKvDatabase> openAppKvDatabase() async {
   try {
     final baseDir = await getApplicationSupportDirectory();
     final dbPath = '${baseDir.path}${Platform.pathSeparator}mesh_utility';
+    rememberMeshDatabasePath(dbPath);
     final db = await ReaxDB.simple(dbPath);
     return _ReaxKvDatabase(db);
   } catch (_) {
+    rememberMeshDatabasePath('mesh_utility');
     final db = await ReaxDB.simple('mesh_utility');
     return _ReaxKvDatabase(db);
   }
@@ -27,4 +30,7 @@ class _ReaxKvDatabase implements AppKvDatabase {
 
   @override
   Future<void> put(String key, dynamic value) => _db.put(key, value);
+
+  @override
+  Future<void> close() => _db.close();
 }

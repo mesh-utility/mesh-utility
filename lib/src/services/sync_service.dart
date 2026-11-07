@@ -55,6 +55,12 @@ class SyncService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Stops the sync indicator without recording a failure or a success.
+  void abandonSync() {
+    syncing = false;
+    notifyListeners();
+  }
+
   // ── Internet time anchor ─────────────────────────────────────────────────
 
   void captureInternetTimeAnchor(DateTime? serverUtc) {

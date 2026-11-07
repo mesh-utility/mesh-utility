@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
+import 'package:mesh_utility/src/services/history_pipeline.dart';
+import 'package:mesh_utility/src/services/off_ui.dart';
 
 typedef HttpGetFn = Future<http.Response> Function(Uri uri);
 typedef HttpPostFn =
@@ -11,12 +13,6 @@ typedef HttpPostFn =
       Map<String, String>? headers,
       Object? body,
     });
-
-/// Converts an untyped [Map] to `Map<String, dynamic>` without throwing on
-/// non-string keys — unknown key types are stringified.
-Map<String, dynamic> _safeMap(Map<dynamic, dynamic> m) {
-  return {for (final e in m.entries) e.key.toString(): e.value};
-}
 
 Map<String, String> _queryWithOptionalArea({
   Map<String, String>? base,
@@ -85,7 +81,9 @@ class WorkerApi {
         ? base.substring(0, base.length - 1)
         : base;
     final normalizedPath = path.startsWith('/') ? path : '/$path';
-    return Uri.parse('$normalized$normalizedPath').replace(queryParameters: query);
+    return Uri.parse(
+      '$normalized$normalizedPath',
+    ).replace(queryParameters: query);
   }
 
   Uri? _staticUri(String path, [Map<String, String>? query]) {
@@ -266,6 +264,9 @@ class WorkerApi {
     double? centerLat,
     double? centerLng,
     int? radiusMiles,
+    bool markDownloaded = false,
+    void Function(int completedDays, int totalDays)? onDayProgress,
+    bool Function()? isCancelled,
   }) async {
     final days = await fetchHistoryDays();
     final historyLimit = historyDays > 0 ? historyDays : days.length;
@@ -277,7 +278,12 @@ class WorkerApi {
     _normalizeRadioId8(connectedRadioId);
 
     final results = <RawScan>[];
+    final totalDays = selectedDays.length;
+    onDayProgress?.call(0, totalDays);
     for (var i = 0; i < selectedDays.length; i++) {
+      if (isCancelled?.call() == true) {
+        throw const HistoryLoadCancelled();
+      }
       final day = selectedDays[i];
       final keepHistory = i < historyLimit;
       final keepDeadzones = i < deadzoneLimit;
@@ -288,14 +294,22 @@ class WorkerApi {
           centerLat: centerLat,
           centerLng: centerLng,
           radiusMiles: radiusMiles,
+          markDownloaded: markDownloaded,
+          isCancelled: isCancelled,
         );
-        for (final scan in dayScans) {
-          if (keepHistory || (keepDeadzones && _isDeadLikeScan(scan))) {
-            results.add(scan);
+        if (keepHistory) {
+          results.addAll(dayScans);
+        } else if (keepDeadzones) {
+          for (final scan in dayScans) {
+            if (_isDeadLikeScan(scan)) results.add(scan);
           }
         }
+      } on HistoryLoadCancelled {
+        rethrow;
       } catch (_) {
         continue;
+      } finally {
+        onDayProgress?.call(i + 1, totalDays);
       }
     }
 
@@ -328,16 +342,8 @@ class WorkerApi {
           accept: (response) =>
               response.statusCode == 200 && _looksLikeJsonResponse(response),
         );
-        final decoded = jsonDecode(_decodeUtf8(staticResponse));
-        if (decoded is List) {
-          return decoded
-              .map(
-                (e) => e is Map<String, dynamic>
-                    ? CoverageZone.fromJson(e)
-                    : CoverageZone.fromJson(_safeMap(e as Map)),
-              )
-              .toList(growable: false);
-        }
+        final zones = await _parseCoverageOffUi(staticResponse.bodyBytes);
+        if (zones != null) return zones;
       } catch (_) {
         // Fall through to dynamic API.
       }
@@ -354,18 +360,12 @@ class WorkerApi {
       throw Exception('Failed to fetch coverage zones');
     }
 
-    final decoded = jsonDecode(_decodeUtf8(response));
-    if (decoded is! List) {
-      return [];
-    }
+    return await _parseCoverageOffUi(response.bodyBytes) ??
+        const <CoverageZone>[];
+  }
 
-    return decoded
-        .map(
-          (e) => e is Map<String, dynamic>
-              ? CoverageZone.fromJson(e)
-              : CoverageZone.fromJson(_safeMap(e as Map)),
-        )
-        .toList();
+  Future<List<CoverageZone>?> _parseCoverageOffUi(List<int> bytes) {
+    return runOffUi(() => parseCoverageZoneBytes(bytes), force: true);
   }
 
   String? _normalizeRadioId8(String? value) {
@@ -386,7 +386,12 @@ class WorkerApi {
     double? centerLat,
     double? centerLng,
     int? radiusMiles,
+    bool markDownloaded = false,
+    bool Function()? isCancelled,
   }) async {
+    if (isCancelled?.call() == true) {
+      throw const HistoryLoadCancelled();
+    }
     if (_staticDataBaseUrl != null) {
       try {
         final staticResponse = await _getStatic(
@@ -394,7 +399,10 @@ class WorkerApi {
           accept: (response) =>
               response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
         );
-        return _parseRawScansNdjson(_decodeUtf8(staticResponse));
+        return await _parseScansOffUi(
+          staticResponse.bodyBytes,
+          markDownloaded: markDownloaded,
+        );
       } catch (_) {
         // Fall through to dynamic API for this day.
       }
@@ -412,6 +420,9 @@ class WorkerApi {
     int? cursorTimestamp;
     int? cursorId;
     for (var page = 0; page < 200; page++) {
+      if (isCancelled?.call() == true) {
+        throw const HistoryLoadCancelled();
+      }
       final pagedQuery = <String, String>{
         ...query,
         'pageSize': '$_historyPageSize',
@@ -427,7 +438,12 @@ class WorkerApi {
             response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
       );
       if (response.statusCode != 200) break;
-      all.addAll(_parseRawScansNdjson(_decodeUtf8(response)));
+      all.addAll(
+        await _parseScansOffUi(
+          response.bodyBytes,
+          markDownloaded: markDownloaded,
+        ),
+      );
       final hasMore = (response.headers['x-has-more'] ?? '').trim() == '1';
       if (!hasMore) break;
       cursorTimestamp = int.tryParse(
@@ -441,45 +457,14 @@ class WorkerApi {
     return all;
   }
 
-  List<RawScan> _parseRawScansNdjson(String payload) {
-    final parsed = <RawScan>[];
-    final trimmed = payload.trim();
-    if (trimmed.isEmpty) return parsed;
-
-    // Accept both NDJSON and JSON array payloads for compatibility.
-    if (trimmed.startsWith('[')) {
-      try {
-        final decoded = jsonDecode(trimmed);
-        if (decoded is List) {
-          for (final row in decoded) {
-            if (row is Map<String, dynamic>) {
-              parsed.add(RawScan.fromJson(row));
-            } else if (row is Map) {
-              parsed.add(RawScan.fromJson(_safeMap(row)));
-            }
-          }
-          return parsed;
-        }
-      } catch (_) {
-        return parsed;
-      }
-    }
-
-    final lines = const LineSplitter().convert(payload);
-    for (final line in lines) {
-      if (line.trim().isEmpty) continue;
-      try {
-        final decoded = jsonDecode(line);
-        if (decoded is Map<String, dynamic>) {
-          parsed.add(RawScan.fromJson(decoded));
-        } else if (decoded is Map) {
-          parsed.add(RawScan.fromJson(_safeMap(decoded)));
-        }
-      } catch (_) {
-        // Skip malformed rows instead of failing full sync.
-      }
-    }
-    return parsed;
+  Future<List<RawScan>> _parseScansOffUi(
+    List<int> bytes, {
+    required bool markDownloaded,
+  }) {
+    return runOffUi(
+      () => parseRawScanBytes(bytes, downloadedFromWorker: markDownloaded),
+      force: true,
+    );
   }
 
   Future<int> uploadScans(List<Map<String, dynamic>> scans) async {

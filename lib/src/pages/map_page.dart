@@ -8,6 +8,7 @@ import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/map_viewport_render.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
@@ -122,6 +123,14 @@ class _MapPageState extends State<MapPage> {
   DateTime? _lastAutoCenterDisableAt;
   Set<String> _selectedNodeFilters = <String>{};
   late TileProvider _tileProvider;
+  Timer? _viewportRenderTimer;
+  DateTime? _viewportBurstStart;
+  bool _renderPosted = false;
+  bool _renderReady = false;
+  int? _datasetToken;
+  List<CoverageZone> _datasetZones = const [];
+  int _renderSignature = 0;
+  List<Polygon<String>> _renderPolygons = const [];
 
   @override
   void initState() {
@@ -174,9 +183,100 @@ class _MapPageState extends State<MapPage> {
 
   @override
   void dispose() {
+    _viewportRenderTimer?.cancel();
     _tileProvider.dispose();
     _polygonHitNotifier.dispose();
     super.dispose();
+  }
+
+  void _noteDataset(List<CoverageZone> zones, int token) {
+    if (token == _datasetToken) return;
+    _datasetToken = token;
+    _datasetZones = zones;
+    _scheduleViewportRender(immediate: true);
+  }
+
+  void _scheduleViewportRender({bool immediate = false}) {
+    if (immediate) {
+      _viewportBurstStart = null;
+      _viewportRenderTimer?.cancel();
+      _viewportRenderTimer = null;
+      _enqueueViewportRender();
+      return;
+    }
+    final now = DateTime.now();
+    _viewportBurstStart ??= now;
+    final delay = mapViewportRefreshDelay(
+      sinceBurst: now.difference(_viewportBurstStart!),
+    );
+    _viewportRenderTimer?.cancel();
+    if (delay == Duration.zero) {
+      _viewportRenderTimer = null;
+      _viewportBurstStart = now;
+      _enqueueViewportRender();
+      return;
+    }
+    _viewportRenderTimer = Timer(delay, () {
+      _viewportRenderTimer = null;
+      _viewportBurstStart = null;
+      _enqueueViewportRender();
+    });
+  }
+
+  void _enqueueViewportRender() {
+    if (_renderPosted) return;
+    _renderPosted = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _renderPosted = false;
+      if (!mounted) return;
+      _recomputeViewportRender();
+    });
+  }
+
+  void _recomputeViewportRender() {
+    if (!mounted) return;
+    final MapCamera camera;
+    try {
+      camera = _mapController.camera;
+    } catch (_) {
+      return;
+    }
+    final size = camera.nonRotatedSize;
+    if (!size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0 ||
+        size.height <= 0) {
+      return;
+    }
+    final MapRenderViewport viewport;
+    try {
+      final bounds = camera.visibleBounds;
+      viewport = MapRenderViewport.fromCenterWidth(
+        south: bounds.south,
+        north: bounds.north,
+        longitudeCenter: bounds.longitudeCenter,
+        longitudeWidth: bounds.longitudeWidth,
+        zoom: camera.zoom,
+      );
+    } catch (_) {
+      return;
+    }
+    final drawn = selectZonesForMapRender(
+      zones: _datasetZones,
+      viewport: viewport,
+      pinZoneId: _selectedZone?.id,
+    );
+    final signature = mapDrawSignature(drawn);
+    if (_renderReady && signature == _renderSignature) return;
+    _renderReady = true;
+    _renderSignature = signature;
+    _renderPolygons = _polygonsForDraw(drawn);
+    _debugLog.debug(
+      'map_render',
+      'polygons=${_renderPolygons.length} dataset=${_datasetZones.length} '
+          'zoom=${camera.zoom.toStringAsFixed(2)}',
+    );
+    setState(() {});
   }
 
   void _handlePolygonTap() {
@@ -538,6 +638,20 @@ class _MapPageState extends State<MapPage> {
             observerLng: widget.observerLng,
             radiusMiles: widget.statsRadiusMiles,
           );
+    final radiusAffectsFilter = widget.statsRadiusMiles != 0;
+    final datasetToken = Object.hash(
+      identityHashCode(widget.zones),
+      widget.zones.length,
+      identityHashCode(widget.scans),
+      widget.scans.length,
+      widget.focusNodeId,
+      widget.statsRadiusMiles,
+      radiusAffectsFilter ? widget.observerLat : null,
+      radiusAffectsFilter ? widget.observerLng : null,
+      _selectedZone?.id,
+      Object.hashAll(_selectedNodeFilters),
+    );
+    _noteDataset(filteredZones, datasetToken);
     final filteredZoneIds = filteredZones.map((z) => z.id).toSet();
     final scopedNodeIds = <String>{};
     for (final scan in widget.scans) {
@@ -627,6 +741,14 @@ class _MapPageState extends State<MapPage> {
                       _disableAutoCenter('map gesture');
                     }
                   },
+                  onMapReady: () => _scheduleViewportRender(immediate: true),
+                  onMapEvent: (event) {
+                    if (event is MapEventNonRotatedSizeChange) {
+                      _scheduleViewportRender(immediate: true);
+                    } else if (event is MapEventWithMove) {
+                      _scheduleViewportRender();
+                    }
+                  },
                   onTap: (tapPosition, latLng) {
                     _disableAutoCenter('map tap');
                     final hit = _polygonHitNotifier.value;
@@ -691,7 +813,7 @@ class _MapPageState extends State<MapPage> {
                         ),
                       ],
                     ),
-                  if (filteredZones.any((z) => z.polygon.isNotEmpty))
+                  if (_renderPolygons.isNotEmpty)
                     MouseRegion(
                       hitTestBehavior: HitTestBehavior.deferToChild,
                       cursor: SystemMouseCursors.click,
@@ -700,27 +822,7 @@ class _MapPageState extends State<MapPage> {
                         onTap: _handlePolygonTap,
                         child: PolygonLayer<String>(
                           hitNotifier: _polygonHitNotifier,
-                          polygons: filteredZones
-                              .where((z) => z.polygon.isNotEmpty)
-                              .map(
-                                (z) => Polygon<String>(
-                                  points: z.polygon,
-                                  hitValue: z.id,
-                                  color: _zoneColor(z).withValues(
-                                    alpha: z.isDeadZone ? 0.15 : 0.45,
-                                  ),
-                                  borderColor: z.isDeadZone
-                                      ? const Color(0xFFEF4444)
-                                      : _zoneColor(z),
-                                  borderStrokeWidth: 1,
-                                  pattern: z.isDeadZone
-                                      ? StrokePattern.dashed(
-                                          segments: const [6, 4],
-                                        )
-                                      : const StrokePattern.solid(),
-                                ),
-                              )
-                              .toList(),
+                          polygons: _renderPolygons,
                         ),
                       ),
                     ),
@@ -2081,17 +2183,33 @@ BaseLayer _defaultBaseLayerForBrightness(Brightness brightness) {
   return brightness == Brightness.dark ? BaseLayer.dark : BaseLayer.standard;
 }
 
-Color _zoneColor(CoverageZone zone) {
-  // Dead Zone color only for zones that truly heard nothing. Weak-but-heard
-  // cells use Poor/Noisy/etc. via RSSI/SNR classification.
-  if (zone.isDeadZone) {
-    return signalColorForValues(rssi: null, snr: null);
+List<Polygon<String>> _polygonsForDraw(List<MapDrawPolygon> drawn) {
+  final polygons = <Polygon<String>>[];
+  for (final draw in drawn) {
+    if (draw.points.length < 3) continue;
+    // Dead Zone color only when nothing was heard. Weak-but-heard cells use
+    // Poor/Noisy/etc. via RSSI/SNR classification.
+    final color = draw.isDeadZone
+        ? signalColorForValues(rssi: null, snr: null)
+        : signalColorForValues(
+            rssi: draw.avgRssi,
+            snr: draw.avgSnr,
+            includeDeadZone: false,
+          );
+    polygons.add(
+      Polygon<String>(
+        points: draw.points,
+        hitValue: draw.hitZoneId,
+        color: color.withValues(alpha: draw.isDeadZone ? 0.15 : 0.45),
+        borderColor: draw.isDeadZone ? const Color(0xFFEF4444) : color,
+        borderStrokeWidth: 1,
+        pattern: draw.isDeadZone
+            ? StrokePattern.dashed(segments: const [6, 4])
+            : const StrokePattern.solid(),
+      ),
+    );
   }
-  return signalColorForValues(
-    rssi: zone.avgRssi,
-    snr: zone.avgSnr,
-    includeDeadZone: false,
-  );
+  return polygons;
 }
 
 List<CoverageZone> _filterZonesByRadius({

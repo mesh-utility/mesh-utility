@@ -99,6 +99,9 @@ class _WebIndexedDbKvDatabase implements AppKvDatabase {
     html.window.localStorage.remove('$_prefix$key');
   }
 
+  @override
+  Future<void> close() async {}
+
   Future<String?> _readLegacyAndMigrate(String key) async {
     final storageKey = '$_prefix$key';
     final raw = html.window.localStorage[storageKey];
@@ -151,6 +154,9 @@ class _WebLocalStorageKvDatabase implements AppKvDatabase {
       return null;
     }
   }
+
+  @override
+  Future<void> close() async {}
 
   @override
   Future<void> put(String key, dynamic value) async {
