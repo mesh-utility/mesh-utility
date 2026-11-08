@@ -17,7 +17,8 @@ export 'package:mesh_utility/src/services/hex_coverage_aggregate.dart'
         formatCoverageFraction,
         hexClusterScaleForZoom,
         mapDetailZoom,
-        mapHexClusterMaxScale,
+        mapHexMaxScale,
+        mapHexMaxScaleZoom,
         mapHexZoomBands;
 
 /// Extra fraction of the camera kept on each edge so hexes do not pop
@@ -27,9 +28,9 @@ const double mapViewportMarginFraction = 0.15;
 /// Emergency ceiling on polygons sent to the map layer.
 ///
 /// Zoom bands keep a phone or 1024×768 view of regional coverage under this
-/// count. Above it, the renderer coarsens the parent hex. Dropping clusters
-/// happens only after [mapHexClusterMaxScale] still does not fit, or when a
-/// caller freezes the scale.
+/// count. Above it, the renderer coarsens the parent hex up to
+/// [mapHexMaxScale]. It does not grow past that. Clusters nearest the
+/// viewport center are kept, and the rest are dropped.
 const int mapMaxDrawnPolygons = 700;
 
 /// Quiet period before a pan or zoom recomputes the visible set.
@@ -268,9 +269,11 @@ class MapRenderNeedsScale extends MapRenderAttempt {
 /// filtered list: aggregation never sees zones the caller removed.
 ///
 /// At and above [mapDetailZoom], polygons are the stored hexes. Below that,
-/// zones are grouped into parent hexes from [mapHexZoomBands]. Every finite
-/// filtered zone in view belongs to one drawn hex unless [maxDrawn] forces
-/// the last-resort drop ([MapRenderPlan.droppedChildren]).
+/// zones are grouped into parent hexes from [mapHexZoomBands], and never
+/// coarser than [mapHexMaxScale]. Every finite filtered zone in view belongs
+/// to one drawn hex unless [maxDrawn] still does not fit at that maximum.
+/// The overflow keeps clusters closest to the viewport center
+/// ([MapRenderPlan.droppedChildren]).
 List<MapDrawPolygon> selectZonesForMapRender({
   required List<CoverageZone> zones,
   required MapRenderViewport viewport,
@@ -322,7 +325,8 @@ MapRenderAttempt resolveMapRender({
   bool allowCompute = false,
 }) {
   final cap = maxDrawn < 1 ? 1 : maxDrawn;
-  final nominal = hexClusterScaleForZoom(viewport.zoom);
+  final bandScale = hexClusterScaleForZoom(viewport.zoom);
+  final nominal = bandScale > mapHexMaxScale ? mapHexMaxScale : bandScale;
   var scale = nominal;
   for (var guard = 0; guard < 40; guard++) {
     final found = lookup(scale);
@@ -345,7 +349,12 @@ MapRenderAttempt resolveMapRender({
       ];
       final capped = polygons.length > cap;
       final kept = capped
-          ? _capPolygons(polygons, cap: cap, pinZoneId: pinZoneId)
+          ? _capPolygons(
+              polygons,
+              cap: cap,
+              pinZoneId: pinZoneId,
+              viewport: viewport,
+            )
           : polygons;
       return MapRenderReady(
         MapRenderPlan(
@@ -499,19 +508,61 @@ MapDrawPolygon _polygonForCluster(HexCoverageCluster cluster) {
   );
 }
 
+/// Keeps [cap] polygons closest to the viewport center.
+///
+/// Distance is equirectangular around that center, with longitude wrapped, so
+/// a full-world view prefers the area under the camera. Child count breaks
+/// ties, then [MapDrawPolygon.hitZoneId]. The result never exceeds [cap].
 List<MapDrawPolygon> _capPolygons(
   List<MapDrawPolygon> polygons, {
   required int cap,
   required String? pinZoneId,
+  required MapRenderViewport viewport,
 }) {
+  final centerLat = (viewport.south + viewport.north) / 2;
+  final centerLng = viewport.longitudeCenter;
   final ranked = List<MapDrawPolygon>.of(polygons)
     ..sort((a, b) {
+      final byDistance = _viewportPriority(
+        a,
+        centerLat,
+        centerLng,
+      ).compareTo(_viewportPriority(b, centerLat, centerLng));
+      if (byDistance != 0) return byDistance;
       final byCount = b.childCount.compareTo(a.childCount);
       if (byCount != 0) return byCount;
       return a.hitZoneId.compareTo(b.hitZoneId);
     });
   final kept = ranked.length <= cap ? ranked : ranked.sublist(0, cap);
   return _withPin(kept: kept, source: polygons, cap: cap, pinZoneId: pinZoneId);
+}
+
+double _viewportPriority(
+  MapDrawPolygon polygon,
+  double centerLat,
+  double centerLng,
+) {
+  var latSum = 0.0;
+  var sinSum = 0.0;
+  var cosSum = 0.0;
+  var count = 0;
+  for (final point in polygon.points) {
+    if (!point.latitude.isFinite || !point.longitude.isFinite) continue;
+    latSum += point.latitude;
+    final radians = point.longitude * (math.pi / 180);
+    sinSum += math.sin(radians);
+    cosSum += math.cos(radians);
+    count++;
+  }
+  if (count == 0) return double.infinity;
+  final lat = latSum / count;
+  final lng = math.atan2(sinSum, cosSum) * (180 / math.pi);
+  final dLat = lat - centerLat;
+  var dLng = lng - centerLng;
+  if (dLng > 180) dLng -= 360;
+  if (dLng < -180) dLng += 360;
+  final cosLat = math.cos(centerLat * (math.pi / 180));
+  return (dLat * dLat) + ((dLng * cosLat) * (dLng * cosLat));
 }
 
 List<MapDrawPolygon> _withPin({

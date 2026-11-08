@@ -11,6 +11,20 @@ import 'package:mesh_utility/src/services/signal_class.dart';
 /// or a 1024×768 tablet view of solid coverage stays under the polygon cap.
 const double mapDetailZoom = 15.5;
 
+/// Largest parent hex the coverage map draws.
+///
+/// Flat-to-flat width is the column spacing
+/// `hexSize * sqrt(3) * lngScale * scale` degrees of longitude. At 40.7°N
+/// (State College–Lewistown, central Pennsylvania) [distanceMiles] makes
+/// scale 256 about 19.5 mi / 31.4 km wide. Scale 128 is about 9.8 mi /
+/// 15.7 km, under the 15–20 mi stop. Scale 512 is about 39 mi / 63 km,
+/// past it. 256 is the power-of-two parent in that range.
+const int mapHexMaxScale = 256;
+
+/// Zoom where [mapHexMaxScale] starts. Lower zooms keep that parent, so the
+/// cell only renders smaller.
+const double mapHexMaxScaleZoom = 7.5;
+
 /// One zoom band. [minZoom] is inclusive; the next higher band wins above it.
 class HexZoomBand {
   const HexZoomBand(this.minZoom, this.scale);
@@ -24,6 +38,9 @@ class HexZoomBand {
 
 /// High zoom is exact. Each step down doubles the parent hex so a cluster
 /// stays on the order of 48–96px wide (column spacing) on a web-mercator map.
+///
+/// Doubling stops at [mapHexMaxScale]. [hexClusterScaleForZoom] uses the last
+/// band for every zoom below [mapHexMaxScaleZoom].
 const List<HexZoomBand> mapHexZoomBands = <HexZoomBand>[
   HexZoomBand(mapDetailZoom, 1),
   HexZoomBand(14.5, 2),
@@ -33,19 +50,8 @@ const List<HexZoomBand> mapHexZoomBands = <HexZoomBand>[
   HexZoomBand(10.5, 32),
   HexZoomBand(9.5, 64),
   HexZoomBand(8.5, 128),
-  HexZoomBand(7.5, 256),
-  HexZoomBand(6.5, 512),
-  HexZoomBand(5.5, 1024),
-  HexZoomBand(4.5, 2048),
-  HexZoomBand(3.5, 4096),
-  HexZoomBand(2.5, 8192),
-  HexZoomBand(1.5, 16384),
-  HexZoomBand(0.5, 32768),
-  HexZoomBand(double.negativeInfinity, 65536),
+  HexZoomBand(mapHexMaxScaleZoom, mapHexMaxScale),
 ];
-
-/// Coarsest parent the emergency backstop may use. One cell covers the world.
-const int mapHexClusterMaxScale = 262144;
 
 /// Heard filtered cells ÷ all filtered cells in the cluster.
 ///
@@ -73,17 +79,26 @@ String formatCoverageFraction({
 int hexClusterScaleForZoom(double zoom) {
   final z = zoom.isFinite ? zoom : 0;
   for (final band in mapHexZoomBands) {
-    if (z >= band.minZoom) return band.scale;
+    if (z >= band.minZoom) return _cappedHexScale(band.scale);
   }
-  return mapHexZoomBands.last.scale;
+  return _cappedHexScale(mapHexZoomBands.last.scale);
 }
 
-/// Next coarser parent, or null at [mapHexClusterMaxScale].
+/// Next coarser parent, or null at [mapHexMaxScale].
+///
+/// The 700-polygon backstop uses this, so an over-full view cannot grow past
+/// the central-Pennsylvania cell.
 int? coarserHexScale(int scale) {
-  if (scale >= mapHexClusterMaxScale) return null;
+  if (scale >= mapHexMaxScale) return null;
   final doubled = scale < 1 ? 1 : scale * 2;
-  if (doubled > mapHexClusterMaxScale) return null;
+  if (doubled > mapHexMaxScale) return null;
   return doubled;
+}
+
+int _cappedHexScale(int scale) {
+  if (scale < 1) return 1;
+  if (scale > mapHexMaxScale) return mapHexMaxScale;
+  return scale;
 }
 
 /// Identity of a filtered zone list. Pan and zoom reuse a cache entry when

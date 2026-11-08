@@ -283,55 +283,59 @@ void main() {
   });
 
   group('low zoom bound', () {
-    test('caps 9021 in-view zones and leaves the dataset intact', () {
-      final zones = List<CoverageZone>.generate(9021, (index) {
-        final lat = -70.0 + (index % 140);
-        final lng = -180.0 + ((index * 7) % 360);
-        return _zone(
-          id: 'z$index',
-          lat: lat,
-          lng: lng,
-          polygon: const <LatLng>[],
-          isDeadZone: index.isEven,
-          scanCount: index + 1,
-        );
-      });
-      final viewport = _box(
-        south: -85,
-        north: 85,
-        west: -180,
-        east: 180,
-        zoom: 3,
-        spansAllLongitudes: true,
-      );
-
-      final plan = planZonesForMapRender(zones: zones, viewport: viewport);
-
-      expect(zones, hasLength(9021));
-      expect(plan.polygons, isNotEmpty);
-      expect(plan.polygons.length, lessThan(9021));
-      expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      expect(plan.polygons.length, greaterThan(1));
-      expect(plan.droppedChildren, isFalse);
-      expect(plan.representedChildren, 9021);
-      expect(plan.scale, greaterThan(1));
-      final ids = zones.map((zone) => zone.id).toSet();
-      final represented = <String>{};
-      for (final polygon in plan.polygons) {
-        expect(polygon.points, hasLength(6));
-        expect(polygon.scale, plan.scale);
-        expect(ids, contains(polygon.hitZoneId));
-        represented.addAll(polygon.memberZoneIds);
-        for (var i = 0; i < polygon.points.length; i++) {
-          final next = polygon.points[(i + 1) % polygon.points.length];
-          expect(
-            (polygon.points[i].longitude - next.longitude).abs(),
-            lessThan(180),
+    test(
+      'stops at the max hex scale instead of growing to hold every zone',
+      () {
+        final zones = List<CoverageZone>.generate(9021, (index) {
+          final lat = -70.0 + (index % 140);
+          final lng = -180.0 + ((index * 7) % 360);
+          return _zone(
+            id: 'z$index',
+            lat: lat,
+            lng: lng,
+            polygon: const <LatLng>[],
+            isDeadZone: index.isEven,
+            scanCount: index + 1,
           );
+        });
+        final viewport = _box(
+          south: -85,
+          north: 85,
+          west: -180,
+          east: 180,
+          zoom: 3,
+          spansAllLongitudes: true,
+        );
+
+        final plan = planZonesForMapRender(zones: zones, viewport: viewport);
+
+        expect(zones, hasLength(9021));
+        expect(plan.nominalScale, mapHexMaxScale);
+        expect(plan.scale, mapHexMaxScale);
+        expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
+        expect(plan.usedEmergencyBackstop, isTrue);
+        expect(plan.droppedChildren, isTrue);
+        expect(plan.representedChildren, lessThan(9021));
+        expect(plan.representedChildren, greaterThan(0));
+        final ids = zones.map((zone) => zone.id).toSet();
+        final represented = <String>{};
+        for (final polygon in plan.polygons) {
+          expect(polygon.points, hasLength(6));
+          expect(polygon.scale, mapHexMaxScale);
+          expect(ids, contains(polygon.hitZoneId));
+          represented.addAll(polygon.memberZoneIds);
+          for (var i = 0; i < polygon.points.length; i++) {
+            final next = polygon.points[(i + 1) % polygon.points.length];
+            expect(
+              (polygon.points[i].longitude - next.longitude).abs(),
+              lessThan(180),
+            );
+          }
         }
-      }
-      expect(represented, ids);
-    });
+        expect(represented, isNot(ids));
+        expect(represented.length, lessThan(ids.length));
+      },
+    );
 
     test('low zoom viewport does not paint a zone outside it', () {
       final inside = _zone(
@@ -476,6 +480,8 @@ void main() {
       final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
       expect(plan.nominalScale, 1);
+      expect(plan.scale, lessThanOrEqualTo(mapHexMaxScale));
+      expect(plan.scale, greaterThan(plan.nominalScale));
       expect(plan.usedEmergencyBackstop, isTrue);
       expect(plan.droppedChildren, isFalse);
       expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
