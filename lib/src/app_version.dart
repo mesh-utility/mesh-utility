@@ -12,7 +12,7 @@ const String kAppVersionFromEnvironment = String.fromEnvironment('APP_VERSION');
 ///
 /// Native builds prefer [PackageInfo]. Web builds prefer [kAppVersionFromEnvironment].
 /// `test/app_version_test.dart` fails if this drifts from pubspec.yaml.
-const String kGeneratedAppVersion = '1.0.0-alpha.21+21';
+const String kGeneratedAppVersion = '1.0.0-alpha.22+22';
 
 /// Version known at startup, before [loadAppVersion] finishes.
 String get kAppVersionLabel {
