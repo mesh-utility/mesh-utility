@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:mesh_utility/src/pages/connections_page.dart';
 import 'package:mesh_utility/src/pages/history_page.dart';
+import 'package:mesh_utility/src/pages/install_downloads_page.dart';
 import 'package:mesh_utility/src/pages/manual_page.dart';
 import 'package:mesh_utility/src/pages/map_page.dart';
 import 'package:mesh_utility/src/pages/not_found_page.dart';
@@ -18,6 +19,7 @@ import 'package:mesh_utility/src/services/app_state.dart';
 import 'package:mesh_utility/src/services/app_update_service.dart';
 import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
+import 'package:mesh_utility/src/platform/web_install_nav.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
@@ -35,7 +37,10 @@ void main() {
 }
 
 class MeshUtilityApp extends StatefulWidget {
-  const MeshUtilityApp({super.key});
+  const MeshUtilityApp({super.key, this.isWeb});
+
+  /// Overrides [kIsWeb] for the Install tab. Production leaves this null.
+  final bool? isWeb;
 
   @override
   State<MeshUtilityApp> createState() => _MeshUtilityAppState();
@@ -164,6 +169,7 @@ class _MeshUtilityAppState extends State<MeshUtilityApp> {
       home: MeshHomePage(
         onToggleTheme: _toggleTheme,
         darkMode: _themeMode == ThemeMode.dark,
+        isWeb: widget.isWeb,
       ),
     );
   }
@@ -174,10 +180,14 @@ class MeshHomePage extends StatefulWidget {
     super.key,
     required this.onToggleTheme,
     required this.darkMode,
+    this.isWeb,
   });
 
   final VoidCallback onToggleTheme;
   final bool darkMode;
+
+  /// Test override for [webInstallNavVisible]. Null uses [kIsWeb].
+  final bool? isWeb;
 
   @override
   State<MeshHomePage> createState() => _MeshHomePageState();
@@ -1005,6 +1015,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         return LayoutBuilder(
           builder: (context, constraints) {
             final desktop = constraints.maxWidth >= 860;
+            final showInstallTab = webInstallNavVisible(isWeb: widget.isWeb);
             final versionFooter = meshUtilityFooterLabel(_appVersion);
             final compactHeader = constraints.maxWidth < 520;
             final desktopSidebarWidth = (constraints.maxWidth * 0.22)
@@ -1146,6 +1157,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                       child: _AppSidebar(
                         footerLabel: versionFooter,
                         selectedIndex: _index,
+                        showInstallTab: showInstallTab,
                         onSelect: (i) {
                           _debugLog.info(
                             'ui_click',
@@ -1183,6 +1195,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                       child: _AppSidebar(
                         footerLabel: versionFooter,
                         selectedIndex: _index,
+                        showInstallTab: showInstallTab,
                         onSelect: (i) {
                           _debugLog.info(
                             'ui_click',
@@ -1327,6 +1340,14 @@ class _MeshHomePageState extends State<MeshHomePage>
   }
 
   Widget _buildPage(int index) {
+    // Install instructions do not depend on local history, so they stay
+    // available while startup is still loading.
+    if (index == webInstallPageIndex) {
+      if (!webInstallNavVisible(isWeb: widget.isWeb)) {
+        return const NotFoundPage();
+      }
+      return const InstallDownloadsPage();
+    }
     if (_appState.loading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -1659,6 +1680,7 @@ class _AppSidebar extends StatelessWidget {
   const _AppSidebar({
     required this.footerLabel,
     required this.selectedIndex,
+    required this.showInstallTab,
     required this.onSelect,
     required this.onDiscord,
     required this.onSupport,
@@ -1668,6 +1690,7 @@ class _AppSidebar extends StatelessWidget {
 
   final String footerLabel;
   final int selectedIndex;
+  final bool showInstallTab;
   final ValueChanged<int> onSelect;
   final Future<void> Function() onDiscord;
   final Future<void> Function() onSupport;
@@ -1769,6 +1792,14 @@ class _AppSidebar extends StatelessWidget {
                     selected: selectedIndex == 4,
                     onTap: () => onSelect(4),
                   ),
+                  if (showInstallTab)
+                    _NavButton(
+                      key: webInstallNavKey,
+                      label: webInstallNavLabel,
+                      icon: Icons.download_outlined,
+                      selected: selectedIndex == webInstallPageIndex,
+                      onTap: () => onSelect(webInstallPageIndex),
+                    ),
                   _NavButton(
                     label: 'Contacts',
                     icon: Icons.contacts_outlined,
@@ -1829,6 +1860,7 @@ class _AppSidebar extends StatelessWidget {
 
 class _NavButton extends StatelessWidget {
   const _NavButton({
+    super.key,
     required this.label,
     required this.icon,
     required this.selected,
