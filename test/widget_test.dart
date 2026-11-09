@@ -22,9 +22,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Mesh Utility v1.2'), findsNothing);
-    expect(find.text('Mesh Utility Alpha-22'), findsOneWidget);
+    expect(find.text('Mesh Utility Alpha-23'), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 500));
-    expect(find.text('Mesh Utility Alpha-22'), findsOneWidget);
+    expect(find.text('Mesh Utility Alpha-23'), findsOneWidget);
   });
 }
