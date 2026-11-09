@@ -71,9 +71,26 @@ class BleTransport extends Transport {
   Stream<Uint8List> get inbound => _inboundController.stream;
 
   @override
-  Future<void> connect() async {
-    _debugLog.info('ble_transport', 'Requesting BLE permissions');
-    await UniversalBle.requestPermissions(withAndroidFineLocation: !kIsWeb);
+  Future<void> connect({bool allowPermissionPrompt = true}) async {
+    if (!allowPermissionPrompt) {
+      final granted = await UniversalBle.hasPermissions(
+        withAndroidFineLocation: !kIsWeb,
+      );
+      if (!granted) {
+        _debugLog.warn(
+          'ble_transport',
+          'BLE permissions missing; background reconnect will not show a prompt',
+        );
+        throw StateError('BLE permissions are not granted');
+      }
+      _debugLog.info(
+        'ble_transport',
+        'BLE permissions already granted; skipping the permission prompt',
+      );
+    } else {
+      _debugLog.info('ble_transport', 'Requesting BLE permissions');
+      await UniversalBle.requestPermissions(withAndroidFineLocation: !kIsWeb);
+    }
 
     final state = await UniversalBle.getBluetoothAvailabilityState();
     if (state != AvailabilityState.poweredOn) {

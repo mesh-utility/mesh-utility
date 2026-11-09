@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:mesh_utility/src/pages/connections_page.dart';
 import 'package:mesh_utility/src/pages/history_page.dart';
@@ -16,6 +17,7 @@ import 'package:mesh_utility/src/pages/settings_page.dart';
 import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
+import 'package:mesh_utility/src/services/battery_optimization.dart';
 import 'package:mesh_utility/src/services/app_update_service.dart';
 import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
@@ -37,10 +39,13 @@ void main() {
 }
 
 class MeshUtilityApp extends StatefulWidget {
-  const MeshUtilityApp({super.key, this.isWeb});
+  const MeshUtilityApp({super.key, this.isWeb, this.installHttpClient});
 
   /// Overrides [kIsWeb] for the Install tab. Production leaves this null.
   final bool? isWeb;
+
+  /// Test double for the Install tab's latest-release request.
+  final http.Client? installHttpClient;
 
   @override
   State<MeshUtilityApp> createState() => _MeshUtilityAppState();
@@ -170,6 +175,7 @@ class _MeshUtilityAppState extends State<MeshUtilityApp> {
         onToggleTheme: _toggleTheme,
         darkMode: _themeMode == ThemeMode.dark,
         isWeb: widget.isWeb,
+        installHttpClient: widget.installHttpClient,
       ),
     );
   }
@@ -181,6 +187,7 @@ class MeshHomePage extends StatefulWidget {
     required this.onToggleTheme,
     required this.darkMode,
     this.isWeb,
+    this.installHttpClient,
   });
 
   final VoidCallback onToggleTheme;
@@ -188,6 +195,9 @@ class MeshHomePage extends StatefulWidget {
 
   /// Test override for [webInstallNavVisible]. Null uses [kIsWeb].
   final bool? isWeb;
+
+  /// Test double for the Install tab's latest-release request.
+  final http.Client? installHttpClient;
 
   @override
   State<MeshHomePage> createState() => _MeshHomePageState();
@@ -272,6 +282,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     _appState.onBlePinRequest = _showBlePinDialog;
     _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
     _appState.onBleUnavailablePrompt = _showBleUnavailableDialog;
+    _appState.onBatteryOptimizationPrompt = _showBatteryOptimizationDialog;
     unawaited(_initNotifications());
   }
 
@@ -290,6 +301,7 @@ class _MeshHomePageState extends State<MeshHomePage>
     _appState.onBlePinRequest = null;
     _appState.onLocationPermissionPrompt = null;
     _appState.onBleUnavailablePrompt = null;
+    _appState.onBatteryOptimizationPrompt = null;
     _appState.dispose();
     super.dispose();
   }
@@ -504,6 +516,46 @@ class _MeshHomePageState extends State<MeshHomePage>
       ),
     );
     return result ?? false;
+  }
+
+  /// Shown once when a scan loop starts and the app is still battery optimized.
+  ///
+  /// Returns true when the dialog was shown, including Not now, so the caller
+  /// can remember not to ask again.
+  Future<bool> _showBatteryOptimizationDialog() async {
+    if (!_isAndroidNative || !mounted) return false;
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return false;
+    final allow = await _showPromptPage<bool>(
+      child: Builder(
+        builder: (pageContext) => _PromptCard(
+          title: const Text('Keep scanning with the screen off'),
+          content: const Text(
+            'To keep scanning with the screen off, Android needs Mesh Utility '
+            'to be excluded from battery optimization. Otherwise the phone may '
+            'cut the radio link after a few minutes.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(pageContext).pop(false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(pageContext).pop(true),
+              child: const Text('Allow'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (allow == true) {
+      try {
+        await requestIgnoreBatteryOptimizations();
+      } catch (e) {
+        _debugLog.warn('ble_scan', 'Battery optimization request failed: $e');
+      }
+    }
+    return true;
   }
 
   void _onAppStateChanged() {
@@ -1346,7 +1398,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       if (!webInstallNavVisible(isWeb: widget.isWeb)) {
         return const NotFoundPage();
       }
-      return const InstallDownloadsPage();
+      return InstallDownloadsPage(httpClient: widget.installHttpClient);
     }
     if (_appState.loading) {
       return const Center(child: CircularProgressIndicator());
@@ -1358,6 +1410,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       case 0:
         return MapPage(
           zones: _appState.coverageZones,
+          overviewCells: _appState.coverageOverviewCells,
           onRefresh: _appState.syncFromWorker,
           syncing: _appState.syncing,
           forceOffline: _appState.settings.forceOffline,
@@ -1394,6 +1447,7 @@ class _MeshHomePageState extends State<MeshHomePage>
           rawScans: _appState.rawScans,
           nodesCount: _appState.nodes.length,
           statsRadiusMiles: _appState.settings.statsRadiusMiles,
+          maxHexScale: _appState.settings.maxHexScale,
           unitSystem: _appState.settings.unitSystem,
           tileCachingEnabled: _appState.settings.tileCachingEnabled,
           observerLat: observer?.$1,
@@ -1455,6 +1509,7 @@ class _MeshHomePageState extends State<MeshHomePage>
         );
       case 3:
         return HistoryPage(
+          key: const ValueKey<String>('history-page'),
           scans: _appState.scanResults,
           initialHexId: _historyHexFilter,
           unitSystem: _appState.settings.unitSystem,

@@ -9,18 +9,25 @@ import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/config/app_config.dart';
 import 'package:mesh_utility/src/services/all_days_load_guard.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
+import 'package:mesh_utility/src/services/battery_optimization.dart';
+import 'package:mesh_utility/src/services/scan_foreground_mode.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/scan_data_utils.dart';
 import 'package:mesh_utility/src/services/location_service.dart';
+import 'package:mesh_utility/src/services/coverage_overview.dart';
+import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/sync_service.dart';
 import 'package:mesh_utility/src/services/app_i18n.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/hex_name_index.dart';
 import 'package:mesh_utility/src/services/history_pipeline.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
+import 'package:mesh_utility/src/services/last_known_fix_store.dart';
 import 'package:mesh_utility/src/services/local_store.dart';
 import 'package:mesh_utility/src/services/mesh_database_path.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
+import 'package:mesh_utility/src/services/scan_cache_area.dart';
+import 'package:mesh_utility/src/services/scan_cache_service.dart';
 import 'package:mesh_utility/src/services/persisted_history_loader.dart';
 import 'package:mesh_utility/src/services/contact_store.dart';
 import 'package:mesh_utility/src/models/local_contact.dart';
@@ -50,14 +57,25 @@ class AppState extends ChangeNotifier {
     required LocalStore localStore,
     required Transport transport,
     AppDebugLogService? debugLogService,
+    CoverageOverviewCache? coverageOverviewCache,
+    WorkerApi Function()? coverageOverviewApi,
   }) : _settingsStore = settingsStore,
        _localStore = localStore,
        _transport = transport,
-       _debugLog = debugLogService ?? AppDebugLogService.instance {
+       _debugLog = debugLogService ?? AppDebugLogService.instance,
+       _overviewCache = coverageOverviewCache ?? CoverageOverviewCache(),
+       _coverageOverviewApi = coverageOverviewApi {
     if (_transport is BleTransport) {
       final ble = _transport;
       ble.onRequestPin = (deviceId) async {
         _debugLog.info('ble', 'PIN/passkey requested for $deviceId');
+        if (_silentBleConnectDepth > 0) {
+          _debugLog.warn(
+            'ble',
+            'Skipping PIN prompt during background reconnect for $deviceId',
+          );
+          return null;
+        }
         if (onBlePinRequest == null) {
           _debugLog.warn('ble', 'No UI PIN handler registered for $deviceId');
           return null;
@@ -119,15 +137,20 @@ class AppState extends ChangeNotifier {
             }
             _stopPassiveAdvertListener();
             bleStatus = 'BLE disconnected';
-            _resumeAutoScanAfterReconnect = wasScanning;
+            _resumeAutoScanAfterReconnect = wasScanning || _scanLoopWanted;
             _debugLog.warn(
               'ble',
               'Connection lost device=${deviceId ?? 'unknown'} reason=${reason ?? 'unknown'}',
             );
+            _syncAndroidScanForeground();
             notifyListeners();
             _signalContactSyncLinkClosed();
             if (!_manualBleDisconnectRequested && !kIsWeb) {
-              unawaited(_attemptAutoReconnect(reason: reason));
+              if (_scanLoopWanted) {
+                _armScanLoopReconnect(reason: reason);
+              } else {
+                unawaited(_attemptAutoReconnect(reason: reason));
+              }
             }
           };
       _bleAvailabilitySubscription = UniversalBle.availabilityStream.listen((
@@ -149,6 +172,7 @@ class AppState extends ChangeNotifier {
     _syncService.addListener(notifyListeners);
     _locationService.addListener(notifyListeners);
     _locationService.onPositionChanged = (lat, lng) {
+      unawaited(_rememberDeviceFix(lat, lng));
       final zoneId = hexKey(lat, lng);
       if (zoneId == _lastObservedZoneId) return;
       _lastObservedZoneId = zoneId;
@@ -189,11 +213,32 @@ class AppState extends ChangeNotifier {
   List<NodeDiscoverResponse> bleDiscoveries = const [];
   int? bleNextScanCountdown;
   DateTime? bleLastDiscoverAt;
+
+  /// Unit tests skip the Bluetooth availability check and mark the link up.
+  @visibleForTesting
+  bool debugBleReady = false;
+
+  /// Unit tests replace the radio discover write. The countdown must move
+  /// before this future completes.
+  @visibleForTesting
+  Future<void> Function()? debugDiscoverSend;
   int bleLastDiscoverCount = 0;
   String? bleLastDiscoverError;
   List<String> bleScanDevices = const [];
   String? bleSelectedDeviceId;
   final LocationService _locationService = LocationService();
+  final LastKnownFixStore _lastKnownFixStore = LastKnownFixStore();
+  final ScanCacheService _scanCache = ScanCacheService();
+  double? _cachedFixLat;
+  double? _cachedFixLng;
+  bool _startupSyncFinished = false;
+  bool _cachePruneRunning = false;
+  bool _expandDuringSync = false;
+  bool _pruneAfterSync = false;
+  bool _localStampDirty = false;
+  bool _travelFetchRunning = false;
+  String? _outsideDivisionKey;
+  bool _outsideDivisionValue = false;
   double? get deviceLatitude => _locationService.deviceLatitude;
   double? get deviceLongitude => _locationService.deviceLongitude;
   double? get deviceAltitude => _locationService.deviceAltitude;
@@ -226,6 +271,9 @@ class AppState extends ChangeNotifier {
   String? _webAutoConnectAttemptedDeviceId;
 
   void _setBleUnavailableStatus({String context = 'ble'}) {
+    if (_scanLoopWanted) {
+      _abandonScanLoopReconnect('bluetooth unsupported');
+    }
     bleConnected = false;
     bleConnecting = false;
     bleBusy = false;
@@ -236,6 +284,7 @@ class AppState extends ChangeNotifier {
     bleStatus = _bleUnavailableStatusMessage();
     _debugLog.info(context, bleStatus);
     _signalContactSyncLinkClosed();
+    _syncAndroidScanForeground();
     notifyListeners();
   }
 
@@ -470,7 +519,16 @@ class AppState extends ChangeNotifier {
     bleStatus = _bleUnavailableStateMessage(state);
     _debugLog.warn(context, '$bleStatus state=$state');
     _signalContactSyncLinkClosed();
+    _syncAndroidScanForeground();
     notifyListeners();
+
+    if (_scanLoopWanted &&
+        !bleConnected &&
+        !_manualBleDisconnectRequested &&
+        !kIsWeb &&
+        state != AvailabilityState.unsupported) {
+      _armScanLoopReconnect(reason: 'bluetooth ${state.name}');
+    }
 
     if (prompt &&
         _shouldPromptBleUnavailable(state) &&
@@ -479,12 +537,20 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> _ensureBleAvailable({String context = 'ble'}) async {
+  Future<bool> _ensureBleAvailable({
+    String context = 'ble',
+    bool prompt = true,
+  }) async {
+    if (debugBleReady) return true;
     if (_transport is! BleTransport) return false;
     try {
       final state = await _transport.getAvailabilityState();
       if (state != AvailabilityState.poweredOn) {
-        await _handleBleUnavailableState(state: state, context: context);
+        await _handleBleUnavailableState(
+          state: state,
+          context: context,
+          prompt: prompt,
+        );
         return false;
       }
       return true;
@@ -707,6 +773,18 @@ class AppState extends ChangeNotifier {
 
   bool _autoReconnectInProgress = false;
   bool _resumeAutoScanAfterReconnect = false;
+
+  /// User started the scan loop and has not paused, disconnected, or
+  /// abandoned reconnect. A failed reconnect must not clear this.
+  bool _scanLoopWanted = false;
+  int _scanReconnectAttempt = 0;
+  int _scanReconnectGeneration = 0;
+  Timer? _scanReconnectTimer;
+  bool _scanReconnectAttemptActive = false;
+  int _silentBleConnectDepth = 0;
+  bool? _batteryOptimizationPromptAsked;
+  bool _batteryOptPromptInFlight = false;
+  Future<bool> Function()? onBatteryOptimizationPrompt;
   bool _smartScanReevaluatePending = false;
   bool _smartScanPausedForRecentCoverage = false;
   String? _smartScanPausedZoneId;
@@ -738,6 +816,10 @@ class AppState extends ChangeNotifier {
 
   List<RawScan> rawScans = const [];
   List<CoverageZone> coverageZones = const [];
+  List<CoverageOverviewCell> coverageOverviewCells = const [];
+  final CoverageOverviewCache _overviewCache;
+  final WorkerApi Function()? _coverageOverviewApi;
+  bool _overviewFetchRunning = false;
   List<MeshNode> nodes = const [];
   List<ScanResult> scanResults = const [];
   List<MeshNode>? _advertisedNodes;
@@ -895,12 +977,16 @@ class AppState extends ChangeNotifier {
       : null;
 
   (double, double)? get currentObserverPosition {
-    if (deviceLatitude != null && deviceLongitude != null) {
-      return (deviceLatitude!, deviceLongitude!);
-    }
-    if (scanResults.isEmpty) return null;
-    final latest = scanResults.first;
-    return (latest.latitude, latest.longitude);
+    // Never a scan, a zone, or a server payload. Those belong to whoever
+    // recorded them. The web map ignores a stored fix so a visitor who has
+    // not granted location stays on the general view.
+    return ownDeviceMapFix(
+      deviceLatitude: deviceLatitude,
+      deviceLongitude: deviceLongitude,
+      storedLatitude: _cachedFixLat,
+      storedLongitude: _cachedFixLng,
+      allowStoredFix: !kIsWeb,
+    );
   }
 
   Future<void> initialize() async {
@@ -949,6 +1035,11 @@ class AppState extends ChangeNotifier {
     // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
+    final storedFix = await _lastKnownFixStore.load();
+    if (storedFix != null) {
+      _cachedFixLat = storedFix.latitude;
+      _cachedFixLng = storedFix.longitude;
+    }
     _restoreKnownBleDeviceNames();
     _radioContactsByPrefix.clear();
     for (final contacts in settings.contactsByRadioId.values) {
@@ -960,6 +1051,10 @@ class AppState extends ChangeNotifier {
     // full cache, but off the UI isolate and only after the guard is armed.
     loading = false;
     notifyListeners();
+    final overviewCacheFresh = await _showCachedCoverageOverview();
+    if (!overviewCacheFresh && !settings.forceOffline) {
+      unawaited(_fetchCoverageOverviewFromNetwork());
+    }
     await Future<void>.delayed(Duration.zero);
 
     var runtimeStarted = false;
@@ -985,7 +1080,10 @@ class AppState extends ChangeNotifier {
         load: () async {
           await _loadCachedHistory();
           startRuntime();
-          if (settings.forceOffline) return;
+          if (settings.forceOffline) {
+            await _pruneCacheAndPersist();
+            return;
+          }
           await syncFromWorker();
           if (requestsAllDays(
                 historyDays: settings.historyDays,
@@ -1004,8 +1102,64 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _debugLog.error('app_state', 'History startup failed: $e');
       startRuntime();
+    } finally {
+      _startupSyncFinished = true;
     }
     _configurePeriodicSyncTimer();
+  }
+
+  Future<bool> _showCachedCoverageOverview() async {
+    try {
+      final cached = await _overviewCache.load();
+      if (cached == null) return false;
+      coverageOverviewCells = cached.overview.cells;
+      notifyListeners();
+      return cached.fresh;
+    } catch (error) {
+      _debugLog.warn('coverage_overview', 'Cached overview unreadable: $error');
+      return false;
+    }
+  }
+
+  Future<void> _fetchCoverageOverviewFromNetwork() async {
+    if (settings.forceOffline || _overviewFetchRunning) return;
+    _overviewFetchRunning = true;
+    try {
+      final api =
+          _coverageOverviewApi?.call() ??
+          WorkerApi(
+            AppConfig.deployedWorkerUrl,
+            fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+            staticDataBaseUrl: AppConfig.staticDataUrl,
+          );
+      final fresh = await api.fetchCoverageOverview();
+      if (fresh == null) return;
+      coverageOverviewCells = fresh.cells;
+      notifyListeners();
+      try {
+        await _overviewCache.save(fresh);
+      } catch (error) {
+        _debugLog.warn(
+          'coverage_overview',
+          'Overview cache write failed: $error',
+        );
+      }
+      _debugLog.info(
+        'coverage_overview',
+        'General coverage cells=${fresh.cells.length}',
+      );
+    } catch (error) {
+      _debugLog.warn('coverage_overview', 'Overview fetch skipped: $error');
+    } finally {
+      _overviewFetchRunning = false;
+    }
+  }
+
+  /// Shows a stored overview, then fetches when that copy is older than an hour.
+  Future<void> refreshCoverageOverview() async {
+    final fresh = await _showCachedCoverageOverview();
+    if (fresh || settings.forceOffline) return;
+    await _fetchCoverageOverviewFromNetwork();
   }
 
   Future<void> _loadCachedHistory() async {
@@ -1031,6 +1185,7 @@ class AppState extends ChangeNotifier {
           },
         );
         rawScans = loaded.scans;
+        _applyLocalStamp();
         coverageZones = loaded.zones;
         nodes = loaded.nodes;
         scanResults = loaded.scanResults;
@@ -1059,6 +1214,7 @@ class AppState extends ChangeNotifier {
         'scans': stored,
       }, weight: stored.length);
       rawScans = prepared.scans;
+      _applyLocalStamp();
       _logSuppressedDeadzoneRows(prepared.suppressedRows, 'local_cache');
       if (prepared.changed) {
         await _localStore.saveRawScans(rawScans);
@@ -1106,6 +1262,16 @@ class AppState extends ChangeNotifier {
     settings = !next.privacyAccepted && !next.forceOffline
         ? next.copyWith(forceOffline: true)
         : next;
+    // Startup forces offline until privacy is accepted, so the first overview
+    // fetch never runs. Accepting privacy and turning Online Mode on are both
+    // this transition. Start the fetch before the awaits below; a later save
+    // or guard write must not drop it.
+    final wentOnline = previous.forceOffline && !settings.forceOffline;
+    final acceptedPrivacy =
+        !previous.privacyAccepted && settings.privacyAccepted;
+    if ((wentOnline || acceptedPrivacy) && !settings.forceOffline) {
+      unawaited(refreshCoverageOverview());
+    }
     // TODO: Re-enable user-selectable language setting.
     // Language setting is temporarily disabled; keep app language fixed to English.
     AppI18n.instance.setLanguage('en');
@@ -1126,6 +1292,59 @@ class AppState extends ChangeNotifier {
     }
     await _maybePersistRadioSettings(settings);
     notifyListeners();
+    if (!sameScanCacheArea(
+      previousMode: previous.scanCacheMode,
+      nextMode: settings.scanCacheMode,
+      previousRadiusMiles: previous.scanCacheRadiusMiles,
+      nextRadiusMiles: settings.scanCacheRadiusMiles,
+      previousAdmin1Ids: previous.scanCacheAdmin1Ids,
+      nextAdmin1Ids: settings.scanCacheAdmin1Ids,
+      previousAdmin2Ids: previous.scanCacheAdmin2Ids,
+      nextAdmin2Ids: settings.scanCacheAdmin2Ids,
+    )) {
+      final expands = scanCacheAreaExpands(
+        previousMode: previous.scanCacheMode,
+        nextMode: settings.scanCacheMode,
+        previousRadiusMiles: previous.scanCacheRadiusMiles,
+        nextRadiusMiles: settings.scanCacheRadiusMiles,
+        previousAdmin1Ids: previous.scanCacheAdmin1Ids,
+        nextAdmin1Ids: settings.scanCacheAdmin1Ids,
+        previousAdmin2Ids: previous.scanCacheAdmin2Ids,
+        nextAdmin2Ids: settings.scanCacheAdmin2Ids,
+      );
+      if (syncing || _workerSyncStarting) {
+        if (expands && !settings.forceOffline) {
+          _expandDuringSync = true;
+        } else {
+          _pruneAfterSync = true;
+        }
+      } else if (expands && !settings.forceOffline) {
+        unawaited(syncFromWorker());
+      } else {
+        unawaited(_pruneCacheAndPersist());
+      }
+    }
+
+    final travelChanged =
+        previous.travelDownloadEnabled != settings.travelDownloadEnabled ||
+        previous.travelRadiusMiles != settings.travelRadiusMiles;
+    if (travelChanged) {
+      if (settings.travelDownloadEnabled && !settings.forceOffline) {
+        final lat = _scanCacheCenterLat();
+        final lng = _scanCacheCenterLng();
+        if (lat != null && lng != null) {
+          unawaited(
+            _considerTravelFetch(
+              lat,
+              lng,
+              ignoreInterval: !previous.travelDownloadEnabled,
+            ),
+          );
+        }
+      } else {
+        unawaited(_pruneCacheAndPersist());
+      }
+    }
 
     final smartChanged =
         previous.smartScanEnabled != settings.smartScanEnabled ||
@@ -1191,9 +1410,348 @@ class AppState extends ChangeNotifier {
     await updateSettings(settings.copyWith(autoCenter: value));
   }
 
-  Future<void> syncFromWorker() async {
-    if (syncing || _workerSyncStarting) return;
+  void _applyLocalStamp() {
+    final stamped = stampLocallyRecorded(rawScans);
+    if (identical(stamped, rawScans)) return;
+    rawScans = stamped;
+    _localStampDirty = true;
+  }
+
+  double? _scanCacheCenterLat() => deviceLatitude ?? _cachedFixLat;
+
+  double? _scanCacheCenterLng() => deviceLongitude ?? _cachedFixLng;
+
+  Future<List<RawScan>> _prunedForCacheArea(List<RawScan> scans) {
+    return _scanCache.prune(
+      scans: scans,
+      settings: settings,
+      centerLat: _scanCacheCenterLat(),
+      centerLng: _scanCacheCenterLng(),
+    );
+  }
+
+  TravelAreaAnchor? _newestTravelAnchor() {
+    final active = activeTravelAnchors(
+      settings.travelAnchors,
+      DateTime.now().toUtc(),
+    );
+    if (active.isEmpty) return null;
+    return active.first;
+  }
+
+  /// Radius uses the previous disk, because the live center is the device
+  /// itself. Admin modes test the selected outlines. Global is never outside.
+  Future<bool> _deviceIsOutsideCache({
+    required double lat,
+    required double lng,
+    double? radiusCenterLat,
+    double? radiusCenterLng,
+  }) async {
+    final mode = clampScanCacheMode(settings.scanCacheMode);
+    if (mode == scanCacheModeGlobal) return false;
+    if (mode == scanCacheModeRadius) {
+      return deviceOutsideRadiusCache(
+        deviceLat: lat,
+        deviceLng: lng,
+        centerLat: radiusCenterLat,
+        centerLng: radiusCenterLng,
+        radiusMiles: settings.scanCacheRadiusMiles,
+      );
+    }
+    final counties = mode == scanCacheModeAdmin2;
+    final ids = counties
+        ? settings.scanCacheAdmin2Ids
+        : settings.scanCacheAdmin1Ids;
+    final key = '$mode|${hexKey(lat, lng)}|${ids.join(',')}';
+    if (key == _outsideDivisionKey) return _outsideDivisionValue;
+    final inside = await _scanCache.containsDivisionPoint(
+      counties: counties,
+      selectedIds: ids,
+      latitude: lat,
+      longitude: lng,
+    );
+    _outsideDivisionKey = key;
+    _outsideDivisionValue = !inside;
+    return _outsideDivisionValue;
+  }
+
+  Future<CloudFetchQuery> _homeCloudQuery() async {
+    final mode = clampScanCacheMode(settings.scanCacheMode);
+    final centerLat = _scanCacheCenterLat();
+    final centerLng = _scanCacheCenterLng();
+    DivisionBbox? bbox;
+    if (mode == scanCacheModeAdmin1 || mode == scanCacheModeAdmin2) {
+      final counties = mode == scanCacheModeAdmin2;
+      final ids = counties
+          ? settings.scanCacheAdmin2Ids
+          : settings.scanCacheAdmin1Ids;
+      bbox = await _scanCache.bboxFor(counties: counties, selectedIds: ids);
+    }
+    // [centerLat]/[centerLng] are the live fix, or the last known fix.
+    // A states/counties query uses that point when it lies inside the box.
+    return cloudQueryForCache(
+      mode: mode,
+      radiusMiles: settings.scanCacheRadiusMiles,
+      centerLat: centerLat,
+      centerLng: centerLng,
+      divisionBbox: bbox,
+    );
+  }
+
+  /// Extra bubble for a full sync. Radius mode already fetches around the
+  /// device, so this is only for a division cache the device has left.
+  Future<CloudFetchQuery?> _travelQueryDuringSync() async {
+    if (!settings.travelDownloadEnabled) return null;
+    final mode = clampScanCacheMode(settings.scanCacheMode);
+    if (mode == scanCacheModeGlobal || mode == scanCacheModeRadius) {
+      return null;
+    }
+    final lat = _scanCacheCenterLat();
+    final lng = _scanCacheCenterLng();
+    if (lat == null || lng == null) return null;
+    final outside = await _deviceIsOutsideCache(
+      lat: lat,
+      lng: lng,
+      radiusCenterLat: lat,
+      radiusCenterLng: lng,
+    );
+    if (!outside) return null;
+    return CloudFetchQuery(
+      skip: false,
+      latitude: lat,
+      longitude: lng,
+      radiusMiles: settings.travelRadiusMiles,
+    );
+  }
+
+  void _logWorkerRadiusCap(CloudFetchQuery query) {
+    final miles = query.radiusMiles;
+    if (miles == null || miles <= workerScanRadiusCapMiles) return;
+    final box = query.hasBounds
+        ? ' A bounding box is sent for servers that accept one.'
+        : '';
+    _debugLog.info(
+      'sync',
+      'Requested $miles mi.$box Older servers still cap radius at '
+          '$workerScanRadiusCapMiles mi. Local prune still uses the full cache area.',
+    );
+  }
+
+  Future<void> _rememberTravelCenter(double lat, double lng) async {
+    final next = rememberTravelFetch(
+      anchors: settings.travelAnchors,
+      latitude: lat,
+      longitude: lng,
+      radiusMiles: settings.travelRadiusMiles,
+      now: DateTime.now().toUtc(),
+    );
+    settings = settings.copyWith(travelAnchors: next);
+    await _settingsStore.save(settings);
+  }
+
+  Future<void> _pruneCacheAndPersist() async {
+    if (_cachePruneRunning || syncing || _workerSyncStarting) return;
+    _cachePruneRunning = true;
+    try {
+      final pruned = await _prunedForCacheArea(rawScans);
+      if (identical(pruned, rawScans) && !_localStampDirty) return;
+      rawScans = pruned;
+      _localStampDirty = false;
+      await _localStore.saveRawScans(rawScans);
+      await _rebuildDerivedData();
+      notifyListeners();
+    } catch (error) {
+      _debugLog.warn('cache', 'Scan cache prune failed: $error');
+    } finally {
+      _cachePruneRunning = false;
+    }
+  }
+
+  Future<void> _rememberDeviceFix(double lat, double lng) async {
+    final previousLat = _cachedFixLat;
+    final previousLng = _cachedFixLng;
+    final movedMiles = previousLat == null || previousLng == null
+        ? null
+        : distanceMiles(previousLat, previousLng, lat, lng);
+    _cachedFixLat = lat;
+    _cachedFixLng = lng;
+    if (movedMiles == null || movedMiles >= 1) {
+      try {
+        await _lastKnownFixStore.save(lat, lng);
+      } catch (error) {
+        _debugLog.warn('cache', 'Could not store last location: $error');
+      }
+    }
+    if (!_startupSyncFinished) return;
+    if (previousLat == null &&
+        !settings.forceOffline &&
+        clampScanCacheMode(settings.scanCacheMode) == scanCacheModeRadius) {
+      // Startup had no fix, so the radius fetch was skipped. Pull it now.
+      unawaited(syncFromWorker());
+      return;
+    }
+    if (settings.travelDownloadEnabled) {
+      final started = await _considerTravelFetch(
+        lat,
+        lng,
+        radiusCenterLat: previousLat,
+        radiusCenterLng: previousLng,
+      );
+      if (started) return;
+    }
+    if (!scanCacheFixShouldReprune(
+      mode: settings.scanCacheMode,
+      radiusMiles: settings.scanCacheRadiusMiles,
+      previousLat: previousLat,
+      previousLng: previousLng,
+      lat: lat,
+      lng: lng,
+    )) {
+      return;
+    }
+    await _pruneCacheAndPersist();
+  }
+
+  /// Starts a travel download when the device is outside the cache area and
+  /// the throttle allows it. Returns true when a download was started.
+  Future<bool> _considerTravelFetch(
+    double lat,
+    double lng, {
+    double? radiusCenterLat,
+    double? radiusCenterLng,
+    bool ignoreInterval = false,
+  }) async {
+    if (settings.forceOffline) return false;
+    final outside = await _deviceIsOutsideCache(
+      lat: lat,
+      lng: lng,
+      radiusCenterLat: radiusCenterLat,
+      radiusCenterLng: radiusCenterLng,
+    );
+    final newest = ignoreInterval ? null : _newestTravelAnchor();
+    final decision = decideTravelFetch(
+      enabled: settings.travelDownloadEnabled,
+      forceOffline: settings.forceOffline,
+      networkAvailable: true,
+      syncInFlight: syncing || _workerSyncStarting || _travelFetchRunning,
+      mode: settings.scanCacheMode,
+      outsideCacheArea: outside,
+      deviceLat: lat,
+      deviceLng: lng,
+      lastFetchLat: newest?.latitude,
+      lastFetchLng: newest?.longitude,
+      lastFetchAt: newest == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              newest.fetchedAtMillis,
+              isUtc: true,
+            ),
+      now: DateTime.now().toUtc(),
+    );
+    if (!decision.fetch) return false;
+    final api = WorkerApi(
+      AppConfig.deployedWorkerUrl,
+      fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
+      staticDataBaseUrl: AppConfig.staticDataUrl,
+    );
+    if (!await api.canReach()) {
+      _debugLog.info(
+        'sync',
+        'Skipped travel download because the network is down',
+      );
+      return false;
+    }
+    unawaited(_fetchTravelArea(lat, lng, api));
+    return true;
+  }
+
+  Future<void> _fetchTravelArea(double lat, double lng, WorkerApi api) async {
+    if (settings.forceOffline ||
+        syncing ||
+        _workerSyncStarting ||
+        _travelFetchRunning) {
+      return;
+    }
+    _travelFetchRunning = true;
     _workerSyncStarting = true;
+    try {
+      _debugLog.info(
+        'sync',
+        'Travel download within ${settings.travelRadiusMiles} mi',
+      );
+      _syncService.beginSync();
+      final connectedRadioId = _connectedRadioMeshId8();
+      final workerScans = await api.fetchRawScans(
+        historyDays: settings.historyDays,
+        deadzoneDays: settings.deadzoneDays,
+        connectedRadioId: connectedRadioId,
+        centerLat: lat,
+        centerLng: lng,
+        radiusMiles: settings.travelRadiusMiles,
+        markDownloaded: true,
+      );
+      final prepared = await runOffUi(prepareRawScansWorker, <String, Object?>{
+        'scans': workerScans,
+        'connectedRadioId': connectedRadioId,
+        'sanitizeDeadzoneRadios': true,
+      }, weight: workerScans.length);
+      final merged = await runOffUi(
+        mergeWorkerAndLocalScansWorker,
+        <String, Object?>{
+          'workerScans': prepared.scans,
+          'localScans': rawScans,
+        },
+        weight: prepared.scans.length + rawScans.length,
+      );
+      rawScans = merged.scans;
+      await _rememberTravelCenter(lat, lng);
+      rawScans = await _prunedForCacheArea(rawScans);
+      _localStampDirty = false;
+      await _localStore.saveRawScans(rawScans);
+      await _rebuildDerivedData();
+      _syncService.completeSync(workerScans.length);
+    } catch (error) {
+      _debugLog.error('sync', 'Travel download failed: $error');
+      _syncService.failSync(error.toString());
+      await _pruneCacheAndPersist();
+    } finally {
+      _travelFetchRunning = false;
+      _workerSyncStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<List<RawScan>> _downloadCloudScans(
+    WorkerApi api,
+    CloudFetchQuery query,
+    String? connectedRadioId,
+    bool Function() cancelled,
+  ) {
+    _logWorkerRadiusCap(query);
+    return api.fetchRawScans(
+      historyDays: settings.historyDays,
+      deadzoneDays: settings.deadzoneDays,
+      connectedRadioId: connectedRadioId,
+      centerLat: query.latitude,
+      centerLng: query.longitude,
+      radiusMiles: query.omitsRadius ? null : query.radiusMiles,
+      minLatitude: query.minLatitude,
+      maxLatitude: query.maxLatitude,
+      minLongitude: query.minLongitude,
+      maxLongitude: query.maxLongitude,
+      markDownloaded: true,
+      onDayProgress: (done, total) {
+        historyLoadLabel = 'Loading history $done/$total days';
+        notifyListeners();
+      },
+      isCancelled: cancelled,
+    );
+  }
+
+  Future<void> syncFromWorker() async {
+    if (syncing || _workerSyncStarting || _travelFetchRunning) return;
+    _workerSyncStarting = true;
+    var refetchWhenFixArrives = false;
     try {
       final token = ++_historyLoadToken;
       final allDays = requestsAllDays(
@@ -1236,6 +1794,7 @@ class AppState extends ChangeNotifier {
           staticDataBaseUrl: AppConfig.staticDataUrl,
         );
         final connectedRadioId = _connectedRadioMeshId8();
+        _applyLocalStamp();
         final localOnlyBeforeSync = rawScans
             .where((scan) => !scan.downloadedFromWorker)
             .toList(growable: false);
@@ -1246,20 +1805,50 @@ class AppState extends ChangeNotifier {
 
         final fetchWatch = Stopwatch()..start();
         meshStageStart('sync_fetch', count: settings.historyDays);
-        final workerScans = await api.fetchRawScans(
-          historyDays: settings.historyDays,
-          deadzoneDays: settings.deadzoneDays,
-          connectedRadioId: connectedRadioId,
-          centerLat: deviceLatitude,
-          centerLng: deviceLongitude,
-          radiusMiles: settings.syncRadiusMiles,
-          markDownloaded: true,
-          onDayProgress: (done, total) {
-            historyLoadLabel = 'Loading history $done/$total days';
-            notifyListeners();
-          },
-          isCancelled: cancelled,
-        );
+        // WorkerApi has no `since` cursor. The day window is unchanged.
+        // The cache area chooses the geographic query. Division mode and a
+        // radius above 250 miles also send a bounding box. Rows are still
+        // pruned to the real outlines or radius after the merge. An older
+        // worker ignores the box and clamps radius at 250 miles.
+        final homeQuery = await _homeCloudQuery();
+        final travelQuery = await _travelQueryDuringSync();
+        refetchWhenFixArrives =
+            homeQuery.skip &&
+            clampScanCacheMode(settings.scanCacheMode) == scanCacheModeRadius &&
+            _scanCacheCenterLat() == null;
+        final workerScans = <RawScan>[];
+        if (homeQuery.skip && travelQuery == null) {
+          _debugLog.info(
+            'sync',
+            'Skipped cloud download for this cache area. '
+                'Own scans stay on the device.',
+          );
+        }
+        if (!homeQuery.skip) {
+          workerScans.addAll(
+            await _downloadCloudScans(
+              api,
+              homeQuery,
+              connectedRadioId,
+              cancelled,
+            ),
+          );
+        }
+        if (cancelled()) throw const HistoryLoadCancelled();
+        if (travelQuery != null) {
+          workerScans.addAll(
+            await _downloadCloudScans(
+              api,
+              travelQuery,
+              connectedRadioId,
+              cancelled,
+            ),
+          );
+          await _rememberTravelCenter(
+            travelQuery.latitude!,
+            travelQuery.longitude!,
+          );
+        }
         meshStageEnd(
           'sync_fetch',
           count: workerScans.length,
@@ -1287,19 +1876,29 @@ class AppState extends ChangeNotifier {
         if (cancelled()) throw const HistoryLoadCancelled();
 
         if (workerPrepared.scans.isNotEmpty) {
+          final travelPreserve = await _scanCache.preservedTravelScans(
+            scans: rawScans,
+            settings: settings,
+            centerLat: _scanCacheCenterLat(),
+            centerLng: _scanCacheCenterLng(),
+          );
+          final localForMerge = <RawScan>[
+            ...localOnlyBeforeSync,
+            ...travelPreserve,
+          ];
           final mergeWatch = Stopwatch()..start();
           meshStageStart(
             'sync_merge',
             count: workerPrepared.scans.length,
-            n2: localOnlyBeforeSync.length,
+            n2: localForMerge.length,
           );
           final merged = await runOffUi(
             mergeWorkerAndLocalScansWorker,
             <String, Object?>{
               'workerScans': workerPrepared.scans,
-              'localScans': localOnlyBeforeSync,
+              'localScans': localForMerge,
             },
-            weight: workerPrepared.scans.length + localOnlyBeforeSync.length,
+            weight: workerPrepared.scans.length + localForMerge.length,
           );
           meshStageEnd(
             'sync_merge',
@@ -1320,7 +1919,6 @@ class AppState extends ChangeNotifier {
                 '=> ${rawScans.length} total',
           );
           _applyKnownContactsBackfill();
-          await _localStore.saveRawScans(rawScans);
           if (cancelled()) throw const HistoryLoadCancelled();
         }
 
@@ -1328,42 +1926,58 @@ class AppState extends ChangeNotifier {
         final coverageWatch = Stopwatch()..start();
         meshStageStart('sync_coverage');
         try {
-          final workerZones = await api.fetchCoverageZones(
-            historyDays: settings.historyDays,
-            deadzoneDays: settings.deadzoneDays,
-            connectedRadioId: connectedRadioId,
-            centerLat: deviceLatitude,
-            centerLng: deviceLongitude,
-            radiusMiles: settings.syncRadiusMiles,
-          );
-          if (cancelled()) throw const HistoryLoadCancelled();
-          final preparedZones = await runOffUi(
-            prepareCoverageZonesWorker,
-            <String, Object?>{
-              'zones': workerZones,
-              'connectedRadioId': connectedRadioId,
-            },
-            weight: workerZones.length,
-          );
-          if (cancelled()) throw const HistoryLoadCancelled();
-          _debugLog.info(
-            'sync',
-            'Fetched ${workerZones.length} coverage zones from worker',
-          );
-          if (preparedZones.suppressedRows > 0) {
+          if (homeQuery.skip) {
             _debugLog.info(
               'sync',
-              'Suppressed ${preparedZones.suppressedRows} deadzone coverage '
-                  'row(s) in successful hexes (worker)',
+              'Skipped coverage download for this cache area',
+            );
+            meshStageEnd(
+              'sync_coverage',
+              count: 0,
+              ms: coverageWatch.elapsedMilliseconds,
+            );
+          } else {
+            final workerZones = await api.fetchCoverageZones(
+              historyDays: settings.historyDays,
+              deadzoneDays: settings.deadzoneDays,
+              connectedRadioId: connectedRadioId,
+              centerLat: homeQuery.latitude,
+              centerLng: homeQuery.longitude,
+              radiusMiles: homeQuery.omitsRadius ? null : homeQuery.radiusMiles,
+              minLatitude: homeQuery.minLatitude,
+              maxLatitude: homeQuery.maxLatitude,
+              minLongitude: homeQuery.minLongitude,
+              maxLongitude: homeQuery.maxLongitude,
+            );
+            if (cancelled()) throw const HistoryLoadCancelled();
+            final preparedZones = await runOffUi(
+              prepareCoverageZonesWorker,
+              <String, Object?>{
+                'zones': workerZones,
+                'connectedRadioId': connectedRadioId,
+              },
+              weight: workerZones.length,
+            );
+            if (cancelled()) throw const HistoryLoadCancelled();
+            _debugLog.info(
+              'sync',
+              'Fetched ${workerZones.length} coverage zones from worker',
+            );
+            if (preparedZones.suppressedRows > 0) {
+              _debugLog.info(
+                'sync',
+                'Suppressed ${preparedZones.suppressedRows} deadzone coverage '
+                    'row(s) in successful hexes (worker)',
+              );
+            }
+            coverageZones = preparedZones.zones;
+            zonesFromWorker = true;
+            meshStageEnd(
+              'sync_coverage',
+              count: preparedZones.zones.length,
+              ms: coverageWatch.elapsedMilliseconds,
             );
           }
-          coverageZones = preparedZones.zones;
-          zonesFromWorker = true;
-          meshStageEnd(
-            'sync_coverage',
-            count: preparedZones.zones.length,
-            ms: coverageWatch.elapsedMilliseconds,
-          );
         } on HistoryLoadCancelled {
           meshStageEnd(
             'sync_coverage',
@@ -1384,7 +1998,23 @@ class AppState extends ChangeNotifier {
         }
 
         if (cancelled()) throw const HistoryLoadCancelled();
-        await _rebuildDerivedData(skipZones: zonesFromWorker);
+        final beforePrune = rawScans;
+        rawScans = await _prunedForCacheArea(rawScans);
+        if (cancelled()) throw const HistoryLoadCancelled();
+        if (!identical(rawScans, beforePrune) ||
+            _localStampDirty ||
+            workerPrepared.scans.isNotEmpty) {
+          _localStampDirty = false;
+          await _localStore.saveRawScans(rawScans);
+        }
+        final keepWorkerZones =
+            zonesFromWorker &&
+            !scanCacheWillFilter(
+              mode: settings.scanCacheMode,
+              centerLat: _scanCacheCenterLat(),
+              centerLng: _scanCacheCenterLng(),
+            );
+        await _rebuildDerivedData(skipZones: keepWorkerZones);
         if (allDays && !cancelled()) {
           await _allDaysGuard.clear();
         }
@@ -1416,27 +2046,52 @@ class AppState extends ChangeNotifier {
       }
     } finally {
       _workerSyncStarting = false;
+      if (refetchWhenFixArrives &&
+          _scanCacheCenterLat() != null &&
+          !settings.forceOffline) {
+        unawaited(syncFromWorker());
+      } else if (_expandDuringSync && !settings.forceOffline) {
+        _expandDuringSync = false;
+        _pruneAfterSync = false;
+        unawaited(syncFromWorker());
+      } else if (_pruneAfterSync) {
+        _pruneAfterSync = false;
+        unawaited(_pruneCacheAndPersist());
+      }
     }
   }
 
-  Future<void> connectBle() async {
-    if (!await _ensureBleAvailable(context: 'ble')) {
-      return;
+  /// [interactive] false is the screen-off reconnect path. It does not show
+  /// permission dialogs, open settings, or wait on a PIN prompt.
+  Future<bool> connectBle({bool interactive = true}) async {
+    if (!await _ensureBleAvailable(context: 'ble', prompt: interactive)) {
+      return false;
     }
-    if (!await _locationService.ensureAndroidReadyForBle()) {
-      return;
+    if (!await _locationService.ensureAndroidReadyForBle(prompt: interactive)) {
+      return false;
     }
-    if (bleConnecting || bleConnected) return;
+    if (bleConnecting || bleConnected) return bleConnected;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) {
       bleStatus = 'Select a BLE device first';
       notifyListeners();
-      return;
+      return false;
     }
-    _manualBleDisconnectRequested = false;
+    if (interactive) {
+      _manualBleDisconnectRequested = false;
+    } else if (_manualBleDisconnectRequested) {
+      _debugLog.info(
+        'ble',
+        'Background reconnect skipped because the user disconnected',
+      );
+      return false;
+    }
     if (_transport is BleTransport) {
       (_transport).preferredDeviceId = bleSelectedDeviceId;
     }
-    _debugLog.info('ble', 'Connect requested');
+    _debugLog.info(
+      'ble',
+      interactive ? 'Connect requested' : 'Background reconnect connect',
+    );
     bleConnecting = true;
     if (_transport is BleTransport) {
       await _transport.stopDeviceScan();
@@ -1445,9 +2100,15 @@ class AppState extends ChangeNotifier {
     bleStatus = 'BLE connecting...';
     notifyListeners();
 
+    var ok = false;
     try {
-      await _bleProtocol.run(_protocol.connect());
+      if (_transport is BleTransport) {
+        await _transport.connect(allowPermissionPrompt: interactive);
+      } else {
+        await _transport.connect();
+      }
       await _completeBleConnectSuccess();
+      ok = bleConnected && _transport.isConnected;
     } catch (e) {
       bleConnected = false;
       final lowered = e.toString().toLowerCase();
@@ -1460,29 +2121,34 @@ class AppState extends ChangeNotifier {
         await _handleBleUnavailableState(
           state: AvailabilityState.poweredOff,
           context: 'ble_connect',
+          prompt: interactive,
         );
       }
       var recovered = false;
       if (!handledAsBluetoothOff &&
           _isDeviceNotFoundConnectError(e) &&
-          !kIsWeb) {
+          !kIsWeb &&
+          (interactive || !_manualBleDisconnectRequested)) {
         recovered = await _recoverConnectAfterDeviceNotFound();
       }
       if (recovered) {
-        return;
-      }
-      _debugLog.error('ble', 'Connect failed: $e');
-      if (!handledAsBluetoothOff) {
-        if (_isDeviceNotFoundConnectError(e)) {
-          bleStatus = 'Device not found – is your radio powered on?';
-        } else {
-          bleStatus = 'BLE connect failed';
+        ok = bleConnected && _transport.isConnected;
+      } else {
+        _debugLog.error('ble', 'Connect failed: $e');
+        if (!handledAsBluetoothOff) {
+          if (_isDeviceNotFoundConnectError(e)) {
+            bleStatus = 'Device not found – is your radio powered on?';
+          } else {
+            bleStatus = 'BLE connect failed';
+          }
         }
+        ok = false;
       }
     } finally {
       bleConnecting = false;
       notifyListeners();
     }
+    return ok;
   }
 
   Future<void> _completeBleConnectSuccess() async {
@@ -1620,7 +2286,9 @@ class AppState extends ChangeNotifier {
   Future<void> disconnectBle() async {
     _debugLog.info('ble', 'Disconnect requested');
     _manualBleDisconnectRequested = true;
+    _scanLoopWanted = false;
     _resumeAutoScanAfterReconnect = false;
+    _cancelScanLoopReconnect('manual disconnect');
     bleBusy = false;
     bleConnecting = false;
     bleScanning = false;
@@ -1650,6 +2318,7 @@ class AppState extends ChangeNotifier {
       contactsSyncProgress = ContactSyncProgress.idle;
     }
     _sessionRadioContactTypes.clear();
+    _syncAndroidScanForeground();
     notifyListeners();
   }
 
@@ -1920,22 +2589,14 @@ class AppState extends ChangeNotifier {
 
     var retryDiscoverAfterReconnect = false;
     try {
-      await _bleProtocol.run(_protocol.nodeDiscover());
+      // Arm the countdown as the request is sent. The radio ack used to
+      // return before the timer existed, so the number sat frozen.
+      _beginCountdownAtDiscoverSend(
+        autoLoopOwnsCountdown: autoLoopOwnsCountdown,
+        discoverWait: discoverWait,
+      );
+      await _sendNodeDiscoverCommand();
       bleScanStatus = 'waiting';
-      if (!autoLoopOwnsCountdown) {
-        _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (
-          timer,
-        ) {
-          final current = bleNextScanCountdown ?? 0;
-          if (current <= 1) {
-            bleNextScanCountdown = 0;
-            timer.cancel();
-          } else {
-            bleNextScanCountdown = current - 1;
-          }
-          notifyListeners();
-        });
-      }
       final start = DateTime.now();
       final deadline = start.add(discoverWait);
       final initialWaitDeadline = start.add(const Duration(seconds: 10));
@@ -1983,7 +2644,7 @@ class AppState extends ChangeNotifier {
             'ble_discover',
             'No responses yet; resending node_discover once',
           );
-          await _bleProtocol.run(_protocol.nodeDiscover());
+          await _sendNodeDiscoverCommand();
         }
         final remainingMs = deadline.difference(now).inMilliseconds;
         final sliceMs = remainingMs > 250 ? 250 : remainingMs;
@@ -2161,6 +2822,7 @@ class AppState extends ChangeNotifier {
             : _connectedRadioDisplayName!.trim(),
         radioId: connectedMeshId8,
         downloadedFromWorker: false,
+        locallyRecorded: true,
       );
       appended.add(normalizeRawScanIds(scan));
       _debugLog.info(
@@ -2232,6 +2894,7 @@ class AppState extends ChangeNotifier {
             : _connectedRadioDisplayName!.trim(),
         radioId: connectedMeshId8,
         downloadedFromWorker: false,
+        locallyRecorded: true,
       ),
     );
     rawScans = [scan, ...rawScans];
@@ -2659,11 +3322,7 @@ class AppState extends ChangeNotifier {
 
   int _backfillScanNamesFromContacts(Map<String, String> contacts) {
     final watch = Stopwatch()..start();
-    meshStageStart(
-      'backfill',
-      count: rawScans.length,
-      n2: contacts.length,
-    );
+    meshStageStart('backfill', count: rawScans.length, n2: contacts.length);
     final storeable = _namesAllowedOnScans(contacts);
     final names = LongestHexNameIndex.fromMap(storeable);
     final sessionNames = _sessionContactNames();
@@ -2749,6 +3408,7 @@ class AppState extends ChangeNotifier {
             receiverName: newReceiverName,
             radioId: scan.radioId,
             downloadedFromWorker: scan.downloadedFromWorker,
+            locallyRecorded: scan.locallyRecorded,
           ),
         ),
       );
@@ -3074,21 +3734,7 @@ class AppState extends ChangeNotifier {
 
   int? _bestContactTypeForId(String id) {
     if (id.isEmpty || _sessionRadioContactTypes.isEmpty) return null;
-    final upper = normalizeHexId(id);
-    if (upper.isEmpty) return null;
-
-    int? bestType;
-    var bestLength = -1;
-    for (final entry in _sessionRadioContactTypes.entries) {
-      final prefix = normalizeHexId(entry.key);
-      if (prefix.isEmpty) continue;
-      if (prefix != upper && !idsLikelySameDevice(prefix, upper)) continue;
-      if (prefix.length > bestLength) {
-        bestLength = prefix.length;
-        bestType = entry.value;
-      }
-    }
-    return bestType;
+    return LongestHexTypeIndex(_sessionRadioContactTypes).lookup(id);
   }
 
   String _selectedBleDeviceName() {
@@ -3168,11 +3814,15 @@ class AppState extends ChangeNotifier {
     if (bleScanning) {
       _debugLog.info('ble_scan', 'Auto scan paused');
       bleScanning = false;
+      _scanLoopWanted = false;
+      _resumeAutoScanAfterReconnect = false;
+      _cancelScanLoopReconnect('scan loop paused');
       bleScanStatus = 'idle';
       _bleAutoScanTimer?.cancel();
       _resetAutoScanSchedule();
       _smartScanPausedForRecentCoverage = false;
       _smartScanPausedZoneId = null;
+      _syncAndroidScanForeground();
       notifyListeners();
       return;
     }
@@ -3183,10 +3833,15 @@ class AppState extends ChangeNotifier {
     }
 
     bleScanning = true;
+    _scanLoopWanted = true;
+    _scanReconnectAttempt = 0;
+    _manualBleDisconnectRequested = false;
+    _cancelScanLoopReconnect('scan loop started');
     _debugLog.info('ble_scan', 'Auto scan started');
     bleScanStatus = 'idle';
     notifyListeners();
     _startAutoScanLoop();
+    unawaited(_maybePromptBatteryOptimization());
     await _runAutoScanCycle();
     if (!bleScanning || !bleConnected || !_transport.isConnected) {
       _debugLog.warn(
@@ -3194,6 +3849,14 @@ class AppState extends ChangeNotifier {
         'Auto scan loop not started because BLE is no longer connected',
       );
       _bleAutoScanTimer?.cancel();
+      if (_scanLoopWanted &&
+          !_manualBleDisconnectRequested &&
+          !bleConnected &&
+          !kIsWeb) {
+        _armScanLoopReconnect(reason: 'scan loop lost the radio');
+      } else {
+        _syncAndroidScanForeground();
+      }
       return;
     }
   }
@@ -3216,8 +3879,180 @@ class AppState extends ChangeNotifier {
     await runNodeDiscover();
   }
 
+  void _cancelScanLoopReconnect(String reason) {
+    final pending = _scanReconnectTimer != null || _scanReconnectAttemptActive;
+    _scanReconnectGeneration++;
+    _scanReconnectTimer?.cancel();
+    _scanReconnectTimer = null;
+    if (pending) {
+      _debugLog.info('ble', 'Scan loop reconnect cancelled: $reason');
+    }
+  }
+
+  void _abandonScanLoopReconnect(String reason) {
+    _debugLog.warn('ble', 'Scan loop reconnect abandoned: $reason');
+    _scanLoopWanted = false;
+    _resumeAutoScanAfterReconnect = false;
+    _cancelScanLoopReconnect(reason);
+    _syncAndroidScanForeground();
+  }
+
+  /// Schedule the next background reconnect while the scan loop is wanted.
+  ///
+  /// Overlapping calls are ignored. A failed attempt does not clear
+  /// [_scanLoopWanted]. The timer is cancelled on pause, manual disconnect,
+  /// and dispose.
+  void _armScanLoopReconnect({String? reason}) {
+    if (kIsWeb) return;
+    if (!_scanLoopWanted || _manualBleDisconnectRequested) return;
+    if (_scanReconnectTimer != null || _scanReconnectAttemptActive) {
+      _debugLog.debug(
+        'ble',
+        'Scan loop reconnect already pending; not starting another '
+            'reason=${reason ?? 'unspecified'}',
+      );
+      return;
+    }
+    final deviceId = (bleSelectedDeviceId ?? '').trim();
+    if (deviceId.isEmpty) {
+      _abandonScanLoopReconnect('no selected radio');
+      return;
+    }
+    final delay = scanReconnectBackoffDelay(_scanReconnectAttempt);
+    final generation = _scanReconnectGeneration;
+    _debugLog.info(
+      'ble',
+      'Scan loop reconnect in ${delay.inSeconds}s '
+          'attempt=${_scanReconnectAttempt + 1} '
+          'reason=${reason ?? 'link dropped'}',
+    );
+    _scanReconnectTimer = Timer(delay, () {
+      _scanReconnectTimer = null;
+      unawaited(_runScanLoopReconnectAttempt(generation));
+    });
+    _syncAndroidScanForeground();
+  }
+
+  Future<void> _runScanLoopReconnectAttempt(int generation) async {
+    if (generation != _scanReconnectGeneration) return;
+    if (!_scanLoopWanted || _manualBleDisconnectRequested) return;
+    if (_scanReconnectAttemptActive) return;
+    if (bleConnected && _transport.isConnected) {
+      _scanReconnectAttempt = 0;
+      if (!(bleScanning && (_bleAutoScanTimer?.isActive ?? false))) {
+        await _resumeScanLoopAfterReconnect();
+      } else {
+        _syncAndroidScanForeground();
+      }
+      return;
+    }
+    _scanReconnectAttemptActive = true;
+    final attemptNumber = _scanReconnectAttempt + 1;
+    _debugLog.info(
+      'ble',
+      'Scan loop reconnect attempt $attemptNumber starting',
+    );
+    var failed = true;
+    try {
+      _silentBleConnectDepth++;
+      final ok = await connectBle(interactive: false);
+      failed = !ok || !bleConnected || !_transport.isConnected;
+    } catch (e) {
+      _debugLog.warn(
+        'ble',
+        'Scan loop reconnect attempt $attemptNumber error: $e',
+      );
+      failed = true;
+    } finally {
+      if (_silentBleConnectDepth > 0) {
+        _silentBleConnectDepth--;
+      }
+      _scanReconnectAttemptActive = false;
+    }
+    if (generation != _scanReconnectGeneration ||
+        _manualBleDisconnectRequested ||
+        !_scanLoopWanted) {
+      _debugLog.info(
+        'ble',
+        'Scan loop reconnect finished after the loop was stopped',
+      );
+      if (_manualBleDisconnectRequested &&
+          bleConnected &&
+          _transport.isConnected) {
+        await disconnectBle();
+      }
+      return;
+    }
+    if (!failed) {
+      _debugLog.info('ble', 'Scan loop reconnect succeeded');
+      _scanReconnectAttempt = 0;
+      await _resumeScanLoopAfterReconnect();
+      return;
+    }
+    _scanReconnectAttempt++;
+    _debugLog.warn(
+      'ble',
+      'Scan loop reconnect attempt $attemptNumber failed; loop still wanted',
+    );
+    _armScanLoopReconnect(reason: 'previous attempt failed');
+  }
+
+  Future<void> _resumeScanLoopAfterReconnect() async {
+    if (_manualBleDisconnectRequested) return;
+    if (!_scanLoopWanted && !_resumeAutoScanAfterReconnect) return;
+    _resumeAutoScanAfterReconnect = false;
+    _scanLoopWanted = true;
+    bleScanning = true;
+    bleScanStatus = 'idle';
+    notifyListeners();
+    _startAutoScanLoop();
+    await _runAutoScanCycle();
+    if (!bleScanning || !bleConnected || !_transport.isConnected) {
+      _bleAutoScanTimer?.cancel();
+      if (_scanLoopWanted &&
+          !_manualBleDisconnectRequested &&
+          !bleConnected &&
+          !kIsWeb) {
+        _armScanLoopReconnect(reason: 'link lost while resuming the scan loop');
+      } else {
+        _syncAndroidScanForeground();
+      }
+    }
+  }
+
+  Future<void> _maybePromptBatteryOptimization() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    if (_batteryOptimizationPromptAsked == true) return;
+    if (_batteryOptPromptInFlight) return;
+    final prompt = onBatteryOptimizationPrompt;
+    if (prompt == null) return;
+    _batteryOptPromptInFlight = true;
+    try {
+      final asked = await _settingsStore.batteryOptimizationPromptAsked();
+      if (asked) {
+        _batteryOptimizationPromptAsked = true;
+        return;
+      }
+      final ignoring = await isIgnoringBatteryOptimizations();
+      if (ignoring || !_scanLoopWanted) return;
+      final shown = await prompt();
+      if (!shown) return;
+      await _settingsStore.markBatteryOptimizationPromptAsked();
+      _batteryOptimizationPromptAsked = true;
+      _debugLog.info(
+        'ble_scan',
+        'Battery optimization prompt shown once for the scan loop',
+      );
+    } catch (e) {
+      _debugLog.warn('ble_scan', 'Battery optimization prompt failed: $e');
+    } finally {
+      _batteryOptPromptInFlight = false;
+    }
+  }
+
   Future<void> _attemptAutoReconnect({String? reason}) async {
     if (kIsWeb) return;
+    if (_scanLoopWanted) return;
     if (_autoReconnectInProgress || _manualBleDisconnectRequested) return;
     if (!settings.bleAutoConnect) return;
     if (bleSelectedDeviceId == null || bleSelectedDeviceId!.isEmpty) return;
@@ -3229,21 +4064,14 @@ class AppState extends ChangeNotifier {
             '${reason == null || reason.isEmpty ? '' : ' ($reason)'}',
       );
       await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (_scanLoopWanted || _manualBleDisconnectRequested) return;
       await connectBle();
       if (!bleConnected || !_transport.isConnected) {
         _debugLog.warn('ble', 'Auto-reconnect failed');
         return;
       }
-      if (_resumeAutoScanAfterReconnect) {
-        _resumeAutoScanAfterReconnect = false;
-        bleScanning = true;
-        bleScanStatus = 'idle';
-        notifyListeners();
-        _startAutoScanLoop();
-        await _runAutoScanCycle();
-        if (!bleScanning || !bleConnected || !_transport.isConnected) {
-          _bleAutoScanTimer?.cancel();
-        }
+      if (_resumeAutoScanAfterReconnect || _scanLoopWanted) {
+        await _resumeScanLoopAfterReconnect();
       }
     } finally {
       _autoReconnectInProgress = false;
@@ -3276,6 +4104,41 @@ class AppState extends ChangeNotifier {
     );
     _autoScanRemainingSeconds = settings.scanIntervalSeconds;
     bleNextScanCountdown = _autoScanRemainingSeconds;
+    notifyListeners();
+  }
+
+  /// Manual scans tick [discoverWait]. The scan loop restarts its own
+  /// interval from this same moment, then [notifyListeners] runs immediately.
+  void _beginCountdownAtDiscoverSend({
+    required bool autoLoopOwnsCountdown,
+    required Duration discoverWait,
+  }) {
+    if (autoLoopOwnsCountdown) {
+      _scheduleNextAutoScanFrom(DateTime.now());
+      return;
+    }
+    bleNextScanCountdown = discoverWait.inSeconds;
+    _bleCountdownTimer?.cancel();
+    _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      final current = bleNextScanCountdown ?? 0;
+      if (current <= 1) {
+        bleNextScanCountdown = 0;
+        timer.cancel();
+        if (identical(_bleCountdownTimer, timer)) {
+          _bleCountdownTimer = null;
+        }
+      } else {
+        bleNextScanCountdown = current - 1;
+      }
+      notifyListeners();
+    });
+    notifyListeners();
+  }
+
+  Future<void> _sendNodeDiscoverCommand() {
+    final override = debugDiscoverSend;
+    if (override != null) return override();
+    return _bleProtocol.run(_protocol.nodeDiscover());
   }
 
   void _startAutoScanLoop() {
@@ -3297,9 +4160,13 @@ class AppState extends ChangeNotifier {
     ) async {
       if (_autoScanTickInProgress) return;
       _autoScanTickInProgress = true;
+      // Drop the lock before a discover await so later ticks can refresh
+      // the countdown. Holding it froze the number until responses ended.
+      var holdTickLock = true;
       try {
         if (!bleScanning) {
           timer.cancel();
+          _syncAndroidScanForeground();
           return;
         }
         if (_smartScanPausedForRecentCoverage) {
@@ -3347,6 +4214,8 @@ class AppState extends ChangeNotifier {
             'smart_scan',
             'Discover finished after due time; launching immediate next cycle',
           );
+          holdTickLock = false;
+          _autoScanTickInProgress = false;
           await _runAutoScanCycle();
           return;
         }
@@ -3359,6 +4228,8 @@ class AppState extends ChangeNotifier {
               'Auto loop trigger countdown reached 0; starting cycle '
                   'interval=${settings.scanIntervalSeconds}s',
             );
+            holdTickLock = false;
+            _autoScanTickInProgress = false;
             await _runAutoScanCycle();
           }
           return;
@@ -3366,9 +4237,34 @@ class AppState extends ChangeNotifier {
         bleNextScanCountdown = remainingSeconds;
         notifyListeners();
       } finally {
-        _autoScanTickInProgress = false;
+        if (holdTickLock) {
+          _autoScanTickInProgress = false;
+        }
       }
     });
+    // After this synchronous turn, so the due time is scheduled before the
+    // foreground sync and the one-second timer stays aligned with it.
+    scheduleMicrotask(_syncAndroidScanForeground);
+  }
+
+  /// Keep Android's scan foreground service aligned with the loop.
+  ///
+  /// The service stays up while the loop is running, and while the user still
+  /// wants it during a reconnect. It drops when the user pauses, disconnects,
+  /// or reconnect is abandoned. Web, Linux, and iOS never enter this path.
+  void _syncAndroidScanForeground() {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final scanLoopRunning =
+        bleScanning && (_bleAutoScanTimer?.isActive ?? false);
+    final bleLinkUp = bleConnected && _transport.isConnected;
+    final loopWanted = _scanLoopWanted && !_manualBleDisconnectRequested;
+    unawaited(
+      _locationService.syncScanLoopForeground(
+        scanLoopRunning: scanLoopRunning,
+        bleConnected: bleLinkUp,
+        loopWanted: loopWanted,
+      ),
+    );
   }
 
   Future<void> _runAutoScanCycle() async {
@@ -3591,6 +4487,8 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _debugLog.info('app_state', 'Disposing app state');
+    _scanLoopWanted = false;
+    _cancelScanLoopReconnect('dispose');
     _syncService.dispose();
     _locationService.dispose();
     _bleAvailabilitySubscription?.cancel();

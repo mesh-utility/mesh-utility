@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
+    "test:area": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/test-area-query.mjs",
+    "test:overview": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/test-coverage-overview.mjs",
+    "test": "npm run test:area && npm run test:overview",
     "deploy": "wrangler deploy",
     "db:create": "wrangler d1 create mesh-utility-db",
     "db:init": "wrangler d1 execute mesh-utility-db --file=./schema.sql",

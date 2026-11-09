@@ -14,6 +14,7 @@ class RawScan {
     this.receiverName,
     this.radioId,
     this.downloadedFromWorker = false,
+    this.locallyRecorded = false,
   });
 
   final String? observerId;
@@ -31,10 +32,18 @@ class RawScan {
   final String? radioId;
   final bool downloadedFromWorker;
 
+  /// Recorded by this device. Kept in every cache-area mode, including after
+  /// upload marks the row [downloadedFromWorker].
+  final bool locallyRecorded;
+
   DateTime get effectiveTimestamp => receivedAt ?? timestamp ?? DateTime.now();
   bool get uploadEligible => !downloadedFromWorker;
 
-  RawScan copyWith({String? senderName, bool? downloadedFromWorker}) {
+  RawScan copyWith({
+    String? senderName,
+    bool? downloadedFromWorker,
+    bool? locallyRecorded,
+  }) {
     return RawScan(
       observerId: observerId,
       nodeId: nodeId,
@@ -50,6 +59,7 @@ class RawScan {
       receiverName: receiverName,
       radioId: radioId,
       downloadedFromWorker: downloadedFromWorker ?? this.downloadedFromWorker,
+      locallyRecorded: locallyRecorded ?? this.locallyRecorded,
     );
   }
 
@@ -80,6 +90,7 @@ class RawScan {
       receiverName: json['receiverName']?.toString(),
       radioId: json['radioId']?.toString(),
       downloadedFromWorker: (json['downloadedFromWorker'] as bool?) ?? false,
+      locallyRecorded: (json['locallyRecorded'] as bool?) ?? false,
     );
   }
 
@@ -99,6 +110,7 @@ class RawScan {
       'receiverName': receiverName,
       'radioId': radioId,
       'downloadedFromWorker': downloadedFromWorker,
+      if (locallyRecorded) 'locallyRecorded': true,
     };
   }
 }

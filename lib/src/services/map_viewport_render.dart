@@ -11,14 +11,18 @@ export 'package:mesh_utility/src/services/hex_coverage_aggregate.dart'
         HexZoomBand,
         aggregateCoverageHexes,
         aggregateCoverageHexesOffUi,
+        clampMaxHexScale,
         coarserHexScale,
         coverageFilterIdentity,
         coverageFractionMeaning,
         formatCoverageFraction,
         hexClusterScaleForZoom,
+        hexScaleMilesLabel,
+        hexScaleWidthMiles,
         mapDetailZoom,
         mapHexMaxScale,
         mapHexMaxScaleZoom,
+        mapHexScaleSteps,
         mapHexZoomBands;
 
 /// Extra fraction of the camera kept on each edge so hexes do not pop
@@ -29,8 +33,9 @@ const double mapViewportMarginFraction = 0.15;
 ///
 /// Zoom bands keep a phone or 1024×768 view of regional coverage under this
 /// count. Above it, the renderer coarsens the parent hex up to
-/// [mapHexMaxScale]. It does not grow past that. Clusters nearest the
-/// viewport center are kept, and the rest are dropped.
+/// [mapHexMaxScale], or a tighter max scale from settings. It does not grow
+/// past that. Clusters nearest the viewport center are kept, and the rest
+/// are dropped.
 const int mapMaxDrawnPolygons = 700;
 
 /// Quiet period before a pan or zoom recomputes the visible set.
@@ -226,7 +231,8 @@ class MapRenderPlan {
 
   final List<MapDrawPolygon> polygons;
 
-  /// Hex scale the zoom band asked for, before the emergency coarsen.
+  /// Zoom-band scale after the user max and [mapHexMaxScale], before
+  /// emergency coarsening.
   final int nominalScale;
 
   /// Hex scale actually drawn.
@@ -269,10 +275,11 @@ class MapRenderNeedsScale extends MapRenderAttempt {
 /// filtered list: aggregation never sees zones the caller removed.
 ///
 /// At and above [mapDetailZoom], polygons are the stored hexes. Below that,
-/// zones are grouped into parent hexes from [mapHexZoomBands], and never
-/// coarser than [mapHexMaxScale]. Every finite filtered zone in view belongs
-/// to one drawn hex unless [maxDrawn] still does not fit at that maximum.
-/// The overflow keeps clusters closest to the viewport center
+/// zones are grouped into parent hexes from [mapHexZoomBands]. The parent
+/// never exceeds [mapHexMaxScale], and [maxScale] can stop it sooner on both
+/// the zoom-band scale and emergency coarsening. Every finite filtered zone
+/// in view belongs to one drawn hex unless [maxDrawn] still does not fit at
+/// that ceiling. The overflow keeps clusters closest to the viewport center
 /// ([MapRenderPlan.droppedChildren]).
 List<MapDrawPolygon> selectZonesForMapRender({
   required List<CoverageZone> zones,
@@ -325,8 +332,10 @@ MapRenderAttempt resolveMapRender({
   bool allowCompute = false,
 }) {
   final cap = maxDrawn < 1 ? 1 : maxDrawn;
-  final bandScale = hexClusterScaleForZoom(viewport.zoom);
-  final nominal = bandScale > mapHexMaxScale ? mapHexMaxScale : bandScale;
+  // Start at the band, already clamped to the user max and the hard ceiling.
+  // Freezing only after a 256 start would still draw oversized hexes.
+  final ceiling = clampMaxHexScale(maxScale);
+  final nominal = hexClusterScaleForZoom(viewport.zoom, maxScale: ceiling);
   var scale = nominal;
   for (var guard = 0; guard < 40; guard++) {
     final found = lookup(scale);
@@ -341,8 +350,8 @@ MapRenderAttempt resolveMapRender({
         drawable.add(cluster);
       }
     }
-    final next = coarserHexScale(scale);
-    final frozen = maxScale != null && scale >= maxScale;
+    final next = coarserHexScale(scale, maxScale: ceiling);
+    final frozen = scale >= ceiling;
     if (drawable.length <= cap || next == null || frozen) {
       final polygons = <MapDrawPolygon>[
         for (final cluster in drawable) _polygonForCluster(cluster),

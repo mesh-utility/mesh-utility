@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS scans (
 CREATE INDEX IF NOT EXISTS idx_radioId ON scans(radioId);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON scans(timestamp);
 CREATE INDEX IF NOT EXISTS idx_committed ON scans(committed);
+CREATE INDEX IF NOT EXISTS idx_scans_lat_lng_ts ON scans (latitude, longitude, timestamp);
 
 CREATE TABLE IF NOT EXISTS commits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

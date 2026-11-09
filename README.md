@@ -78,7 +78,7 @@ A **Dead Zone** is a location with no response. A weak or noisy hearing is not a
 ## How the app works
 
 - Connect a radio over BLE from **Connections** in the side nav.
-- Start map scanning with the scan control on the map overlay.
+- Start the scan loop with Play on the map. Force scan (the bolt) works only while that loop is running. The next-scan countdown starts when the discovery request is sent.
 - The app sends node-discover frames, collects responses, and stores scans locally with location.
 - Smart scan skips recently covered zones and scans again in stale, unscanned, or dead zones. A dead zone is always eligible because it means no response was heard there.
 - Local scans upload on **Sync now** and on a periodic interval (30 minutes to 24 hours), anchored to server time.
@@ -86,18 +86,38 @@ A **Dead Zone** is a location with no response. A weak or noisy hearing is not a
 
 ## Settings (current behavior)
 
-- **Scan Interval:** auto-scan cadence (20–300 seconds).
-- **Smart scan** and freshness days (1–14): skip zones covered inside that window.
-- **Update radio position:** for a radio without GPS, write the current OS location onto the radio so peers can see it. This only updates radio coordinates.
-- **Offline map tiles:** cache viewed tiles, and download or clear a local tile cache around the current location.
-- **Units:** imperial or metric.
-- **Stats Radius:** bottom stats filter (`0` = all visible data).
-- **Cloud History:** how many days of worker history to load.
-- **Deadzone Retrieval:** how far back to fetch dead-zone rows, separate from successful history.
-- **Sync Download Scope:** global, or a radius around the current location.
-- **Upload Interval:** periodic worker sync (`30`–`1440` minutes).
+Settings is grouped into **Radio / Connection**, **Scanning**, **Map & Display**, **Data & Cache**, **App updates**, and **About**.
+
+- **Radio / Connection:** Update radio position (a radio without GPS; writes the current OS location onto the radio only) and Online / Offline Mode.
+- **Scanning:** Scan Interval (20–300 seconds) and Smart scan freshness days (1–14).
+- **Map & Display:** offline map tiles, **Max hex size when zoomed out** (Actual cells up to about 19.5 miles; default is 19.5). Lower shows more detail zoomed out. Far zoomed out, edge cells may be hidden so the map stays under 700 shapes. Also Stats Radius (`0` = all visible data), units, and theme.
+- **Data & Cache > Scan cache area:** one control for what is downloaded and kept. Radius around the last location: 10, 25, 50, 100, 250, 500, or 800 miles. States and provinces (any country, with a search box). US counties. Global. Changing it downloads the new area or trims scans that no longer fit. Larger areas use more storage and can slow startup.
+- **Download where I travel:** off by default. Outside the cache area, download a 10, 25, or 50 mile bubble. The last 8 spots are kept for 30 days. A new download waits for about 10 miles or a new map hex, and 5 minutes. Nothing downloads in Offline Mode.
+- **Cloud History** and **Deadzone Retrieval:** how many days to load. Dead zones are a separate window.
+- **Upload Interval:** periodic worker sync (`30`–`1440` minutes), anchored to server time.
 - **App updates:** Android and Linux only. See above.
 - **Delete My Data:** signed delete for the connected radio.
+
+## Scan history
+
+History opened from a map hex is titled **Cell history** and the list scrolls. With no cell selected the title is **All Scans**. One row is labeled "1 scan".
+
+A radio name ending in **· synced** means that row was recorded by a different radio than the one connected now. Those rows are shared scans, usually from the cloud.
+
+## Web Install tab
+
+The web app has an **Install** tab. It explains the Android APK, the Linux archive, and Obtainium, and it shows what is in the latest GitHub release (Fixes, Enhancements, Other changes). If that request fails, the page shows a saved copy of the notes and a link to the release on GitHub.
+
+## Worker area query
+
+`GET /history/:day.ndjson` and `GET /coverage` accept an area. The worker checks these in order:
+
+1. `minLat`, `maxLat`, `minLng`, `maxLng` — map bounds. When all four are present they win, and `lat` / `lng` / `radiusMiles` are not used for the query. `minLng` greater than `maxLng` crosses the antimeridian.
+2. Repeated `division` ids, up to 32. Unknown ids are skipped. If every id is unknown, the response is empty.
+3. `lat`, `lng`, and `radiusMiles` together. Radius is still capped at 250 miles.
+4. Otherwise the request is worldwide.
+
+A radius above 250 miles is sent with the map bounds as well. A current worker uses the bounds. An older server ignores the bounds and still returns at most 250 miles around the point. The app then keeps only the area you selected. States, provinces, and counties are sent as those bounds (not as `division` ids). When your last location is inside that box, the point sent for older servers is that location, and the radius still reaches the far corner of the box.
 
 ## Run locally
 

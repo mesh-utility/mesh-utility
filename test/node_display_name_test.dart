@@ -265,6 +265,43 @@ void main() {
     }
   });
 
+  test('unambiguous contact name is shown', () {
+    final state = buildState();
+    state.debugSeedSessionContacts(<String, String>{longPrefix: 'TestRep'});
+    expect(state.displayNameForNode(shortId), 'TestRep');
+    expect(
+      resolvedNameForNodeId(<String, String>{longPrefix: 'TestRep'}, shortId),
+      'TestRep',
+    );
+  });
+
+  test('colliding prefixes and short hashes do not show a guessed name', () {
+    final state = buildState();
+    state.debugSeedSessionContacts(<String, String>{
+      '1052A93011111111': 'First',
+      '1052A93022222222': 'Second',
+    });
+    expect(state.displayNameForNode(shortId), shortId);
+    expect(state.displayNameForNode('1052A93011111111'), 'First');
+    expect(state.displayNameForNode('1052A93022222222'), 'Second');
+    expect(state.displayNameForNode('46'), '46');
+    expect(
+      resolvedNameForNodeId(<String, String>{
+        '1052A93011111111': 'First',
+        '1052A93022222222': 'Second',
+      }, shortId),
+      isNull,
+    );
+    expect(
+      resolvedNameForNodeId(<String, String>{'46': 'First'}, '463D3236'),
+      isNull,
+    );
+    expect(
+      titleNameForNode(nodeId: shortId, contactName: null, advertisedName: null),
+      shortId,
+    );
+  });
+
   testWidgets('nodes card title is a name and the id stays the subtitle', (
     tester,
   ) async {

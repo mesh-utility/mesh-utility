@@ -43,6 +43,23 @@ void main() {
     );
   }
 
+  test('idsLikelySameDevice requires an 8-char prefix', () {
+    expect(idsLikelySameDevice(shortId, longId), isTrue);
+    expect(idsLikelySameDevice(longId, shortId), isTrue);
+    expect(idsLikelySameDevice(shortId, shortId), isTrue);
+    expect(idsLikelySameDevice('46', '463D3236'), isFalse);
+    expect(idsLikelySameDevice('463D3236', '46ABCDEF01234567'), isFalse);
+    expect(
+      idsLikelySameDevice('1052A93011111111', '1052A93022222222'),
+      isFalse,
+    );
+    expect(hexIdsAreOneRadio(<String>[shortId, longId]), isTrue);
+    expect(
+      hexIdsAreOneRadio(<String>['1052A93011111111', '1052A93022222222']),
+      isFalse,
+    );
+  });
+
   test('first advertised name keeps walk order inside a prefix group', () {
     final index = FirstAdvertisedNameIndex()
       ..add(shortId, 'EarlierShort')
@@ -74,6 +91,16 @@ void main() {
 
     expect(index.lookup('1052A93022222222'), 'First');
     expect(index.lookup(shortId), 'First');
+  });
+
+  test('a short hash does not inherit an advertised name from another radio', () {
+    final index = FirstAdvertisedNameIndex()
+      ..add(shortId, 'Beacon')
+      ..add('46', 'Other');
+
+    expect(index.lookup('46'), 'Other');
+    expect(index.lookup('463D3236'), isNull);
+    expect(index.lookup(shortId), 'Beacon');
   });
 
   test('non-hex advertised ids keep the first raw string', () {
@@ -146,8 +173,9 @@ void main() {
       '1052A93011111111': 'First',
       '1052A93022222222': 'Second',
     });
-    expect(tied.lookup(shortId), 'First');
-    expect(tied.lookup('1052A93022222222'), 'First');
+    expect(tied.lookup(shortId), isNull);
+    expect(tied.lookup('1052A93022222222'), 'Second');
+    expect(tied.lookup('1052A93011111111'), 'First');
 
     final placeholder = LongestHexNameIndex.fromMap(<String, String>{
       longId: shortId,
@@ -257,8 +285,12 @@ String? _bruteAdvertised(List<(String, String?)> rows, String query) {
   bool matches(String candidate) {
     if (target.isEmpty) return candidate.trim() == query.trim();
     final hex = normalizeHexId(candidate);
-    return hex.isNotEmpty &&
-        (hex == target || idsLikelySameDevice(hex, target));
+    if (hex.isEmpty) return false;
+    if (hex == target || idsLikelySameDevice(hex, target)) return true;
+    if (hex.length >= 8 && target.length >= 8) {
+      return hex.substring(0, 8) == target.substring(0, 8);
+    }
+    return false;
   }
 
   String? usable(String? name, String id) {
@@ -279,17 +311,23 @@ String? _bruteContact(Map<String, String> contacts, String id) {
   if (id.isEmpty || contacts.isEmpty) return null;
   final upper = normalizeHexId(id);
   if (upper.isEmpty) return null;
-  String? bestName;
-  var bestLength = -1;
+  final matched = <(String, String)>[];
   for (final entry in contacts.entries) {
     final prefix = normalizeHexId(entry.key);
     if (prefix.isEmpty) continue;
     if (prefix != upper && !idsLikelySameDevice(prefix, upper)) continue;
     final name = entry.value.trim();
     if (name.isEmpty || isPlaceholderNodeName(name, upper)) continue;
-    if (prefix.length > bestLength) {
-      bestLength = prefix.length;
-      bestName = name;
+    matched.add((prefix, name));
+  }
+  if (matched.isEmpty) return null;
+  if (!hexIdsAreOneRadio(matched.map((m) => m.$1))) return null;
+  String? bestName;
+  var bestLength = -1;
+  for (final m in matched) {
+    if (m.$1.length > bestLength) {
+      bestLength = m.$1.length;
+      bestName = m.$2;
     }
   }
   return bestName;

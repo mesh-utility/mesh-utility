@@ -7,7 +7,9 @@ import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
+import 'package:mesh_utility/src/services/coverage_overview.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/map_viewport_render.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
@@ -23,6 +25,7 @@ class MapPage extends StatefulWidget {
   const MapPage({
     super.key,
     required this.zones,
+    this.overviewCells = const [],
     required this.onRefresh,
     required this.syncing,
     required this.forceOffline,
@@ -50,6 +53,7 @@ class MapPage extends StatefulWidget {
     required this.rawScans,
     required this.nodesCount,
     required this.statsRadiusMiles,
+    required this.maxHexScale,
     required this.unitSystem,
     required this.tileCachingEnabled,
     required this.bleUiEnabled,
@@ -63,6 +67,7 @@ class MapPage extends StatefulWidget {
   });
 
   final List<CoverageZone> zones;
+  final List<CoverageOverviewCell> overviewCells;
   final Future<void> Function() onRefresh;
   final bool syncing;
   final bool forceOffline;
@@ -93,6 +98,7 @@ class MapPage extends StatefulWidget {
   final List<RawScan> rawScans;
   final int nodesCount;
   final int statsRadiusMiles;
+  final int maxHexScale;
   final String unitSystem;
   final bool tileCachingEnabled;
   final bool bleUiEnabled;
@@ -118,6 +124,7 @@ class _MapPageState extends State<MapPage> {
   final LayerHitNotifier<String> _polygonHitNotifier = ValueNotifier(null);
   double _mapViewportHeight = 700;
   CoverageZone? _selectedZone;
+  String? _selectedOverviewId;
   String? _lastNodeFilterDebugSignature;
   String? _lastPopupDebugSignature;
   LatLng? _lastAutoCenterTarget;
@@ -167,6 +174,11 @@ class _MapPageState extends State<MapPage> {
       _tileProvider = TileCacheService.createTileProvider(
         enabled: widget.tileCachingEnabled,
       );
+    }
+    if (widget.maxHexScale != oldWidget.maxHexScale) {
+      _renderRequest++;
+      _renderReady = false;
+      _scheduleViewportRender(immediate: true);
     }
     if (widget.autoCenter) {
       final observerMoved =
@@ -316,6 +328,7 @@ class _MapPageState extends State<MapPage> {
           zones: _datasetZones,
           viewport: viewport,
           pinZoneId: _selectedZone?.id,
+          maxScale: widget.maxHexScale,
         );
         if (!mounted || plan == null || request != _renderRequest) return;
         if (identity != _filterIdentity) return;
@@ -331,23 +344,23 @@ class _MapPageState extends State<MapPage> {
     } finally {
       final elapsed = watch.elapsedMilliseconds;
       if (announce || elapsed >= 50) {
-        meshStageEnd(
-          'viewport_render',
-          count: zones,
-          ms: elapsed,
-          n2: drawn,
-        );
+        meshStageEnd('viewport_render', count: zones, ms: elapsed, n2: drawn);
       }
     }
   }
 
   void _applyPlan(MapRenderPlan plan, MapRenderViewport viewport) {
     final signature = mapDrawSignature(plan.polygons);
-    if (_renderReady && signature == _renderSignature) return;
-    _renderReady = true;
-    _renderSignature = signature;
-    _drawnPolygons = plan.polygons;
-    _renderPolygons = _polygonsForDraw(plan.polygons);
+    final sameDraw = _renderReady && signature == _renderSignature;
+    final sameView =
+        _appliedViewport != null && _sameViewport(_appliedViewport!, viewport);
+    if (sameDraw && (widget.overviewCells.isEmpty || sameView)) return;
+    if (!sameDraw) {
+      _renderReady = true;
+      _renderSignature = signature;
+      _drawnPolygons = plan.polygons;
+      _renderPolygons = _polygonsForDraw(plan.polygons);
+    }
     _appliedViewport = viewport;
     _debugLog.debug(
       'map_render',
@@ -381,6 +394,30 @@ class _MapPageState extends State<MapPage> {
     return null;
   }
 
+  CoverageOverviewCell? _overviewCellForHit(String hit) {
+    if (!hit.startsWith(overviewHitPrefix)) return null;
+    final id = hit.substring(overviewHitPrefix.length);
+    for (final cell in widget.overviewCells) {
+      if (cell.id == id) return cell;
+    }
+    return null;
+  }
+
+  MapRenderViewport _overviewViewport(MapCameraStart camera) {
+    final live = _appliedViewport;
+    if (live != null) return live;
+    final zoom = camera.zoom.isFinite ? camera.zoom : neutralMapZoom;
+    final width = 360 / pow(2, zoom) * 4;
+    final latSpan = width / 2;
+    return MapRenderViewport.fromCenterWidth(
+      south: camera.latitude - latSpan,
+      north: camera.latitude + latSpan,
+      longitudeCenter: camera.longitude,
+      longitudeWidth: width,
+      zoom: zoom,
+    );
+  }
+
   void _handlePolygonTap() {
     final hit = _polygonHitNotifier.value;
     if (hit == null || hit.hitValues.isEmpty) {
@@ -388,6 +425,18 @@ class _MapPageState extends State<MapPage> {
       return;
     }
     final zoneId = hit.hitValues.first;
+    final overview = _overviewCellForHit(zoneId);
+    if (overview != null) {
+      _debugLog.info('ui_click', 'Map overview hex click');
+      setState(() {
+        _selectedOverviewId = overview.id;
+        _selectedZone = null;
+        _clusterPopup = null;
+        _legendExpanded = false;
+        _lastPopupDebugSignature = null;
+      });
+      return;
+    }
     _debugLog.info('ui_click', 'Map hex click zone=$zoneId');
     CoverageZone? zone;
     for (final z in widget.zones) {
@@ -401,6 +450,7 @@ class _MapPageState extends State<MapPage> {
       final draw = _drawForZoneId(zoneId);
       setState(() {
         _selectedZone = zone;
+        _selectedOverviewId = null;
         _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
         _legendExpanded = false;
         _lastPopupDebugSignature = null;
@@ -443,7 +493,8 @@ class _MapPageState extends State<MapPage> {
     if (_selectedZone != null) return;
 
     final target = LatLng(lat, lng);
-    if (_lastAutoCenterTarget != null) {
+    final alreadyCentered = _lastAutoCenterTarget != null;
+    if (alreadyCentered) {
       final movedMiles = distanceMiles(
         _lastAutoCenterTarget!.latitude,
         _lastAutoCenterTarget!.longitude,
@@ -455,8 +506,11 @@ class _MapPageState extends State<MapPage> {
         return;
       }
     }
+    final zoom = zoomAfterOwnFixArrives(
+      currentZoom: _mapController.camera.zoom,
+      alreadyCenteredOnOwnFix: alreadyCentered,
+    );
     _lastAutoCenterTarget = target;
-    final zoom = _mapController.camera.zoom;
     _debugLog.debug(
       'map_auto_center',
       'Recenter to lat=${target.latitude.toStringAsFixed(6)} '
@@ -841,9 +895,12 @@ class _MapPageState extends State<MapPage> {
 
   @override
   Widget build(BuildContext context) {
-    final center = widget.zones.isNotEmpty
-        ? LatLng(widget.zones.first.centerLat, widget.zones.first.centerLng)
-        : const LatLng(39.5, -98.35);
+    // Own fix, or the general US view. Coverage zones must not move this.
+    final camera = initialMapCamera(
+      ownLatitude: widget.observerLat,
+      ownLongitude: widget.observerLng,
+    );
+    final center = LatLng(camera.latitude, camera.longitude);
 
     final focusNodeId = widget.focusNodeId;
     final effectiveNodeFilters = _effectiveNodeFilters(
@@ -859,6 +916,49 @@ class _MapPageState extends State<MapPage> {
     final deadZonesLength = dataset.dead;
     final avgRssi = dataset.avgRssi;
     final avgSnr = dataset.avgSnr;
+    final overviewViewport = _overviewViewport(camera);
+    final overviewPlan = planOverviewLayer(
+      cells: widget.overviewCells,
+      zoom: overviewViewport.zoom,
+      detailedCenters: [
+        for (final zone in dataset.filtered)
+          (lat: zone.centerLat, lng: zone.centerLng),
+      ],
+      south: overviewViewport.south,
+      north: overviewViewport.north,
+      west: overviewViewport.west,
+      east: overviewViewport.east,
+      crossesAntimeridian: overviewViewport.crossesAntimeridian,
+      spansAllLongitudes: overviewViewport.spansAllLongitudes,
+      centerLat: camera.latitude,
+      centerLng: camera.longitude,
+    );
+    final mapPolygons = <Polygon<String>>[
+      for (final draw in overviewPlan.draws)
+        Polygon<String>(
+          points: draw.points,
+          hitValue: draw.hitId,
+          color: draw.fill,
+          borderColor: draw.border,
+          borderStrokeWidth: 1,
+        ),
+      ..._renderPolygons,
+    ];
+    CoverageOverviewCell? selectedOverview;
+    if (_selectedOverviewId != null) {
+      for (final draw in overviewPlan.draws) {
+        if (draw.cell.id == _selectedOverviewId) {
+          selectedOverview = draw.cell;
+          break;
+        }
+      }
+    }
+    final overviewTip = selectedOverview == null
+        ? null
+        : overviewTooltipText(
+            strength: selectedOverview.strength,
+            recency: selectedOverview.recency,
+          );
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewWidth = constraints.hasBoundedWidth
@@ -876,8 +976,9 @@ class _MapPageState extends State<MapPage> {
         final legendBottom = statsBottom + statsEstimatedHeight + 18;
         final legendExpandedWidth = min(viewWidth - 24, 154.0);
         final legendReservedWidth = 56.0;
-        final maxPopupWidth = max(120.0, viewWidth - 24);
-        final popupWidth = narrowOverlay ? min(maxPopupWidth, 300.0) : 280.0;
+        // Cap the hex popup so a 360dp phone keeps margins and long lines wrap
+        // inside the card instead of running off the screen.
+        final popupWidth = min(280.0, max(120.0, viewWidth - 24));
         final popupMinTop = 116.0;
         final popupMaxTop = max(popupMinTop, viewHeight - 320.0);
         final popupTop = narrowOverlay
@@ -898,7 +999,7 @@ class _MapPageState extends State<MapPage> {
                 mapController: _mapController,
                 options: MapOptions(
                   initialCenter: center,
-                  initialZoom: widget.zones.isNotEmpty ? 10 : 4,
+                  initialZoom: camera.zoom,
                   interactionOptions: const InteractionOptions(
                     flags: InteractiveFlag.all,
                   ),
@@ -932,6 +1033,7 @@ class _MapPageState extends State<MapPage> {
                     );
                     setState(() {
                       _selectedZone = null;
+                      _selectedOverviewId = null;
                       _clusterPopup = null;
                       _lastPopupDebugSignature = null;
                     });
@@ -980,7 +1082,7 @@ class _MapPageState extends State<MapPage> {
                         ),
                       ],
                     ),
-                  if (_renderPolygons.isNotEmpty)
+                  if (mapPolygons.isNotEmpty)
                     MouseRegion(
                       hitTestBehavior: HitTestBehavior.deferToChild,
                       cursor: SystemMouseCursors.click,
@@ -989,13 +1091,35 @@ class _MapPageState extends State<MapPage> {
                         onTap: _handlePolygonTap,
                         child: PolygonLayer<String>(
                           hitNotifier: _polygonHitNotifier,
-                          polygons: _renderPolygons,
+                          polygons: mapPolygons,
                         ),
                       ),
                     ),
                 ],
               ),
             ),
+            if (overviewTip != null)
+              Positioned(
+                left: 12,
+                bottom: legendBottom,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: min(280.0, viewWidth - 80),
+                  ),
+                  child: Card(
+                    elevation: 1,
+                    child: InkWell(
+                      onTap: () {
+                        setState(() => _selectedOverviewId = null);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Text(overviewTip, softWrap: true),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             if (_legendExpanded)
               Positioned(
                 right: 12,
@@ -1059,6 +1183,11 @@ class _MapPageState extends State<MapPage> {
                               color: Color(0xFFA855F7),
                               text: 'Noisy',
                               range: 'Good signal, bad SNR',
+                            ),
+                            LegendRow(
+                              color: Color(0x6622C55E),
+                              text: 'General',
+                              range: 'Before Sync',
                             ),
                           ],
                         ),
@@ -1454,10 +1583,11 @@ class _MapPageState extends State<MapPage> {
                                             ),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: Text(
+                                              child: _mapPopupDetailText(
                                                 _selectedZone!.id,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium,
                                               ),
                                             ),
                                           ],
@@ -1477,7 +1607,7 @@ class _MapPageState extends State<MapPage> {
                                             const Icon(Icons.radio, size: 14),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: Text(
+                                              child: _mapPopupDetailText(
                                                 _stripPopupEntityLabel(
                                                   _observerDisplayNameRaw(
                                                     latestRaw,
@@ -1528,10 +1658,11 @@ class _MapPageState extends State<MapPage> {
                                             ),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: Text(
+                                              child: _mapPopupDetailText(
                                                 popupNodeLabel,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium,
                                               ),
                                             ),
                                             const SizedBox(width: 8),
@@ -1580,10 +1711,11 @@ class _MapPageState extends State<MapPage> {
                                             ),
                                             const SizedBox(width: 4),
                                             Expanded(
-                                              child: Text(
+                                              child: _mapPopupDetailText(
                                                 _selectedZone!.id,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium,
                                               ),
                                             ),
                                           ],
@@ -1608,7 +1740,7 @@ class _MapPageState extends State<MapPage> {
                                         const Icon(Icons.radio, size: 14),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: Text(
+                                          child: _mapPopupDetailText(
                                             _stripPopupEntityLabel(
                                               _observerDisplayName(
                                                 latest,
@@ -1654,7 +1786,7 @@ class _MapPageState extends State<MapPage> {
                                         ),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: Text(
+                                          child: _mapPopupDetailText(
                                             popupNodeLabel,
                                             style: Theme.of(
                                               context,
@@ -1699,13 +1831,14 @@ class _MapPageState extends State<MapPage> {
                                         const Icon(Icons.terrain, size: 14),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: Text(
+                                          child: _mapPopupDetailText(
                                             _formatAltitude(
                                               latest.altitude,
                                               widget.unitSystem,
                                             ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyMedium,
                                           ),
                                         ),
                                       ],
@@ -1814,10 +1947,11 @@ class _MapPageState extends State<MapPage> {
                                         const Icon(Icons.location_on, size: 14),
                                         const SizedBox(width: 4),
                                         Expanded(
-                                          child: Text(
+                                          child: _mapPopupDetailText(
                                             _selectedZone!.id,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyMedium,
                                           ),
                                         ),
                                       ],
@@ -2354,6 +2488,27 @@ String _formatAltitude(double? altitudeMeters, String unitSystem) {
   }
   final feet = altitudeMeters * 3.28084;
   return '${feet.toStringAsFixed(0)} ft';
+}
+
+/// Hex-popup detail line. One point smaller than [style], never under 11,
+/// wrapping to three lines so long names stay on a 360dp phone.
+Text _mapPopupDetailText(
+  String text, {
+  TextStyle? style,
+  TextAlign? textAlign,
+}) {
+  final base = style ?? const TextStyle(fontSize: 14);
+  final current = base.fontSize ?? 14;
+  final reduced = current - 1;
+  final fontSize = reduced < 11 ? 11.0 : reduced;
+  return Text(
+    text,
+    softWrap: true,
+    maxLines: 3,
+    overflow: TextOverflow.ellipsis,
+    textAlign: textAlign,
+    style: base.copyWith(fontSize: fontSize),
+  );
 }
 
 String _stripPopupEntityLabel(String value) {

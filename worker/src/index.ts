@@ -6,12 +6,37 @@
 import { batchCommitToGitHub, getGitHubFileContent } from './github';
 import { ScanBatcher } from './batch';
 import {
+  buildCoverageQueries,
+  buildHistoryQueries,
+  coverageZoneAccepted,
+  dedupeCoverageRows,
+  HISTORY_PAGE_SIZE_DEFAULT,
+  HISTORY_PAGE_SIZE_MAX,
+  mergeHistoryRows,
+  parsePolygon,
+  planHistoryPage,
+  pointInRing,
+  prepareAreaQuery,
+  resolveGeoBounds,
+  type BoundQuery,
+  type HistoryChunk,
+} from './area_query';
+import {
   listScanDaysDesc,
   timestampRangeForDays,
   trackMeta,
   type RowsReadTracker,
   type ScanDayRow,
 } from './scan_days';
+import {
+  OVERVIEW_LOOKBACK_DAYS,
+  overviewAggregateBinds,
+  overviewAggregateSql,
+  overviewCacheKey,
+  serveCoverageOverview,
+  workerOverviewCache,
+  type OverviewAggRow,
+} from './coverage_overview';
 
 export interface Env {
   DB: D1Database;
@@ -92,10 +117,7 @@ function parsePositiveInt(raw: string | null, fallback: number, max: number): nu
 }
 
 /** Max calendar days /coverage will scan even when days=0 (all). Prevents bind storms. */
-const COVERAGE_MAX_DAYS = 90;
-/** NDJSON page size cap (was 5000 — too heavy per request). */
-const HISTORY_PAGE_SIZE_MAX = 1000;
-const HISTORY_PAGE_SIZE_DEFAULT = 1000;
+const COVERAGE_MAX_DAYS = OVERVIEW_LOOKBACK_DAYS;
 
 function wantsDebugRows(request: Request, env: Env): boolean {
   const url = new URL(request.url);
@@ -119,12 +141,19 @@ async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function cacheKeyRequest(request: Request, cacheUrl?: URL): Request {
+  const url = cacheUrl ? new URL(cacheUrl.toString()) : new URL(request.url);
+  url.searchParams.delete('_debug');
+  return new Request(url.toString(), { method: 'GET' });
+}
+
 async function cachedJsonResponse(
   request: Request,
   corsHeaders: Record<string, string>,
   body: string,
   cacheControl: string,
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  cacheUrl?: URL
 ): Promise<Response> {
   const etag = `"${(await sha256Hex(body)).slice(0, 16)}"`;
   const inm = request.headers.get('If-None-Match');
@@ -142,30 +171,58 @@ async function cachedJsonResponse(
     ...extraHeaders,
   };
   const response = new Response(body, { headers });
+  storeCachedGet(cacheKeyRequest(request, cacheUrl), response);
+  return response;
+}
+
+function storeCachedGet(cacheKey: Request, response: Response): void {
   try {
     const cache = caches.default;
-    // Cache API requires a GET Request as key; store a clone without debug query noise.
-    const cacheUrl = new URL(request.url);
-    cacheUrl.searchParams.delete('_debug');
-    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
-    const toStore = response.clone();
     // fire-and-forget; ignore failures in local/miniflare without Cache
-    void cache.put(cacheKey, toStore).catch(() => {});
+    void cache.put(cacheKey, response.clone()).catch(() => {});
   } catch {
     // caches.default may be unavailable in some local contexts
   }
-  return response;
+}
+
+function withCorsResponse(response: Response, corsHeaders: Record<string, string>): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(corsHeaders)) headers.set(key, value);
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function readAreaQueries(
+  env: Env,
+  tracker: RowsReadTracker,
+  queries: BoundQuery[]
+): Promise<StoredScanRow[]> {
+  if (queries.length === 0) return [];
+  if (queries.length === 1) {
+    const query = queries[0];
+    const result = trackMeta(
+      tracker,
+      await env.DB.prepare(query.sql).bind(...query.binds).all()
+    );
+    return (result.results || []) as StoredScanRow[];
+  }
+  const statements = queries.map((query) => env.DB.prepare(query.sql).bind(...query.binds));
+  const results = await env.DB.batch(statements);
+  const rows: StoredScanRow[] = [];
+  for (const result of results) {
+    trackMeta(tracker, result as { meta?: { rows_read?: number } });
+    rows.push(...((result.results || []) as StoredScanRow[]));
+  }
+  return rows;
 }
 
 async function matchCachedGet(
   request: Request,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  cacheUrl?: URL
 ): Promise<Response | null> {
   try {
     const cache = caches.default;
-    const cacheUrl = new URL(request.url);
-    cacheUrl.searchParams.delete('_debug');
-    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+    const cacheKey = cacheKeyRequest(request, cacheUrl);
     const hit = await cache.match(cacheKey);
     if (!hit) return null;
     const etag = hit.headers.get('ETag');
@@ -190,47 +247,6 @@ async function matchCachedGet(
 }
 
 
-function parseFiniteFloat(raw: string | null): number | null {
-  if (raw == null) return null;
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseRadiusMiles(raw: string | null): number | null {
-  const parsed = parseFiniteFloat(raw);
-  if (parsed == null || parsed <= 0) return null;
-  return Math.min(parsed, 250);
-}
-
-type GeoBounds = {
-  minLat: number;
-  maxLat: number;
-  minLng: number;
-  maxLng: number;
-};
-
-function buildGeoBounds(
-  latRaw: string | null,
-  lngRaw: string | null,
-  radiusMilesRaw: string | null
-): GeoBounds | null {
-  const lat = parseFiniteFloat(latRaw);
-  const lng = parseFiniteFloat(lngRaw);
-  const radiusMiles = parseRadiusMiles(radiusMilesRaw);
-  if (lat == null || lng == null || radiusMiles == null) return null;
-
-  const latDelta = radiusMiles / 69;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  const safeCosLat = Math.max(Math.abs(cosLat), 0.1);
-  const lngDelta = radiusMiles / (69 * safeCosLat);
-  return {
-    minLat: lat - latDelta,
-    maxLat: lat + latDelta,
-    minLng: lng - lngDelta,
-    maxLng: lng + lngDelta,
-  };
-}
-
 function parseNodeEntries(raw: string): NodeEntry[] {
   try {
     const parsed = JSON.parse(raw);
@@ -238,6 +254,45 @@ function parseNodeEntries(raw: string): NodeEntry[] {
   } catch {
     return [];
   }
+}
+
+function scanRowToNdjsonLines(row: StoredScanRow, includeDeadzones: boolean): string[] {
+  const nodes = parseNodeEntries(row.nodes);
+  if (nodes.length === 0) {
+    if (!includeDeadzones) return [];
+    return [
+      JSON.stringify({
+        radioId: row.radioId,
+        timestamp: row.timestamp,
+        latitude: row.latitude,
+        longitude: row.longitude,
+        altitude: row.altitude,
+        nodeId: '',
+        senderName: null,
+        receiverName: null,
+        rssi: null,
+        snr: null,
+        snrIn: null,
+        receivedAt: new Date(row.timestamp).toISOString(),
+      }),
+    ];
+  }
+  return nodes.map((node) =>
+    JSON.stringify({
+      radioId: row.radioId,
+      timestamp: row.timestamp,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      altitude: row.altitude,
+      nodeId: typeof node?.nodeId === 'string' ? node.nodeId : '',
+      senderName: typeof node?.name === 'string' ? node.name : null,
+      receiverName: typeof node?.observerName === 'string' ? node.observerName : null,
+      rssi: typeof node?.rssi === 'number' ? node.rssi : null,
+      snr: typeof node?.snr === 'number' ? node.snr : null,
+      snrIn: typeof node?.snrIn === 'number' ? node.snrIn : null,
+      receivedAt: new Date(row.timestamp).toISOString(),
+    })
+  );
 }
 
 function originMatchesPattern(origin: string, pattern: string): boolean {
@@ -289,8 +344,23 @@ function stripApiPrefix(request: Request): { request: Request; url: URL } {
   return { request: new Request(url.toString(), request), url };
 }
 
+async function loadOverviewRows(env: Env, nowMs: number): Promise<OverviewAggRow[]> {
+  const result = await env.DB.prepare(overviewAggregateSql())
+    .bind(...overviewAggregateBinds(nowMs))
+    .all();
+  return ((result.results || []) as OverviewAggRow[]).map((row) => ({
+    row_key: row.row_key,
+    col_key: row.col_key,
+    max_ts: row.max_ts,
+    n: row.n,
+    heard: row.heard,
+    best_rssi: row.best_rssi,
+    best_snr: row.best_snr,
+  }));
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const stripped = stripApiPrefix(request);
     request = stripped.request;
     const url = stripped.url;
@@ -373,6 +443,22 @@ export default {
         );
       }
 
+      // Coarse worldwide coverage. Same cache short-circuit as the other
+      // reads, the same 90-day ceiling, and no query parameters to widen it.
+      if (url.pathname === '/coverage/overview' && request.method === 'GET') {
+        const nowMs = Date.now();
+        return serveCoverageOverview({
+          nowMs,
+          corsHeaders,
+          bypassCache: wantsDebugRows(request, env),
+          ifNoneMatch: request.headers.get('If-None-Match'),
+          cacheKey: overviewCacheKey(url.toString()),
+          waitUntil: (promise) => ctx.waitUntil(promise),
+          cache: workerOverviewCache(),
+          loadRows: (generatedAt) => loadOverviewRows(env, generatedAt),
+        });
+      }
+
       // Fast aggregated coverage endpoint for map rendering.
       if (
         (url.pathname === '/coverage' || url.pathname === '/coverage.json') &&
@@ -380,16 +466,32 @@ export default {
       ) {
         const debug = wantsDebugRows(request, env);
         const tracker: RowsReadTracker = { rowsRead: 0 };
+        const geo = resolveGeoBounds(url);
+        if (geo.error) return withCorsResponse(geo.error, corsHeaders);
+        const polygon = parsePolygon(url.searchParams.get('polygon'));
+        if (polygon.error) return withCorsResponse(polygon.error, corsHeaders);
+        // Bbox and division edges are rounded outward to 0.1° so the cache key
+        // and the SQL box match. Radius queries keep the exact URL.
+        const prepared = prepareAreaQuery(url, geo, true);
         if (!debug) {
-          const cached = await matchCachedGet(request, corsHeaders);
+          const cached = await matchCachedGet(
+            request,
+            corsHeaders,
+            prepared.cacheUrl ?? undefined
+          );
           if (cached) return cached;
         }
+        if (geo.empty) {
+          return cachedJsonResponse(
+            request,
+            corsHeaders,
+            '[]',
+            'public, max-age=60, s-maxage=180',
+            withDebugRows({}, tracker, debug),
+            prepared.cacheUrl ?? undefined
+          );
+        }
 
-        const geoBounds = buildGeoBounds(
-          url.searchParams.get('lat'),
-          url.searchParams.get('lng'),
-          url.searchParams.get('radiusMiles')
-        );
         const maxDays = parseDaysLimit(url.searchParams.get('days'), 7);
         const deadzoneMaxDays = parseDaysLimit(
           url.searchParams.get('deadzoneDays'),
@@ -418,7 +520,8 @@ export default {
             corsHeaders,
             body,
             'public, max-age=60, s-maxage=180',
-            withDebugRows({}, tracker, debug)
+            withDebugRows({}, tracker, debug),
+            prepared.cacheUrl ?? undefined
           );
         }
 
@@ -430,36 +533,14 @@ export default {
           });
         }
 
-        const geoWhere = geoBounds == null
-          ? ''
-          : `
-            AND latitude BETWEEN ? AND ?
-            AND longitude BETWEEN ? AND ?
-          `;
         // Use timestamp range (index-friendly) instead of date(...) IN (...).
-        const scans = trackMeta(
-          tracker,
-          await env.DB.prepare(`
-          SELECT radioId, timestamp, latitude, longitude, nodes
-          FROM scans
-          WHERE timestamp >= ? AND timestamp <= ?
-          ${geoWhere}
-          ORDER BY timestamp ASC
-        `)
-          .bind(
-            range.minTs,
-            range.maxTs,
-            ...(geoBounds == null
-              ? []
-              : [
-                  geoBounds.minLat,
-                  geoBounds.maxLat,
-                  geoBounds.minLng,
-                  geoBounds.maxLng,
-                ])
-          )
-          .all()
-        );
+        const coverageQueries = buildCoverageQueries({
+          ranges: prepared.ranges,
+          minTs: range.minTs,
+          maxTs: range.maxTs,
+        });
+        let scanRows = await readAreaQueries(env, tracker, coverageQueries);
+        if (coverageQueries.length > 1) scanRows = dedupeCoverageRows(scanRows);
 
         const selectedDaySet = new Set(selectedDays);
         const selectedDeadzoneDaySet = new Set(selectedDeadzoneDays);
@@ -483,8 +564,16 @@ type CoverageAgg = {
         };
 
         const zoneMap = new Map<string, CoverageAgg>();
+        const capZones = geo.kind === 'bbox' || geo.kind === 'division';
+        let coverageTruncated = false;
 
-        for (const row of scans.results as StoredScanRow[]) {
+        for (const row of scanRows) {
+          if (
+            polygon.ring &&
+            !pointInRing(Number(row.longitude), Number(row.latitude), polygon.ring)
+          ) {
+            continue;
+          }
           const nodes = parseNodeEntries(row.nodes);
           const rowDay = new Date(Number(row.timestamp || 0))
             .toISOString()
@@ -505,6 +594,11 @@ type CoverageAgg = {
           const id = `${snapLat.toFixed(6)}:${snapLng.toFixed(6)}`;
           let agg = zoneMap.get(id);
           if (!agg) {
+            const decision = coverageZoneAccepted(zoneMap.size, true, capZones);
+            if (!decision.accept) {
+              coverageTruncated = true;
+              break;
+            }
             agg = {
               id,
               centerLat: snapLat,
@@ -566,23 +660,48 @@ type CoverageAgg = {
         }));
 
         const body = JSON.stringify(zones);
+        const coverageExtra = withDebugRows(
+          coverageTruncated ? { 'X-Coverage-Truncated': '1' } : {},
+          tracker,
+          debug
+        );
+        // A truncated map is partial. Do not store it.
+        if (coverageTruncated) {
+          return new Response(body, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-store',
+              ...coverageExtra,
+            },
+          });
+        }
         return cachedJsonResponse(
           request,
           corsHeaders,
           body,
           'public, max-age=60, s-maxage=180',
-          withDebugRows({}, tracker, debug)
+          coverageExtra,
+          prepared.cacheUrl ?? undefined
         );
       }
 
       // Fetch scans for a specific day (NDJSON format)
       if (url.pathname.startsWith('/history/') && request.method === 'GET') {
         const day = url.pathname.split('/')[2].replace('.ndjson', '');
-        const geoBounds = buildGeoBounds(
-          url.searchParams.get('lat'),
-          url.searchParams.get('lng'),
-          url.searchParams.get('radiusMiles')
-        );
+        // Validate date format (YYYY-MM-DD)
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return new Response(JSON.stringify({ error: 'Invalid date format' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const geo = resolveGeoBounds(url);
+        if (geo.error) return withCorsResponse(geo.error, corsHeaders);
+        const polygon = parsePolygon(url.searchParams.get('polygon'));
+        if (polygon.error) return withCorsResponse(polygon.error, corsHeaders);
+
         const deadzoneMaxDays = parseDaysLimit(
           url.searchParams.get('deadzoneDays'),
           0
@@ -593,78 +712,45 @@ type CoverageAgg = {
         const cursorTimestampRaw = Number.parseInt(url.searchParams.get('cursorTimestamp') || '', 10);
         const cursorIdRaw = Number.parseInt(url.searchParams.get('cursorId') || '', 10);
         const hasCursor = Number.isFinite(cursorTimestampRaw) && Number.isFinite(cursorIdRaw);
-        
-        // Validate date format (YYYY-MM-DD)
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return new Response(JSON.stringify({ error: 'Invalid date format' }), {
-            status: 400,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
+        // First page of a bbox/division query is cached under the rounded key.
+        // Cursor pages and radius/worldwide history stay uncached, as before.
+        const prepared = prepareAreaQuery(url, geo, !hasCursor);
+        if (prepared.cacheUrl && !debug) {
+          const cached = await matchCachedGet(request, corsHeaders, prepared.cacheUrl);
+          if (cached) return cached;
+        }
+
+        const historyHeaders = (hasMore: boolean): Record<string, string> => withDebugRows({
+          ...corsHeaders,
+          'Content-Type': 'application/x-ndjson',
+          'Cache-Control': 'public, max-age=120, s-maxage=300',
+          'X-Page-Size': `${pageSize}`,
+          'X-Has-More': hasMore ? '1' : '0',
+        }, tracker, debug);
+
+        if (geo.empty) {
+          const response = new Response('', { headers: historyHeaders(false) });
+          if (prepared.cacheUrl && !debug) {
+            storeCachedGet(cacheKeyRequest(request, prepared.cacheUrl), response);
+          }
+          return response;
         }
 
         // Calculate Unix timestamps for the day range (full UTC day, ms-inclusive).
         // BUGFIX: old T23:59:59Z dropped timestamps with ms > 0 in the last second.
         const dayStart = new Date(day + 'T00:00:00Z').getTime();
         const dayEnd = dayStart + 86_400_000 - 1;
-
-        const geoWhere = geoBounds == null
-          ? ''
-          : `
-                AND latitude BETWEEN ? AND ?
-                AND longitude BETWEEN ? AND ?
-            `;
-        const scans = trackMeta(
-          tracker,
-          hasCursor
-          ? await env.DB.prepare(`
-              SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
-              FROM scans
-              WHERE timestamp >= ? AND timestamp <= ?
-              ${geoWhere}
-                AND (timestamp > ? OR (timestamp = ? AND id > ?))
-              ORDER BY timestamp ASC, id ASC
-              LIMIT ?
-            `)
-              .bind(
-                dayStart,
-                dayEnd,
-                ...(geoBounds == null
-                  ? []
-                  : [
-                      geoBounds.minLat,
-                      geoBounds.maxLat,
-                      geoBounds.minLng,
-                      geoBounds.maxLng,
-                    ]),
-                cursorTimestampRaw,
-                cursorTimestampRaw,
-                cursorIdRaw,
-                pageSize + 1
-              )
-              .all()
-          : await env.DB.prepare(`
-              SELECT id, radioId, timestamp, latitude, longitude, altitude, nodes
-              FROM scans
-              WHERE timestamp >= ? AND timestamp <= ?
-              ${geoWhere}
-              ORDER BY timestamp ASC, id ASC
-              LIMIT ?
-            `)
-              .bind(
-                dayStart,
-                dayEnd,
-                ...(geoBounds == null
-                  ? []
-                  : [
-                      geoBounds.minLat,
-                      geoBounds.maxLat,
-                      geoBounds.minLng,
-                      geoBounds.maxLng,
-                    ]),
-                pageSize + 1
-              )
-              .all()
-        );
+        const historyQueries = buildHistoryQueries({
+          ranges: prepared.ranges,
+          dayStart,
+          dayEnd,
+          pageSize,
+          cursorTimestamp: hasCursor ? cursorTimestampRaw : undefined,
+          cursorId: hasCursor ? cursorIdRaw : undefined,
+        });
+        const fetched = await readAreaQueries(env, tracker, historyQueries);
+        // Multi-range reads are UNION ALL chunks. Merge to one (timestamp, id) page.
+        const merged = mergeHistoryRows([fetched], pageSize);
 
         let includeDeadzonesForDay = true;
         if (deadzoneMaxDays > 0) {
@@ -675,70 +761,49 @@ type CoverageAgg = {
           includeDeadzonesForDay = selectedDeadzoneDays.includes(day);
         }
 
-        const pageRows = scans.results as StoredScanRow[];
-        const hasMore = pageRows.length > pageSize;
-        const rowsForPage = hasMore ? pageRows.slice(0, pageSize) : pageRows;
-        const lastRow = rowsForPage.length > 0 ? rowsForPage[rowsForPage.length - 1] : null;
-
-        // Convert to NDJSON format
-        const ndjsonLines = rowsForPage.flatMap((row) => {
-          const nodes = parseNodeEntries(row.nodes);
-
-          if (nodes.length === 0) {
-            if (!includeDeadzonesForDay) {
-              return [];
-            }
-            return [
-              JSON.stringify({
-                radioId: row.radioId,
-                timestamp: row.timestamp,
-                latitude: row.latitude,
-                longitude: row.longitude,
-                altitude: row.altitude,
-                nodeId: '',
-                senderName: null,
-                receiverName: null,
-                rssi: null,
-                snr: null,
-                snrIn: null,
-                receivedAt: new Date(row.timestamp).toISOString(),
-              }),
-            ];
+        const encoder = new TextEncoder();
+        const chunks: HistoryChunk[] = [];
+        const texts: Array<string | null> = [];
+        for (const row of merged.rows) {
+          if (
+            polygon.ring &&
+            !pointInRing(Number(row.longitude), Number(row.latitude), polygon.ring)
+          ) {
+            chunks.push(null);
+            texts.push(null);
+            continue;
           }
-
-          return nodes.map((node) =>
-            JSON.stringify({
-              radioId: row.radioId,
-              timestamp: row.timestamp,
-              latitude: row.latitude,
-              longitude: row.longitude,
-              altitude: row.altitude,
-              nodeId: typeof node?.nodeId === 'string' ? node.nodeId : '',
-              senderName: typeof node?.name === 'string' ? node.name : null,
-              receiverName: typeof node?.observerName === 'string' ? node.observerName : null,
-              rssi: typeof node?.rssi === 'number' ? node.rssi : null,
-              snr: typeof node?.snr === 'number' ? node.snr : null,
-              snrIn: typeof node?.snrIn === 'number' ? node.snrIn : null,
-              receivedAt: new Date(row.timestamp).toISOString(),
-            })
-          );
-        });
-
-        const ndjson = ndjsonLines.join('\n');
-
-        const historyHeaders: Record<string, string> = withDebugRows({
-          ...corsHeaders,
-          'Content-Type': 'application/x-ndjson',
-          'Cache-Control': 'public, max-age=120, s-maxage=300',
-          'X-Page-Size': `${pageSize}`,
-          'X-Has-More': hasMore ? '1' : '0',
-        }, tracker, debug);
-        if (hasMore && lastRow != null) {
-          historyHeaders['X-Next-Cursor-Timestamp'] = `${lastRow.timestamp}`;
-          historyHeaders['X-Next-Cursor-Id'] = `${lastRow.id ?? 0}`;
+          const lines = scanRowToNdjsonLines(row, includeDeadzonesForDay);
+          if (lines.length === 0) {
+            chunks.push(null);
+            texts.push(null);
+            continue;
+          }
+          const text = lines.join('\n');
+          texts.push(text);
+          chunks.push({ bytes: encoder.encode(text).length });
+        }
+        // X-Has-More follows the SQL page unless the 1 MB budget stops early.
+        // The cursor is the underlying scan, so a polygon-filtered page can be short.
+        const plan = planHistoryPage(chunks, merged.hasMore);
+        const parts: string[] = [];
+        for (let i = 0; i < texts.length; i++) {
+          if (!plan.emit[i] || texts[i] == null) continue;
+          parts.push(texts[i] as string);
+        }
+        const ndjson = parts.join('\n');
+        const cursorRow = plan.cursorIndex >= 0 ? merged.rows[plan.cursorIndex] : null;
+        const headers = historyHeaders(plan.hasMore);
+        if (plan.hasMore && cursorRow != null) {
+          headers['X-Next-Cursor-Timestamp'] = `${cursorRow.timestamp}`;
+          headers['X-Next-Cursor-Id'] = `${cursorRow.id ?? 0}`;
         }
 
-        return new Response(ndjson, { headers: historyHeaders });
+        const response = new Response(ndjson, { headers });
+        if (prepared.cacheUrl && !debug) {
+          storeCachedGet(cacheKeyRequest(request, prepared.cacheUrl), response);
+        }
+        return response;
       }
 
       if (url.pathname === '/maintenance/deadzones/cleanup' && request.method === 'POST') {

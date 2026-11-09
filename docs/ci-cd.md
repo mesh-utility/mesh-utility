@@ -91,6 +91,8 @@ The Worker serves `https://mesh-utility.org/api/*` (the `/api` prefix is strippe
 
 Current release tags are full releases named `Alpha-N`. Obtainium and the in-app updater follow those releases.
 
+Release notes must use these markdown headings so the web Install tab can group them: `## Fixes`, `## Enhancements`, and `## Other`. `## Other changes` is accepted as the same bucket as `## Other`. Put the Updating lines and the Obtainium link under Other, or leave the Obtainium link as the last line. A body with none of those headings is shown entirely under Other changes. Copy [docs/releases/TEMPLATE.md](./releases/TEMPLATE.md). The Discord announcement posts the release body as written; it does not add these headings.
+
 Jobs:
 
 - Android (`flutter build apk --release`), signed with the upload keystore when the secrets above are set

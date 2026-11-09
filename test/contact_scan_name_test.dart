@@ -228,6 +228,52 @@ void main() {
     },
   );
 
+  test('backfill does not attach a name from a weak prefix', () {
+    final state = buildState();
+    const cellNode = '463D3236';
+    const otherLong = '46ABCDEF01234567';
+    state.debugSeedSessionContacts(
+      <String, String>{'46': 'WrongName', otherLong: 'OtherCell'},
+      types: <String, int>{'46': advTypeRepeater, otherLong: advTypeRepeater},
+    );
+    state.rawScans = <RawScan>[
+      scanFor(nodeId: cellNode, senderName: cellNode),
+    ];
+
+    final updated = state.debugBackfillScanNamesFromContacts(<String, String>{
+      '46': 'WrongName',
+      otherLong: 'OtherCell',
+    });
+
+    expect(updated, 0);
+    expect(state.rawScans.single.senderName, cellNode);
+  });
+
+  test('backfill does not attach an ambiguous colliding contact name', () {
+    final state = buildState();
+    state.debugSeedSessionContacts(
+      <String, String>{
+        '1052A93011111111': 'First',
+        '1052A93022222222': 'Second',
+      },
+      types: <String, int>{
+        '1052A93011111111': advTypeRepeater,
+        '1052A93022222222': advTypeRepeater,
+      },
+    );
+    state.rawScans = <RawScan>[
+      scanFor(nodeId: repeaterShort, senderName: repeaterShort),
+    ];
+
+    final updated = state.debugBackfillScanNamesFromContacts(<String, String>{
+      '1052A93011111111': 'First',
+      '1052A93022222222': 'Second',
+    });
+
+    expect(updated, 0);
+    expect(state.rawScans.single.senderName, repeaterShort);
+  });
+
   test('large backfill updates a repeater and strips a chat name', () {
     final state = buildState();
     final contacts = <String, String>{

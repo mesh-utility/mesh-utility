@@ -72,6 +72,11 @@ flutter:
   uses-material-design: true
   assets:
     - assets/app-icon.png
+    - docs/releases/latest.md
+    - assets/boundaries/admin1/index.json
+    - assets/boundaries/admin1/countries/
+    - assets/boundaries/admin2/us/index.json
+    - assets/boundaries/admin2/us/states/
 
 flutter_launcher_icons:
   android: true

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
+import 'package:mesh_utility/src/services/coverage_overview.dart';
 import 'package:mesh_utility/src/services/history_pipeline.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
 
@@ -14,22 +15,91 @@ typedef HttpPostFn =
       Object? body,
     });
 
+/// IMF-fixdate / RFC 1123, for example `Mon, 09 Nov 2026 05:52:01 GMT`.
+final RegExp _rfc1123Date = RegExp(
+  r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(\d{2})\s+'
+  r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+'
+  r'(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT$',
+  caseSensitive: false,
+);
+
+const Map<String, int> _rfc1123Months = <String, int>{
+  'jan': 1,
+  'feb': 2,
+  'mar': 3,
+  'apr': 4,
+  'may': 5,
+  'jun': 6,
+  'jul': 7,
+  'aug': 8,
+  'sep': 9,
+  'oct': 10,
+  'nov': 11,
+  'dec': 12,
+};
+
+/// Parses an HTTP `Date` header. RFC 1123 is tried first. ISO-8601 still works.
+///
+/// Returns null for an empty or unrecognized value. Does not import `dart:io`.
+DateTime? parseHttpDateHeader(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return null;
+  final rfc = _rfc1123Date.firstMatch(trimmed);
+  if (rfc != null) {
+    final day = int.parse(rfc.group(1)!);
+    final month = _rfc1123Months[rfc.group(2)!.toLowerCase()];
+    final year = int.parse(rfc.group(3)!);
+    final hour = int.parse(rfc.group(4)!);
+    final minute = int.parse(rfc.group(5)!);
+    final second = int.parse(rfc.group(6)!);
+    if (month == null ||
+        hour > 23 ||
+        minute > 59 ||
+        second > 59 ||
+        day < 1) {
+      return null;
+    }
+    final parsed = DateTime.utc(year, month, day, hour, minute, second);
+    if (parsed.year != year || parsed.month != month || parsed.day != day) {
+      return null;
+    }
+    return parsed;
+  }
+  return DateTime.tryParse(trimmed)?.toUtc();
+}
+
 Map<String, String> _queryWithOptionalArea({
   Map<String, String>? base,
   double? centerLat,
   double? centerLng,
   int? radiusMiles,
+  double? minLatitude,
+  double? maxLatitude,
+  double? minLongitude,
+  double? maxLongitude,
 }) {
   final query = <String, String>{...?base};
-  if (centerLat == null ||
-      centerLng == null ||
-      radiusMiles == null ||
-      radiusMiles <= 0) {
-    return query;
+  if (centerLat != null &&
+      centerLng != null &&
+      radiusMiles != null &&
+      radiusMiles > 0) {
+    query['lat'] = centerLat.toStringAsFixed(6);
+    query['lng'] = centerLng.toStringAsFixed(6);
+    query['radiusMiles'] = '$radiusMiles';
   }
-  query['lat'] = centerLat.toStringAsFixed(6);
-  query['lng'] = centerLng.toStringAsFixed(6);
-  query['radiusMiles'] = '$radiusMiles';
+  if (minLatitude != null &&
+      maxLatitude != null &&
+      minLongitude != null &&
+      maxLongitude != null &&
+      minLatitude.isFinite &&
+      maxLatitude.isFinite &&
+      minLongitude.isFinite &&
+      maxLongitude.isFinite) {
+    query['minLat'] = minLatitude.toStringAsFixed(6);
+    query['maxLat'] = maxLatitude.toStringAsFixed(6);
+    query['minLng'] = minLongitude.toStringAsFixed(6);
+    query['maxLng'] = maxLongitude.toStringAsFixed(6);
+  }
   return query;
 }
 
@@ -96,10 +166,17 @@ class WorkerApi {
     return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
 
+  /// Browsers hide `Date` unless CORS exposes it. A missing header leaves
+  /// the anchor unset. Reading the header must not throw.
   void _captureServerDate(http.Response response) {
-    final raw = response.headers['date'];
+    String? raw;
+    try {
+      raw = response.headers['date'];
+    } catch (_) {
+      return;
+    }
     if (raw == null || raw.trim().isEmpty) return;
-    final parsed = DateTime.tryParse(raw);
+    final parsed = parseHttpDateHeader(raw);
     if (parsed == null) return;
     _lastServerDateUtc = parsed.toUtc();
   }
@@ -257,6 +334,49 @@ class WorkerApi {
     return decoded.map((e) => e.toString()).toList();
   }
 
+  /// True when `/health` answers. Travel downloads use this so a dead network
+  /// does not start a fetch. Offline Mode is checked by the caller first.
+  Future<bool> canReach() async {
+    try {
+      final response = await _getWithFallback(
+        '/health',
+        accept: (response) =>
+            response.statusCode == 200 && _looksLikeJsonResponse(response),
+      );
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Coarse worldwide coverage. Null on 404, a non-JSON body, or a dead network
+  /// so an older Worker is skipped instead of failing startup.
+  Future<CoverageOverview?> fetchCoverageOverview() async {
+    Object? lastError;
+    for (final base in _baseUrls) {
+      try {
+        final response = await _httpGet(
+          _uri(base, '/coverage/overview'),
+        ).timeout(const Duration(seconds: 15));
+        _captureServerDate(response);
+        if (response.statusCode == 404) continue;
+        if (response.statusCode == 200 && _looksLikeJsonResponse(response)) {
+          final decoded = jsonDecode(_decodeUtf8(response));
+          return parseCoverageOverview(
+            decoded,
+            fetchedAt: DateTime.now().toUtc(),
+          );
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError != null) {
+      return null;
+    }
+    return null;
+  }
+
   Future<List<RawScan>> fetchRawScans({
     int historyDays = 7,
     int deadzoneDays = 7,
@@ -264,6 +384,10 @@ class WorkerApi {
     double? centerLat,
     double? centerLng,
     int? radiusMiles,
+    double? minLatitude,
+    double? maxLatitude,
+    double? minLongitude,
+    double? maxLongitude,
     bool markDownloaded = false,
     void Function(int completedDays, int totalDays)? onDayProgress,
     bool Function()? isCancelled,
@@ -294,6 +418,10 @@ class WorkerApi {
           centerLat: centerLat,
           centerLng: centerLng,
           radiusMiles: radiusMiles,
+          minLatitude: minLatitude,
+          maxLatitude: maxLatitude,
+          minLongitude: minLongitude,
+          maxLongitude: maxLongitude,
           markDownloaded: markDownloaded,
           isCancelled: isCancelled,
         );
@@ -323,6 +451,10 @@ class WorkerApi {
     double? centerLat,
     double? centerLng,
     int? radiusMiles,
+    double? minLatitude,
+    double? maxLatitude,
+    double? minLongitude,
+    double? maxLongitude,
   }) async {
     _normalizeRadioId8(connectedRadioId);
     final query = _queryWithOptionalArea(
@@ -333,6 +465,10 @@ class WorkerApi {
       centerLat: centerLat,
       centerLng: centerLng,
       radiusMiles: radiusMiles,
+      minLatitude: minLatitude,
+      maxLatitude: maxLatitude,
+      minLongitude: minLongitude,
+      maxLongitude: maxLongitude,
     );
     if (_staticHistoryReady) {
       try {
@@ -386,6 +522,10 @@ class WorkerApi {
     double? centerLat,
     double? centerLng,
     int? radiusMiles,
+    double? minLatitude,
+    double? maxLatitude,
+    double? minLongitude,
+    double? maxLongitude,
     bool markDownloaded = false,
     bool Function()? isCancelled,
   }) async {
@@ -415,6 +555,10 @@ class WorkerApi {
       centerLat: centerLat,
       centerLng: centerLng,
       radiusMiles: radiusMiles,
+      minLatitude: minLatitude,
+      maxLatitude: maxLatitude,
+      minLongitude: minLongitude,
+      maxLongitude: maxLongitude,
     );
     final all = <RawScan>[];
     int? cursorTimestamp;

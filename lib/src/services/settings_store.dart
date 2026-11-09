@@ -1,5 +1,7 @@
-import 'package:mesh_utility/src/services/reax_database.dart';
 import 'package:mesh_utility/src/config/app_config.dart';
+import 'package:mesh_utility/src/services/hex_coverage_aggregate.dart';
+import 'package:mesh_utility/src/services/reax_database.dart';
+import 'package:mesh_utility/src/services/scan_cache_area.dart';
 
 class AppSettings {
   const AppSettings({
@@ -25,6 +27,14 @@ class AppSettings {
     required this.knownBleDeviceIds,
     required this.knownBleDeviceNames,
     required this.contactsByRadioId,
+    required this.scanCacheMode,
+    required this.scanCacheRadiusMiles,
+    required this.scanCacheAdmin1Ids,
+    required this.scanCacheAdmin2Ids,
+    required this.travelDownloadEnabled,
+    required this.travelRadiusMiles,
+    required this.travelAnchors,
+    required this.maxHexScale,
   });
 
   final String workerUrl;
@@ -50,11 +60,34 @@ class AppSettings {
   final Map<String, String> knownBleDeviceNames;
   final Map<String, Map<String, String>> contactsByRadioId;
 
+  /// `radius`, `admin1`, `admin2`, or `global`. Default is radius.
+  final String scanCacheMode;
+
+  /// Discrete mile choice. Distance tests convert this to kilometers.
+  final int scanCacheRadiusMiles;
+  final List<String> scanCacheAdmin1Ids;
+  final List<String> scanCacheAdmin2Ids;
+
+  /// When on, a device outside the cache area downloads a small bubble.
+  /// Global ignores this. Default is off.
+  final bool travelDownloadEnabled;
+
+  /// 10, 25, or 50 miles. Default is 25.
+  final int travelRadiusMiles;
+
+  /// Newest travel centers, each kept for 30 days, capped at 8.
+  final List<TravelAreaAnchor> travelAnchors;
+
+  /// Largest coverage parent when the map is zoomed out.
+  ///
+  /// One of [mapHexScaleSteps]. Default [mapHexMaxScale] keeps today's cap.
+  final int maxHexScale;
+
   static const defaults = AppSettings(
     workerUrl: AppConfig.deployedWorkerUrl,
     historyDays: 7,
     deadzoneDays: 7,
-    syncRadiusMiles: 0,
+    syncRadiusMiles: defaultScanCacheRadiusMiles,
     privacyAccepted: false,
     scanIntervalSeconds: 40,
     discoverWaitSeconds: 40,
@@ -73,13 +106,20 @@ class AppSettings {
     knownBleDeviceIds: <String>[],
     knownBleDeviceNames: <String, String>{},
     contactsByRadioId: <String, Map<String, String>>{},
+    scanCacheMode: scanCacheModeRadius,
+    scanCacheRadiusMiles: defaultScanCacheRadiusMiles,
+    scanCacheAdmin1Ids: <String>[],
+    scanCacheAdmin2Ids: <String>[],
+    travelDownloadEnabled: false,
+    travelRadiusMiles: defaultTravelRadiusMiles,
+    travelAnchors: <TravelAreaAnchor>[],
+    maxHexScale: mapHexMaxScale,
   );
 
   AppSettings copyWith({
     String? workerUrl,
     int? historyDays,
     int? deadzoneDays,
-    int? syncRadiusMiles,
     bool? privacyAccepted,
     int? scanIntervalSeconds,
     int? discoverWaitSeconds,
@@ -98,13 +138,26 @@ class AppSettings {
     List<String>? knownBleDeviceIds,
     Map<String, String>? knownBleDeviceNames,
     Map<String, Map<String, String>>? contactsByRadioId,
+    String? scanCacheMode,
+    int? scanCacheRadiusMiles,
+    List<String>? scanCacheAdmin1Ids,
+    List<String>? scanCacheAdmin2Ids,
+    bool? travelDownloadEnabled,
+    int? travelRadiusMiles,
+    List<TravelAreaAnchor>? travelAnchors,
+    int? maxHexScale,
   }) {
+    final nextMode = clampScanCacheMode(scanCacheMode ?? this.scanCacheMode);
+    final nextRadius = clampScanCacheRadiusMiles(
+      scanCacheRadiusMiles ?? this.scanCacheRadiusMiles,
+    );
     return AppSettings(
       workerUrl: workerUrl ?? this.workerUrl,
       historyDays: historyDays ?? this.historyDays,
       deadzoneDays: deadzoneDays ?? this.deadzoneDays,
-      syncRadiusMiles: _clampSyncRadiusMiles(
-        syncRadiusMiles ?? this.syncRadiusMiles,
+      syncRadiusMiles: legacySyncRadiusMilesForReaders(
+        mode: nextMode,
+        scanCacheRadiusMiles: nextRadius,
       ),
       privacyAccepted: privacyAccepted ?? this.privacyAccepted,
       scanIntervalSeconds: scanIntervalSeconds ?? this.scanIntervalSeconds,
@@ -127,6 +180,17 @@ class AppSettings {
       knownBleDeviceIds: knownBleDeviceIds ?? this.knownBleDeviceIds,
       knownBleDeviceNames: knownBleDeviceNames ?? this.knownBleDeviceNames,
       contactsByRadioId: contactsByRadioId ?? this.contactsByRadioId,
+      scanCacheMode: nextMode,
+      scanCacheRadiusMiles: nextRadius,
+      scanCacheAdmin1Ids: scanCacheAdmin1Ids ?? this.scanCacheAdmin1Ids,
+      scanCacheAdmin2Ids: scanCacheAdmin2Ids ?? this.scanCacheAdmin2Ids,
+      travelDownloadEnabled:
+          travelDownloadEnabled ?? this.travelDownloadEnabled,
+      travelRadiusMiles: clampTravelRadiusMiles(
+        travelRadiusMiles ?? this.travelRadiusMiles,
+      ),
+      travelAnchors: travelAnchors ?? this.travelAnchors,
+      maxHexScale: clampMaxHexScale(maxHexScale ?? this.maxHexScale),
     );
   }
 
@@ -135,7 +199,10 @@ class AppSettings {
       'workerUrl': workerUrl,
       'historyDays': historyDays,
       'deadzoneDays': deadzoneDays,
-      'syncRadiusMiles': syncRadiusMiles,
+      'syncRadiusMiles': legacySyncRadiusMilesForReaders(
+        mode: scanCacheMode,
+        scanCacheRadiusMiles: scanCacheRadiusMiles,
+      ),
       'privacyAccepted': privacyAccepted,
       'scanIntervalSeconds': scanIntervalSeconds,
       'discoverWaitSeconds': discoverWaitSeconds,
@@ -154,18 +221,30 @@ class AppSettings {
       'knownBleDeviceIds': knownBleDeviceIds,
       'knownBleDeviceNames': knownBleDeviceNames,
       'contactsByRadioId': contactsByRadioId,
+      'scanCacheMode': scanCacheMode,
+      'scanCacheRadiusMiles': scanCacheRadiusMiles,
+      'scanCacheAdmin1Ids': scanCacheAdmin1Ids,
+      'scanCacheAdmin2Ids': scanCacheAdmin2Ids,
+      'travelDownloadEnabled': travelDownloadEnabled,
+      'travelRadiusMiles': travelRadiusMiles,
+      'travelAnchors': <Map<String, Object>>[
+        for (final anchor in travelAnchors) anchor.toJson(),
+      ],
+      'maxHexScale': maxHexScale,
     };
   }
 
   static AppSettings fromJson(Map<String, dynamic> json) {
+    final migrated = _cacheAreaFromJson(json);
     return AppSettings(
       workerUrl: (json['workerUrl'] as String?) ?? defaults.workerUrl,
       historyDays:
           (json['historyDays'] as num?)?.toInt() ?? defaults.historyDays,
       deadzoneDays:
           (json['deadzoneDays'] as num?)?.toInt() ?? defaults.deadzoneDays,
-      syncRadiusMiles: _clampSyncRadiusMiles(
-        (json['syncRadiusMiles'] as num?)?.toInt() ?? defaults.syncRadiusMiles,
+      syncRadiusMiles: legacySyncRadiusMilesForReaders(
+        mode: migrated.mode,
+        scanCacheRadiusMiles: migrated.radiusMiles,
       ),
       privacyAccepted:
           (json['privacyAccepted'] as bool?) ?? defaults.privacyAccepted,
@@ -226,19 +305,92 @@ class AppSettings {
             ),
           ) ??
           const {},
+      scanCacheMode: migrated.mode,
+      scanCacheRadiusMiles: migrated.radiusMiles,
+      scanCacheAdmin1Ids: _stringIdList(json['scanCacheAdmin1Ids']),
+      scanCacheAdmin2Ids: _stringIdList(json['scanCacheAdmin2Ids']),
+      travelDownloadEnabled:
+          (json['travelDownloadEnabled'] as bool?) ??
+          defaults.travelDownloadEnabled,
+      travelRadiusMiles: clampTravelRadiusMiles(
+        (json['travelRadiusMiles'] as num?)?.toInt() ??
+            defaultTravelRadiusMiles,
+      ),
+      travelAnchors: _travelAnchors(json['travelAnchors']),
+      maxHexScale: _maxHexScaleFromJson(json['maxHexScale']),
     );
+  }
+
+  /// Missing or non-numeric values stay on [mapHexMaxScale]. Other numbers
+  /// snap to the nearest allowed step.
+  static int _maxHexScaleFromJson(Object? raw) {
+    if (raw is num && raw.isFinite) return clampMaxHexScale(raw.round());
+    if (raw is String) {
+      final parsed = num.tryParse(raw.trim());
+      if (parsed != null && parsed.isFinite) {
+        return clampMaxHexScale(parsed.round());
+      }
+    }
+    return mapHexMaxScale;
+  }
+
+  /// Scan-cache keys win. A file that only has `syncRadiusMiles` migrates:
+  /// 0 becomes Global, and any positive radius becomes the smallest allowed
+  /// cache radius that is not smaller than that value. A file with neither
+  /// is a new install: Radius 50.
+  static ({String mode, int radiusMiles}) _cacheAreaFromJson(
+    Map<String, dynamic> json,
+  ) {
+    if (settingsJsonHasScanCache(json)) {
+      return (
+        mode: clampScanCacheMode(
+          json['scanCacheMode'] is String
+              ? json['scanCacheMode'] as String
+              : null,
+        ),
+        radiusMiles: clampScanCacheRadiusMiles(
+          (json['scanCacheRadiusMiles'] as num?)?.toInt() ??
+              defaultScanCacheRadiusMiles,
+        ),
+      );
+    }
+    if (json.containsKey('syncRadiusMiles')) {
+      final raw = (json['syncRadiusMiles'] as num?)?.toInt() ?? 0;
+      return scanCacheFromLegacySyncRadius(raw);
+    }
+    return (
+      mode: scanCacheModeRadius,
+      radiusMiles: defaultScanCacheRadiusMiles,
+    );
+  }
+
+  static List<TravelAreaAnchor> _travelAnchors(Object? raw) {
+    if (raw is! List) return const <TravelAreaAnchor>[];
+    final anchors = <TravelAreaAnchor>[];
+    for (final item in raw) {
+      final anchor = TravelAreaAnchor.fromJson(item);
+      if (anchor != null) anchors.add(anchor);
+    }
+    return List<TravelAreaAnchor>.unmodifiable(anchors);
+  }
+
+  static List<String> _stringIdList(Object? raw) {
+    if (raw is! List) return const <String>[];
+    final seen = <String>{};
+    final ids = <String>[];
+    for (final item in raw) {
+      if (item is! String) continue;
+      final id = item.trim();
+      if (id.isEmpty || !seen.add(id)) continue;
+      ids.add(id);
+    }
+    return List<String>.unmodifiable(ids);
   }
 
   static int _clampDiscoverWaitSeconds(int value) {
     if (value < 5) return 5;
     if (value > 120) return 120;
     return value;
-  }
-
-  static int _clampSyncRadiusMiles(int value) {
-    const allowed = <int>{0, 10, 25, 50, 100, 250};
-    if (allowed.contains(value)) return value;
-    return defaults.syncRadiusMiles;
   }
 
   static int _clampUploadBatchIntervalMinutes(int value) {
@@ -288,5 +440,23 @@ class SettingsStore {
   Future<void> save(AppSettings settings) async {
     final db = await ReaxDatabase.instance();
     await db.put(_settingsKey, settings.toJson());
+  }
+
+  static const _batteryOptimizationPromptAskedKey =
+      'settings:batteryOptimizationPromptAsked';
+
+  /// True after the scan-loop battery prompt has been shown once.
+  ///
+  /// Stored beside app settings so a "Not now" is not asked again. Already
+  /// unrestricted installs never set this; the status check skips the dialog.
+  Future<bool> batteryOptimizationPromptAsked() async {
+    final db = await ReaxDatabase.instance();
+    final raw = await db.get(_batteryOptimizationPromptAskedKey);
+    return raw == true;
+  }
+
+  Future<void> markBatteryOptimizationPromptAsked() async {
+    final db = await ReaxDatabase.instance();
+    await db.put(_batteryOptimizationPromptAskedKey, true);
   }
 }

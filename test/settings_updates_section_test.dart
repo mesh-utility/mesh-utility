@@ -7,6 +7,7 @@ void main() {
   Future<void> pumpSettings(
     WidgetTester tester, {
     Future<void> Function()? onCheckForUpdates,
+    Future<void> Function(AppSettings value)? onChanged,
     String? updateStatusMessage,
     bool updateChecking = false,
     String currentVersionLabel = 'Alpha-18',
@@ -20,7 +21,7 @@ void main() {
         home: Scaffold(
           body: SettingsPage(
             settings: AppSettings.defaults,
-            onChanged: (_) async {},
+            onChanged: onChanged ?? (_) async {},
             onSync: () async {},
             syncing: false,
             localScanCount: 0,
@@ -57,10 +58,16 @@ void main() {
     tester,
   ) async {
     await pumpSettings(tester);
-    expect(find.text('History & Sync'), findsOneWidget);
+    expect(find.text('Radio / Connection'), findsOneWidget);
+    expect(find.text('Scanning'), findsOneWidget);
+    expect(find.text('Map & Display'), findsOneWidget);
+    expect(find.text('Data & Cache'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
+    expect(find.text('Sync Download Scope'), findsNothing);
+    expect(find.text('History & Sync'), findsNothing);
     expect(find.text('App updates'), findsNothing);
     expect(find.text('Check for updates'), findsNothing);
-    expect(find.text('Current version: Alpha-18'), findsNothing);
+    expect(find.text('Current version: Alpha-18'), findsOneWidget);
   });
 
   testWidgets('App updates section shows the current alpha above the button', (
@@ -100,7 +107,7 @@ void main() {
       findsNothing,
     );
     expect(
-      find.descendant(of: updatesCard, matching: find.text('History & Sync')),
+      find.descendant(of: updatesCard, matching: find.text('Data & Cache')),
       findsNothing,
     );
 
@@ -123,5 +130,32 @@ void main() {
       find.widgetWithText(OutlinedButton, 'Checking for updates…'),
     );
     expect(button.onPressed, isNull);
+  });
+
+  testWidgets('Map & Display slider sets the max hex size', (tester) async {
+    AppSettings? saved;
+    await pumpSettings(
+      tester,
+      onChanged: (value) async {
+        saved = value;
+      },
+    );
+
+    expect(find.text('Max hex size when zoomed out: ~19.5 mi'), findsOneWidget);
+    expect(find.textContaining('cells near the edges'), findsOneWidget);
+    final slider = tester.widget<Slider>(
+      find.byKey(const Key('maxHexScaleSlider')),
+    );
+    expect(slider.min, 0);
+    expect(slider.max, 8);
+    expect(slider.divisions, 8);
+    expect(slider.value, 8);
+    expect(slider.label, '~19.5 mi');
+
+    slider.onChanged!(0);
+    expect(saved, isNotNull);
+    expect(saved!.maxHexScale, 1);
+    slider.onChanged!(4);
+    expect(saved!.maxHexScale, 16);
   });
 }

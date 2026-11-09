@@ -42,6 +42,7 @@
 - Keep sync time anchored to trusted internet/server time where required.
 - Preserve offline-first behavior and explicit offline mode semantics.
 - Treat worker as source for cloud history; local store as source for unsynced scans.
+- Area downloads send `minLat`/`maxLat`/`minLng`/`maxLng` when the cache is a state, county, or a radius above 250 miles. Older workers ignore those keys and cap `radiusMiles` at 250. Do not import `dart:io` from shared client code.
 
 ## Logging and Diagnostics
 

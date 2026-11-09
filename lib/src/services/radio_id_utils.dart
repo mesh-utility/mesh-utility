@@ -5,15 +5,42 @@ String normalizeHexId(String value) {
   return value.toUpperCase().replaceAll(RegExp(r'[^0-9A-F]'), '');
 }
 
-/// Returns true when two hex IDs likely refer to the same device (either one
-/// is a prefix/suffix of the other, or they share the first 8 characters).
+/// Minimum hex characters needed before a prefix is treated as a radio id.
+const int minHexIdMatchLength = 8;
+
+/// Returns true when two hex IDs likely refer to the same radio.
+///
+/// Exact equality always matches. A prefix match is allowed only when the
+/// shorter id is at least [minHexIdMatchLength] characters, so an 8-char
+/// scan id matches that radio's longer public-key prefix, while a 1-byte
+/// path hash cannot claim every contact that starts with the same byte.
+/// Two longer keys that merely share an 8-char prefix are different radios.
 bool idsLikelySameDevice(String a, String b) {
   if (a.isEmpty || b.isEmpty) return false;
   if (a == b) return true;
-  if (a.startsWith(b) || b.startsWith(a)) return true;
-  final a8 = a.length >= 8 ? a.substring(0, 8) : a;
-  final b8 = b.length >= 8 ? b.substring(0, 8) : b;
-  return a8 == b8;
+  final minLen = a.length < b.length ? a.length : b.length;
+  if (minLen < minHexIdMatchLength) return false;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/// True when every hex id is the same radio: each is a prefix of the longest.
+///
+/// Two 16-char keys that only share an 8-char prefix are different radios,
+/// so an 8-char scan id that matches both is ambiguous.
+bool hexIdsAreOneRadio(Iterable<String> hexes) {
+  String? longest;
+  var count = 0;
+  for (final hex in hexes) {
+    if (hex.isEmpty) continue;
+    count += 1;
+    if (longest == null || hex.length > longest.length) longest = hex;
+  }
+  if (count <= 1 || longest == null) return true;
+  for (final hex in hexes) {
+    if (hex.isEmpty) continue;
+    if (hex != longest && !longest.startsWith(hex)) return false;
+  }
+  return true;
 }
 
 /// Returns a normalised 8-char mesh radio ID, or null when [value] looks like
@@ -152,12 +179,13 @@ void putResolvedNodeLabel(
 ///
 /// Skips ID-shaped placeholders and, when several keys match the same radio,
 /// prefers the longest public-key prefix so a short ID entry cannot hide a
-/// longer contact key.
+/// longer contact key. Returns null when more than one radio matches, so a
+/// short or colliding prefix cannot show the wrong contact name.
 String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
   if (names.isEmpty || nodeId.trim().isEmpty) return null;
   final target = normalizeHexId(nodeId);
-  String? best;
-  var bestLen = -1;
+  final matchedHex = <String>[];
+  final matchedName = <String>[];
   for (final entry in names.entries) {
     final rawKey = entry.key.trim();
     if (rawKey.isEmpty) continue;
@@ -168,10 +196,18 @@ String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
     if (!same) continue;
     final name = entry.value.trim();
     if (name.isEmpty || isPlaceholderNodeName(name, nodeId)) continue;
-    final rank = key.isEmpty ? rawKey.length : key.length;
+    matchedHex.add(key.isEmpty ? rawKey : key);
+    matchedName.add(name);
+  }
+  if (matchedName.isEmpty) return null;
+  if (!hexIdsAreOneRadio(matchedHex)) return null;
+  String? best;
+  var bestLen = -1;
+  for (var i = 0; i < matchedName.length; i++) {
+    final rank = matchedHex[i].length;
     if (rank > bestLen) {
       bestLen = rank;
-      best = name;
+      best = matchedName[i];
     }
   }
   return best;

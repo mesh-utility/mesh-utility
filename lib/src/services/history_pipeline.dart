@@ -239,6 +239,7 @@ RawScan _withSanitizedDeadzoneRadio(RawScan scan, String? connectedRadioId) {
     receiverName: scan.receiverName,
     radioId: null,
     downloadedFromWorker: scan.downloadedFromWorker,
+    locallyRecorded: scan.locallyRecorded,
   );
 }
 
@@ -322,16 +323,23 @@ MergedScanHistory mergeWorkerAndLocalScans({
       preservedLocal += 1;
       continue;
     }
-    final workerName = (existing.senderName ?? '').trim();
+    var next = existing;
+    if (local.locallyRecorded && !next.locallyRecorded) {
+      next = next.copyWith(locallyRecorded: true);
+    }
+    final workerName = (next.senderName ?? '').trim();
     final localName = (local.senderName ?? '').trim();
     final workerIsPlaceholder =
         workerName.isEmpty ||
-        isPlaceholderNodeName(workerName, existing.nodeId ?? '');
+        isPlaceholderNodeName(workerName, next.nodeId ?? '');
     final localIsPlaceholder =
         localName.isEmpty ||
         isPlaceholderNodeName(localName, local.nodeId ?? '');
     if (workerIsPlaceholder && !localIsPlaceholder) {
-      merged[key] = existing.copyWith(senderName: localName);
+      next = next.copyWith(senderName: localName);
+    }
+    if (!identical(next, existing)) {
+      merged[key] = next;
     }
   }
 

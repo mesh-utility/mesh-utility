@@ -53,6 +53,22 @@ const List<HexZoomBand> mapHexZoomBands = <HexZoomBand>[
   HexZoomBand(mapHexMaxScaleZoom, mapHexMaxScale),
 ];
 
+/// Parent scales the map and the settings slider share, finest first.
+///
+/// [mapHexMaxScale] stays the hard ceiling. A stored max may pick any step
+/// at or below it.
+const List<int> mapHexScaleSteps = <int>[
+  1,
+  2,
+  4,
+  8,
+  16,
+  32,
+  64,
+  128,
+  mapHexMaxScale,
+];
+
 /// Heard filtered cells ÷ all filtered cells in the cluster.
 ///
 /// The denominator is not the number of fine hexes that could fit in the
@@ -76,22 +92,34 @@ String formatCoverageFraction({
   return '$safeHeard/$filteredChildren heard ($percent%)';
 }
 
-int hexClusterScaleForZoom(double zoom) {
+/// Parent scale for [zoom].
+///
+/// [maxScale] is a tighter ceiling than [mapHexMaxScale]. The result is the
+/// band scale, or that ceiling when the band is coarser. Null keeps the hard
+/// ceiling only.
+int hexClusterScaleForZoom(double zoom, {int? maxScale}) {
   final z = zoom.isFinite ? zoom : 0;
+  var scale = _cappedHexScale(mapHexZoomBands.last.scale);
   for (final band in mapHexZoomBands) {
-    if (z >= band.minZoom) return _cappedHexScale(band.scale);
+    if (z >= band.minZoom) {
+      scale = _cappedHexScale(band.scale);
+      break;
+    }
   }
-  return _cappedHexScale(mapHexZoomBands.last.scale);
+  final ceiling = clampMaxHexScale(maxScale);
+  return scale > ceiling ? ceiling : scale;
 }
 
-/// Next coarser parent, or null at [mapHexMaxScale].
+/// Next coarser parent, or null at the ceiling.
 ///
-/// The 700-polygon backstop uses this, so an over-full view cannot grow past
-/// the central-Pennsylvania cell.
-int? coarserHexScale(int scale) {
-  if (scale >= mapHexMaxScale) return null;
+/// The ceiling is [maxScale] when set, otherwise [mapHexMaxScale]. The
+/// 700-polygon backstop uses this, so an over-full view cannot grow past
+/// the user's max or the central-Pennsylvania cell.
+int? coarserHexScale(int scale, {int? maxScale}) {
+  final ceiling = clampMaxHexScale(maxScale);
+  if (scale >= ceiling) return null;
   final doubled = scale < 1 ? 1 : scale * 2;
-  if (doubled > mapHexMaxScale) return null;
+  if (doubled > ceiling) return null;
   return doubled;
 }
 
@@ -99,6 +127,48 @@ int _cappedHexScale(int scale) {
   if (scale < 1) return 1;
   if (scale > mapHexMaxScale) return mapHexMaxScale;
   return scale;
+}
+
+/// Nearest [mapHexScaleSteps] entry.
+///
+/// Null keeps [mapHexMaxScale] so an older settings file stays on today's
+/// cap. A tie lands on the coarser step. Values outside the list land on
+/// the nearer end.
+int clampMaxHexScale(int? value) {
+  if (value == null) return mapHexMaxScale;
+  var best = mapHexScaleSteps.first;
+  var bestDistance = (value - best).abs();
+  for (var i = 1; i < mapHexScaleSteps.length; i++) {
+    final step = mapHexScaleSteps[i];
+    final distance = (value - step).abs();
+    if (distance <= bestDistance) {
+      best = step;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/// Flat-to-flat miles at ~40.7°N for one parent of [scale].
+double hexScaleWidthMiles(int scale) {
+  final safe = scale < 1 ? 1 : scale;
+  const lat = 40.7;
+  const lng = -77.7;
+  return distanceMiles(lat, lng, lat, lng + colSpacing * safe);
+}
+
+/// Slider text for one allowed parent scale.
+///
+/// Scale 1 names the stored cell. Every other step is the rounded
+/// flat-to-flat width in miles.
+String hexScaleMilesLabel(int scale) {
+  final safe = clampMaxHexScale(scale);
+  final miles = hexScaleWidthMiles(safe);
+  final text = miles >= 0.25
+      ? miles.toStringAsFixed(1)
+      : miles.toStringAsFixed(2);
+  if (safe == 1) return 'Actual cells (~$text mi)';
+  return '~$text mi';
 }
 
 /// Identity of a filtered zone list. Pan and zoom reuse a cache entry when

@@ -86,6 +86,41 @@ Future<void> _pumpTicks(WidgetTester tester, int frames) async {
   }
 }
 
+Text _tipWidget(WidgetTester tester) {
+  return tester.widget<Text>(
+    find.descendant(
+      of: find.byKey(const ValueKey<String>('map-usage-tip')),
+      matching: find.byType(Text),
+    ),
+  );
+}
+
+/// The rendered tip is taller than a single line of the same style.
+void _expectTipWraps(WidgetTester tester) {
+  final tipText = _tipWidget(tester);
+  expect(tipText.softWrap, isTrue);
+  expect(tipText.maxLines, 3);
+  expect(tipText.overflow, TextOverflow.ellipsis);
+  expect(tipText.style?.fontSize, greaterThanOrEqualTo(11));
+  final paragraph = tester.renderObject<RenderParagraph>(
+    find.descendant(
+      of: find.byKey(const ValueKey<String>('map-usage-tip')),
+      matching: find.byType(Text),
+    ),
+  );
+  final oneLine = TextPainter(
+    text: TextSpan(text: 'Tip', style: tipText.style),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(
+      tester.element(find.byKey(const ValueKey<String>('map-usage-tip'))),
+    ),
+    maxLines: 1,
+  )..layout();
+  expect(paragraph.size.height, greaterThan(oneLine.height));
+  oneLine.dispose();
+  expect(paragraph.didExceedMaxLines, isTrue);
+}
+
 String _tipText(WidgetTester tester) {
   final tip = tester.widget<Text>(
     find.descendant(
@@ -252,20 +287,16 @@ void main() {
     });
   }
 
-  testWidgets('tapping a truncated map tip shows the full text', (
+  testWidgets('a long map tip wraps, and a still-truncated tip opens in full', (
     tester,
   ) async {
     await tester.pumpWidget(_controlsApp(bleUiEnabled: true, syncing: false));
     await tester.pump();
 
     final tip = _tipText(tester);
-    final paragraph = tester.renderObject<RenderParagraph>(
-      find.descendant(
-        of: find.byKey(const ValueKey<String>('map-usage-tip')),
-        matching: find.byType(Text),
-      ),
-    );
-    expect(paragraph.didExceedMaxLines, isTrue);
+    _expectTipWraps(tester);
+    // The status card stays the icon-row width (172) plus the card margin.
+    expect(tester.getSize(find.byType(Card)).width, lessThanOrEqualTo(180));
 
     await tester.tap(find.byKey(const ValueKey<String>('map-usage-tip')));
     await tester.pump();
@@ -285,6 +316,70 @@ void main() {
     expect(_tipText(tester), tip);
     _expectIdleFrameSchedule(tester);
   });
+
+  testWidgets(
+    'status card stays clear of the filter controls on a 360dp phone',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Stack(
+              children: [
+                Positioned(
+                  top: 20,
+                  left: 12,
+                  child: _controls(bleUiEnabled: true, syncing: false),
+                ),
+                Positioned(
+                  top: 20,
+                  right: 12,
+                  child: Row(
+                    children: [
+                      Card(
+                        elevation: 1,
+                        child: IconButton(
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () {},
+                          icon: const Icon(Icons.filter_alt),
+                          tooltip: 'Filter repeater hits',
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Card(
+                        elevation: 1,
+                        child: IconButton(
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () {},
+                          icon: const Icon(Icons.dark_mode),
+                          tooltip: 'Map layers',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final status = tester.getRect(find.byType(MapTopControls));
+      final filter = tester.getRect(find.byIcon(Icons.filter_alt));
+      final layers = tester.getRect(find.byIcon(Icons.dark_mode));
+      expect(status.overlaps(filter), isFalse);
+      expect(status.overlaps(layers), isFalse);
+      expect(status.right, lessThan(filter.left));
+      expect(status.width, lessThanOrEqualTo(180));
+
+      _expectTipWraps(tester);
+    },
+  );
 
   testWidgets(
     'sync spinner runs only while syncing and does not repaint the map',

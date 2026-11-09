@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/platform/web_install_nav.dart';
+import 'package:mesh_utility/src/services/release_notes.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// Opens [uri] outside the app. Tests pass their own opener.
@@ -10,7 +15,7 @@ typedef InstallLinkOpener = Future<void> Function(Uri uri);
 /// Release asset names include the tag (`mesh-utility-Alpha-N-…`), so the
 /// page links to the latest-release page instead of a versioned file URL.
 class InstallDownloadsPage extends StatelessWidget {
-  const InstallDownloadsPage({super.key, this.openLink});
+  const InstallDownloadsPage({super.key, this.openLink, this.httpClient});
 
   static const latestReleaseUrl =
       'https://github.com/mesh-utility/mesh-utility/releases/latest';
@@ -33,6 +38,9 @@ class InstallDownloadsPage extends StatelessWidget {
       './mesh-utility/mesh_utility';
 
   final InstallLinkOpener? openLink;
+
+  /// When null, the page opens its own client for the latest GitHub release.
+  final http.Client? httpClient;
 
   Future<void> _openLatestRelease() {
     final uri = Uri.parse(latestReleaseUrl);
@@ -79,6 +87,8 @@ class InstallDownloadsPage extends StatelessWidget {
                 label: const Text('Open latest release'),
               ),
             ),
+            const SizedBox(height: 12),
+            _WhatsNewSection(openLink: openLink, httpClient: httpClient),
             const SizedBox(height: 12),
             _InstallCard(
               icon: Icons.phone_android_outlined,
@@ -205,6 +215,182 @@ class _CommandBlock extends StatelessWidget {
         style: Theme.of(
           context,
         ).textTheme.bodySmall?.copyWith(fontFamily: 'monospace', height: 1.4),
+      ),
+    );
+  }
+}
+
+const Key whatsNewLoadingKey = Key('whats-new-loading');
+const Key whatsNewFallbackKey = Key('whats-new-fallback');
+
+class _WhatsNewSection extends StatefulWidget {
+  const _WhatsNewSection({this.openLink, this.httpClient});
+
+  final InstallLinkOpener? openLink;
+  final http.Client? httpClient;
+
+  @override
+  State<_WhatsNewSection> createState() => _WhatsNewSectionState();
+}
+
+class _WhatsNewSectionState extends State<_WhatsNewSection> {
+  http.Client? _ownedClient;
+  bool _loading = true;
+  bool _usedFallback = false;
+  String? _tag;
+  String? _htmlUrl;
+  ParsedReleaseNotes? _notes;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _ownedClient?.close();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final provided = widget.httpClient;
+    final client = provided ?? http.Client();
+    if (provided == null) _ownedClient = client;
+    final live = await fetchGithubReleaseNotes(client: client);
+    if (!mounted) return;
+    if (live != null && live.body.trim().isNotEmpty) {
+      setState(() {
+        _loading = false;
+        _usedFallback = false;
+        _tag = live.tagName.isEmpty ? null : live.tagName;
+        _htmlUrl = live.htmlUrl.isEmpty ? null : live.htmlUrl;
+        _notes = parseReleaseNotes(live.body);
+      });
+      return;
+    }
+    String? bundled;
+    try {
+      bundled = await rootBundle.loadString(bundledReleaseNotesAsset);
+    } catch (_) {
+      bundled = null;
+    }
+    if (!mounted) return;
+    final saved = bundled?.trim();
+    setState(() {
+      _loading = false;
+      _usedFallback = saved != null && saved.isNotEmpty;
+      _tag = tagFromReleaseMarkdown(saved);
+      _htmlUrl = null;
+      _notes = saved == null || saved.isEmpty ? null : parseReleaseNotes(saved);
+    });
+  }
+
+  Future<void> _openNotes() {
+    final raw = (_htmlUrl == null || _htmlUrl!.isEmpty)
+        ? InstallDownloadsPage.latestReleaseUrl
+        : _htmlUrl!;
+    final uri = Uri.parse(raw);
+    final open = widget.openLink;
+    if (open != null) return open(uri);
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  Future<void> _openItem(ReleaseNoteItem item) {
+    final raw = item.url;
+    if (raw == null || raw.isEmpty) return Future<void>.value();
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return Future<void>.value();
+    final open = widget.openLink;
+    if (open != null) return open(uri);
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final body = Theme.of(context).textTheme.bodySmall;
+    final title = _tag == null || _tag!.isEmpty
+        ? "What's new"
+        : "What's new in $_tag";
+    return _InstallCard(
+      icon: Icons.new_releases_outlined,
+      title: title,
+      children: [
+        if (_loading)
+          const Row(
+            key: whatsNewLoadingKey,
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 8),
+              Expanded(child: Text('Loading release notes…')),
+            ],
+          ),
+        if (_usedFallback)
+          Text(
+            "Couldn't load the latest notes. Showing the saved copy.",
+            key: whatsNewFallbackKey,
+            style: body,
+          ),
+        if (!_loading && _notes != null) ...[
+          _NoteGroup(title: 'Fixes', items: _notes!.fixes, onOpen: _openItem),
+          _NoteGroup(
+            title: 'Enhancements',
+            items: _notes!.enhancements,
+            onOpen: _openItem,
+          ),
+          _NoteGroup(
+            title: 'Other changes',
+            items: _notes!.other,
+            onOpen: _openItem,
+          ),
+        ],
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: _openNotes,
+            child: const Text('See release notes on GitHub'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _NoteGroup extends StatelessWidget {
+  const _NoteGroup({
+    required this.title,
+    required this.items,
+    required this.onOpen,
+  });
+
+  final String title;
+  final List<ReleaseNoteItem> items;
+  final Future<void> Function(ReleaseNoteItem item) onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) return const SizedBox.shrink();
+    final body = Theme.of(context).textTheme.bodySmall;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          for (final item in items)
+            InkWell(
+              onTap: item.url == null ? null : () => onOpen(item),
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('• ${item.text}', style: body),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -5,6 +5,7 @@ import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/history_scan_filter.dart';
+import 'package:mesh_utility/src/services/off_ui.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/history_csv_exporter.dart'
     as csv_export;
@@ -42,8 +43,10 @@ class HistoryPage extends StatefulWidget {
 
 class _HistoryPageState extends State<HistoryPage> {
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
+  final ScrollController _scrollController = ScrollController();
   Set<String> _selectedNodeIds = <String>{};
   String? _selectedHexId;
+  String? _scrollHexId;
   DateTimeRange? _selectedDateRange;
   int? _startHour;
   int? _endHour;
@@ -58,8 +61,20 @@ class _HistoryPageState extends State<HistoryPage> {
   void initState() {
     super.initState();
     _selectedHexId = widget.initialHexId;
+    _scrollHexId = widget.initialHexId;
     _processScans();
-    _updateFilteredList();
+    _filteringInProgress = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _filteringInProgress = false;
+      _updateFilteredList();
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -73,8 +88,9 @@ class _HistoryPageState extends State<HistoryPage> {
     }
     final radiusChanged =
         widget.statsRadiusMiles != oldWidget.statsRadiusMiles ||
-        widget.observerLat != oldWidget.observerLat ||
-        widget.observerLng != oldWidget.observerLng;
+        (widget.statsRadiusMiles != 0 &&
+            (widget.observerLat != oldWidget.observerLat ||
+                widget.observerLng != oldWidget.observerLng));
     if (widget.scans != oldWidget.scans ||
         widget.resolvedNodeNames != oldWidget.resolvedNodeNames ||
         radiusChanged) {
@@ -132,23 +148,46 @@ class _HistoryPageState extends State<HistoryPage> {
 
   void _updateFilteredList() async {
     if (_filteringInProgress) return;
-    setState(() => _filteringInProgress = true);
+    _filteringInProgress = true;
+    // Keep existing rows visible during a background refresh. Only the first
+    // empty load shows a spinner, so a live scan or history-day notify cannot
+    // destroy the ListView and reset scroll.
+    if (_filteredScans.isEmpty && mounted) {
+      setState(() {});
+    }
 
     final range = _selectedDateRange;
-    final filtered = await compute(filterHistoryScansOffUi, <String, Object?>{
-      'scans': _radiusFilteredScans,
+    final scans = _radiusFilteredScans;
+    final params = <String, Object?>{
+      'scans': scans,
       'selectedNodeIds': _selectedNodeIds.toList(growable: false),
       if (range != null) 'rangeStart': range.start,
       if (range != null) 'rangeEnd': range.end,
       'startHour': _startHour,
       'endHour': _endHour,
       'selectedHexId': _selectedHexId,
-    });
+    };
+    final filtered = scans.length < heavyScanCount
+        ? filterHistoryScansOffUi(params)
+        : await compute(filterHistoryScansOffUi, params);
 
-    if (!mounted) return;
+    if (!mounted) {
+      _filteringInProgress = false;
+      return;
+    }
+    final sameFilter = _scrollHexId == _selectedHexId;
+    final savedOffset = sameFilter && _scrollController.hasClients
+        ? _scrollController.offset
+        : 0.0;
     setState(() {
       _filteredScans = filtered;
       _filteringInProgress = false;
+    });
+    _scrollHexId = _selectedHexId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      _scrollController.jumpTo(savedOffset.clamp(0.0, max));
     });
   }
 
@@ -287,7 +326,9 @@ class _HistoryPageState extends State<HistoryPage> {
                     children: [
                       Expanded(
                         child: Text(
-                          'All Scans',
+                          _selectedHexId == null || _selectedHexId!.isEmpty
+                              ? 'All Scans'
+                              : 'Cell history',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.headlineSmall,
@@ -327,7 +368,9 @@ class _HistoryPageState extends State<HistoryPage> {
                         ),
                       Chip(
                         label: Text(
-                          '${_filteredScans.length} scans',
+                          _filteredScans.length == 1
+                              ? '1 scan'
+                              : '${_filteredScans.length} scans',
                           style: Theme.of(context).textTheme.labelSmall,
                         ),
                       ),
@@ -506,10 +549,12 @@ class _HistoryPageState extends State<HistoryPage> {
               ),
             ),
             Expanded(
-              child: _filteringInProgress
-                  ? const Center(child: CircularProgressIndicator())
-                  : _filteredScans.isEmpty
-                  ? const Center(child: Text('No scan history available yet'))
+              child: _filteredScans.isEmpty
+                  ? (_filteringInProgress
+                        ? const Center(child: CircularProgressIndicator())
+                        : const Center(
+                            child: Text('No scan history available yet'),
+                          ))
                   : LayoutBuilder(
                       builder: (context, constraints) {
                         // List padding (16*2) + Card content padding (12*2) = 56.
@@ -517,6 +562,10 @@ class _HistoryPageState extends State<HistoryPage> {
                         final metricWidth = availableWidth < 280 ? 66.0 : 74.0;
 
                         return ListView.builder(
+                          key: PageStorageKey<String>(
+                            'history-list-${_selectedHexId ?? 'all'}',
+                          ),
+                          controller: _scrollController,
                           padding: const EdgeInsets.symmetric(
                             horizontal: 16,
                             vertical: 8,
@@ -529,6 +578,11 @@ class _HistoryPageState extends State<HistoryPage> {
                               scan.longitude,
                             );
                             return _HistoryScanItem(
+                              key: ValueKey<String>(
+                                '${scan.nodeId}|${scan.timestamp.millisecondsSinceEpoch}|'
+                                '${scan.latitude}|${scan.longitude}|${scan.rssi}|'
+                                '${scan.radioId ?? ''}',
+                              ),
                               scan: scan,
                               unitSystem: widget.unitSystem,
                               metricWidth: metricWidth,
@@ -719,6 +773,7 @@ class _HistoryNodeFilterDialogState extends State<_HistoryNodeFilterDialog> {
 
 class _HistoryScanItem extends StatelessWidget {
   const _HistoryScanItem({
+    super.key,
     required this.scan,
     required this.unitSystem,
     required this.metricWidth,
@@ -971,6 +1026,7 @@ String _observerName(
       return preferredName;
     }
   }
+  String label;
   final observerName = scan.receiverName?.trim();
   if (observerName != null && observerName.isNotEmpty) {
     if (_looksLikeObserverId(observerName)) {
@@ -979,7 +1035,12 @@ String _observerName(
         resolvedNodeNames: resolvedNodeNames,
       );
       if (resolved != null && resolved.isNotEmpty) {
-        return resolved;
+        label = resolved;
+        return _markSyncedObserver(
+          label,
+          scan: scan,
+          connectedRadioMeshId: connectedRadioMeshId,
+        );
       }
     }
     final radio = _normalizedRadioId(scan.radioId);
@@ -990,37 +1051,67 @@ String _observerName(
       if (mapped != null &&
           mapped.isNotEmpty &&
           !_looksLikeObserverId(mapped)) {
-        return mapped;
+        return _markSyncedObserver(
+          mapped,
+          scan: scan,
+          connectedRadioMeshId: connectedRadioMeshId,
+        );
       }
     }
-    return _formatObserverDisplay(observerName);
+    label = _formatObserverDisplay(observerName);
+  } else {
+    final radio = _normalizedRadioId(scan.radioId);
+    if (radio != null && radio.isNotEmpty) {
+      final resolved = _bestResolvedNameForNode(
+        nodeId: radio,
+        resolvedNodeNames: resolvedNodeNames,
+      );
+      if (resolved != null && resolved.isNotEmpty) {
+        label = resolved;
+      } else {
+        final mapped = observerByRadio[radio];
+        if (mapped != null && mapped.isNotEmpty) {
+          label = _formatObserverDisplay(mapped);
+        } else {
+          label = _formatObserverDisplay(radio);
+        }
+      }
+    } else {
+      final observerRaw = scan.observerId.trim();
+      if (observerRaw.isNotEmpty) {
+        final resolved = _bestResolvedNameForNode(
+          nodeId: observerRaw,
+          resolvedNodeNames: resolvedNodeNames,
+        );
+        if (resolved != null && resolved.isNotEmpty) {
+          label = resolved;
+        } else {
+          label = 'unknown';
+        }
+      } else {
+        label = 'unknown';
+      }
+    }
   }
+  return _markSyncedObserver(
+    label,
+    scan: scan,
+    connectedRadioMeshId: connectedRadioMeshId,
+  );
+}
+
+String _markSyncedObserver(
+  String name, {
+  required ScanResult scan,
+  String? connectedRadioMeshId,
+}) {
+  final connected = _normalizedRadioId(connectedRadioMeshId);
   final radio = _normalizedRadioId(scan.radioId);
-  if (radio != null && radio.isNotEmpty) {
-    final resolved = _bestResolvedNameForNode(
-      nodeId: radio,
-      resolvedNodeNames: resolvedNodeNames,
-    );
-    if (resolved != null && resolved.isNotEmpty) {
-      return resolved;
-    }
-    final mapped = observerByRadio[radio];
-    if (mapped != null && mapped.isNotEmpty) {
-      return _formatObserverDisplay(mapped);
-    }
-    return _formatObserverDisplay(radio);
-  }
-  final observerRaw = scan.observerId.trim();
-  if (observerRaw.isNotEmpty) {
-    final resolved = _bestResolvedNameForNode(
-      nodeId: observerRaw,
-      resolvedNodeNames: resolvedNodeNames,
-    );
-    if (resolved != null && resolved.isNotEmpty) {
-      return resolved;
-    }
-  }
-  return 'unknown';
+  if (connected == null || connected.isEmpty) return name;
+  if (radio == null || radio.isEmpty) return name;
+  if (radio == connected) return name;
+  if (name.toLowerCase().contains('synced')) return name;
+  return '$name · synced';
 }
 
 String? _bestResolvedNameForNode({
@@ -1040,14 +1131,7 @@ String? _normalizedRadioId(String? value) {
 }
 
 bool _idsLikelySameDevice(String a, String b) {
-  final an = _normalizeHexId(a);
-  final bn = _normalizeHexId(b);
-  if (an.isEmpty || bn.isEmpty) return false;
-  if (an == bn) return true;
-  if (an.length >= 8 && bn.length >= 8) {
-    if (an.substring(0, 8) == bn.substring(0, 8)) return true;
-  }
-  return an.startsWith(bn) || bn.startsWith(an);
+  return idsLikelySameDevice(_normalizeHexId(a), _normalizeHexId(b));
 }
 
 String _normalizeHexId(String value) {

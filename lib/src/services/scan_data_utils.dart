@@ -47,6 +47,7 @@ RawScan normalizeRawScanIds(RawScan scan) {
     receiverName: scan.receiverName,
     radioId: radioId,
     downloadedFromWorker: scan.downloadedFromWorker,
+    locallyRecorded: scan.locallyRecorded,
   );
 }
 
@@ -84,6 +85,7 @@ List<RawScan> sanitizeDeadzoneRadioIds(
           receiverName: scan.receiverName,
           radioId: null,
           downloadedFromWorker: scan.downloadedFromWorker,
+          locallyRecorded: scan.locallyRecorded,
         );
       })
       .toList(growable: false);

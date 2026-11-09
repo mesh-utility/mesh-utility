@@ -38,7 +38,6 @@ class MapTopControls extends StatelessWidget {
   final bool forceOffline;
   final VoidCallback onSync;
   final String? connectionLabel;
-  static const double _tipSlotHeight = 18;
   static const double _iconSlotWidth = 40;
   static const double _spinnerSlotWidth = 34;
   static const double _contentPaddingX = 6;
@@ -61,6 +60,11 @@ class MapTopControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final title = (connectionLabel ?? '').trim();
     final showTitle = title.isNotEmpty;
+    final tipStyle = _mapUsageTipStyle(
+      Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.white70),
+    );
+    final tipStrut = _mapUsageTipStrut(tipStyle);
+    final tipHeight = _threeLineTipHeight(context, tipStyle, tipStrut);
     final canForceScan =
         bleUiEnabled && bleConnected && !bleBusy && bleScanning;
     final canToggleScan = bleUiEnabled && bleConnected;
@@ -157,18 +161,17 @@ class MapTopControls extends StatelessWidget {
                   ],
                 ),
               ),
-              SizedBox(
-                width: rowWidth,
-                height: _tipSlotHeight,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: SizedBox(
+                  width: rowWidth,
+                  height: tipHeight,
                   child: _RotatingUsageTip(
                     key: const ValueKey<String>('map-usage-tips'),
                     tips: _usageTips,
                     enabled: bleUiEnabled,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.labelSmall?.copyWith(color: Colors.white70),
+                    style: tipStyle,
+                    strutStyle: tipStrut,
                   ),
                 ),
               ),
@@ -180,17 +183,65 @@ class MapTopControls extends StatelessWidget {
   }
 }
 
+/// One point smaller than [style], never under 11.
+///
+/// [TextTheme.labelSmall] adds 0.5px of tracking for all-caps labels. These
+/// tips are title case, and that tracking pushes the longest ones past three
+/// lines inside the icon row. Clear it so the full tip fits the card's width.
+TextStyle _mapUsageTipStyle(TextStyle? style) {
+  final base = style ?? const TextStyle(fontSize: 12);
+  final current = base.fontSize ?? 12;
+  final reduced = current - 1;
+  return base.copyWith(
+    fontSize: reduced < 11 ? 11.0 : reduced,
+    letterSpacing: 0,
+  );
+}
+
+double _threeLineTipHeight(
+  BuildContext context,
+  TextStyle style,
+  StrutStyle strut,
+) {
+  final painter = TextPainter(
+    text: TextSpan(text: '\n\n', style: style),
+    strutStyle: strut,
+    maxLines: 3,
+    textDirection: Directionality.of(context),
+    textScaler: MediaQuery.textScalerOf(context),
+    locale: Localizations.maybeLocaleOf(context),
+  )..layout();
+  final height = painter.height;
+  painter.dispose();
+  return height;
+}
+
+StrutStyle _mapUsageTipStrut(TextStyle style) {
+  return StrutStyle(
+    fontFamily: style.fontFamily,
+    fontFamilyFallback: style.fontFamilyFallback,
+    fontSize: style.fontSize,
+    height: style.height,
+    leadingDistribution: style.leadingDistribution,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    forceStrutHeight: true,
+  );
+}
+
 class _RotatingUsageTip extends StatefulWidget {
   const _RotatingUsageTip({
     super.key,
     required this.tips,
     required this.enabled,
     this.style,
+    this.strutStyle,
   });
 
   final List<String> tips;
   final bool enabled;
   final TextStyle? style;
+  final StrutStyle? strutStyle;
 
   @override
   State<_RotatingUsageTip> createState() => _RotatingUsageTipState();
@@ -309,7 +360,8 @@ class _RotatingUsageTipState extends State<_RotatingUsageTip>
   bool _tipTruncated(BuildContext context, String tip, double maxWidth) {
     final painter = TextPainter(
       text: TextSpan(text: tip, style: widget.style),
-      maxLines: 1,
+      strutStyle: widget.strutStyle,
+      maxLines: 3,
       textDirection: Directionality.of(context),
       textScaler: MediaQuery.textScalerOf(context),
       locale: Localizations.maybeLocaleOf(context),
@@ -358,9 +410,11 @@ class _RotatingUsageTipState extends State<_RotatingUsageTip>
               _tipTruncated(context, tip, maxWidth);
           final line = Text(
             tip,
-            maxLines: 1,
+            softWrap: true,
+            maxLines: 3,
             overflow: TextOverflow.ellipsis,
             style: widget.style,
+            strutStyle: widget.strutStyle,
           );
           final child = truncated
               ? GestureDetector(
@@ -372,7 +426,7 @@ class _RotatingUsageTipState extends State<_RotatingUsageTip>
           return SizedBox(
             width: maxWidth.isFinite ? maxWidth : null,
             height: constraints.hasBoundedHeight ? constraints.maxHeight : null,
-            child: Align(alignment: Alignment.centerLeft, child: child),
+            child: Align(alignment: Alignment.topLeft, child: child),
           );
         },
       ),

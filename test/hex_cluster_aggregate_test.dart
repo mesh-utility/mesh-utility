@@ -138,6 +138,36 @@ void main() {
       expect(smallerMiles, lessThan(15));
       expect(largerMiles, greaterThan(20));
     });
+
+    test('mile labels and the user-max steps share the band list', () {
+      expect(mapHexScaleSteps, <int>[1, 2, 4, 8, 16, 32, 64, 128, 256]);
+      expect(
+        mapHexZoomBands.map((band) => band.scale).toList(),
+        mapHexScaleSteps,
+      );
+      expect(hexScaleMilesLabel(1), 'Actual cells (~0.08 mi)');
+      expect(hexScaleMilesLabel(2), '~0.15 mi');
+      expect(hexScaleMilesLabel(4), '~0.3 mi');
+      expect(hexScaleMilesLabel(8), '~0.6 mi');
+      expect(hexScaleMilesLabel(16), '~1.2 mi');
+      expect(hexScaleMilesLabel(32), '~2.4 mi');
+      expect(hexScaleMilesLabel(64), '~4.9 mi');
+      expect(hexScaleMilesLabel(128), '~9.8 mi');
+      expect(hexScaleMilesLabel(mapHexMaxScale), '~19.5 mi');
+      expect(clampMaxHexScale(null), mapHexMaxScale);
+      expect(clampMaxHexScale(0), 1);
+      expect(clampMaxHexScale(3), 4);
+      expect(clampMaxHexScale(7), 8);
+      expect(clampMaxHexScale(1000), mapHexMaxScale);
+      expect(hexClusterScaleForZoom(5, maxScale: 8), 8);
+      expect(hexClusterScaleForZoom(5, maxScale: 1), 1);
+      expect(hexClusterScaleForZoom(16, maxScale: 8), 1);
+      expect(hexClusterScaleForZoom(12, maxScale: 8), 8);
+      expect(hexClusterScaleForZoom(14, maxScale: 8), 4);
+      expect(coarserHexScale(4, maxScale: 8), 8);
+      expect(coarserHexScale(8, maxScale: 8), isNull);
+      expect(coarserHexScale(1, maxScale: 1), isNull);
+    });
   });
 
   group('aggregation', () {
@@ -533,6 +563,116 @@ void main() {
       expect(ids, isNot(contains('far-east')));
       expect(viewport.containsLatLng(farNorth.lat, farNorth.lng), isFalse);
       expect(viewport.containsLatLng(farEast.lat, farEast.lng), isFalse);
+    });
+
+    test(
+      'a user max of 1 stays on actual cells and drops by viewport priority',
+      () async {
+        final scales = <int>[];
+        final session = HexRenderSession(
+          aggregate: (zones, scale) async {
+            scales.add(scale);
+            return aggregateCoverageHexes(zones, scale: scale);
+          },
+        );
+        final zones = parentGrid(
+          rowMin: -20,
+          rowMax: 20,
+          colMin: -10,
+          colMax: 10,
+        );
+        expect(zones.length, greaterThan(mapMaxDrawnPolygons));
+        final plan = await session.render(
+          identity: 1,
+          zones: zones,
+          viewport: _world(5),
+          maxScale: 1,
+        );
+
+        expect(scales, <int>[1]);
+        expect(plan, isNotNull);
+        expect(plan!.nominalScale, 1);
+        expect(plan.scale, 1);
+        expect(plan.usedEmergencyBackstop, isTrue);
+        expect(plan.droppedChildren, isTrue);
+        expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
+        expect(plan.polygons.every((polygon) => polygon.scale == 1), isTrue);
+        final kept = plan.polygons
+            .expand((polygon) => polygon.memberZoneIds)
+            .toSet();
+        expect(kept, contains('r0:c0'));
+        expect(kept, isNot(contains('r20:c10')));
+        expect(kept, isNot(contains('r-20:c-10')));
+      },
+    );
+  });
+
+  group('user max hex scale', () {
+    test('zoom 5 with max scale 8 does not draw the regional parent', () {
+      final zones = _city(rows: 12, cols: 12);
+      final capped = planZonesForMapRender(
+        zones: zones,
+        viewport: _world(5),
+        maxScale: 8,
+      );
+      final hard = planZonesForMapRender(zones: zones, viewport: _world(5));
+
+      expect(hexClusterScaleForZoom(5), mapHexMaxScale);
+      expect(capped.nominalScale, 8);
+      expect(capped.scale, 8);
+      expect(capped.scale, lessThan(hard.scale));
+      expect(hard.scale, mapHexMaxScale);
+      expect(capped.usedEmergencyBackstop, isFalse);
+      expect(capped.droppedChildren, isFalse);
+      expect(capped.representedChildren, zones.length);
+      expect(capped.polygons.every((polygon) => polygon.scale == 8), isTrue);
+    });
+
+    test('explicit default cap matches the hard ceiling', () {
+      final zones = _city(rows: 6, cols: 6);
+      final implicit = planZonesForMapRender(zones: zones, viewport: _world(3));
+      final explicit = planZonesForMapRender(
+        zones: zones,
+        viewport: _world(3),
+        maxScale: mapHexMaxScale,
+      );
+
+      expect(explicit.nominalScale, implicit.nominalScale);
+      expect(explicit.scale, mapHexMaxScale);
+      expect(explicit.droppedChildren, isFalse);
+      expect(explicit.representedChildren, zones.length);
+      expect(explicit.polygons.single.points, implicit.polygons.single.points);
+    });
+
+    test('backstop coarsens only up to the user max', () async {
+      final scales = <int>[];
+      final session = HexRenderSession(
+        aggregate: (zones, scale) async {
+          scales.add(scale);
+          return aggregateCoverageHexes(zones, scale: scale);
+        },
+      );
+      final zones = <CoverageZone>[];
+      for (var row = -20; row <= 20; row++) {
+        for (var col = -10; col <= 10; col++) {
+          final center = hexCellCenter(row, col, scale: mapHexMaxScale);
+          zones.add(_zone(id: 'r$row:c$col', lat: center.lat, lng: center.lng));
+        }
+      }
+      final plan = await session.render(
+        identity: 1,
+        zones: zones,
+        viewport: _world(16),
+        maxScale: 8,
+      );
+
+      expect(scales, <int>[1, 2, 4, 8]);
+      expect(plan, isNotNull);
+      expect(plan!.nominalScale, 1);
+      expect(plan.scale, 8);
+      expect(plan.droppedChildren, isTrue);
+      expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
+      expect(plan.polygons.every((polygon) => polygon.scale == 8), isTrue);
     });
   });
 
