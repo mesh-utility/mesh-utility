@@ -222,6 +222,15 @@ class AppState extends ChangeNotifier {
   /// before this future completes.
   @visibleForTesting
   Future<void> Function()? debugDiscoverSend;
+
+  /// Anchor passed to the last normal or forced schedule.
+  @visibleForTesting
+  DateTime? get debugLastAutoScanTriggerAt => _lastAutoScanTriggerAt;
+
+  /// When the next auto-scan cycle is due.
+  @visibleForTesting
+  DateTime? get debugNextAutoScanDueAt => _nextAutoScanDueAt;
+
   int bleLastDiscoverCount = 0;
   String? bleLastDiscoverError;
   List<String> bleScanDevices = const [];
@@ -1344,6 +1353,20 @@ class AppState extends ChangeNotifier {
       } else {
         unawaited(_pruneCacheAndPersist());
       }
+    }
+
+    // The pending due follows the slider immediately: last anchor + the new
+    // interval. Do not start a discover for the change itself. A due that is
+    // already past is picked up by the next 1s tick.
+    if (previous.scanIntervalSeconds != settings.scanIntervalSeconds &&
+        bleScanning &&
+        _nextAutoScanDueAt != null) {
+      final anchor = _lastAutoScanTriggerAt ?? DateTime.now();
+      _scheduleNextAutoScanFrom(anchor);
+      final remaining = _secondsUntilNextAutoScan(DateTime.now());
+      _autoScanRemainingSeconds = remaining;
+      bleNextScanCountdown = remaining;
+      notifyListeners();
     }
 
     final smartChanged =
@@ -2589,8 +2612,7 @@ class AppState extends ChangeNotifier {
 
     var retryDiscoverAfterReconnect = false;
     try {
-      // Arm the countdown as the request is sent. The radio ack used to
-      // return before the timer existed, so the number sat frozen.
+      // Display only. The listen clock still starts when the send returns.
       _beginCountdownAtDiscoverSend(
         autoLoopOwnsCountdown: autoLoopOwnsCountdown,
         discoverWait: discoverWait,
@@ -4081,6 +4103,14 @@ class AppState extends ChangeNotifier {
   int _secondsUntilNextAutoScan(DateTime now) {
     final dueAt = _nextAutoScanDueAt;
     if (dueAt == null) return 0;
+    return _secondsUntilDue(dueAt, now);
+  }
+
+  /// Whole seconds until [dueAt], matching the 1s tick.
+  ///
+  /// [DateTime.difference.inMilliseconds] truncates, so a due that is still
+  /// a fraction of a millisecond ahead already counts as reached.
+  int _secondsUntilDue(DateTime dueAt, DateTime now) {
     final remainingMs = dueAt.difference(now).inMilliseconds;
     if (remainingMs <= 0) return 0;
     return (remainingMs + 999) ~/ 1000;
@@ -4104,34 +4134,67 @@ class AppState extends ChangeNotifier {
     );
     _autoScanRemainingSeconds = settings.scanIntervalSeconds;
     bleNextScanCountdown = _autoScanRemainingSeconds;
-    notifyListeners();
   }
 
-  /// Manual scans tick [discoverWait]. The scan loop restarts its own
-  /// interval from this same moment, then [notifyListeners] runs immediately.
+  /// Schedule the next due from the due that started this cycle.
+  ///
+  /// When the 1s tick already counts that due as reached (late, or still a
+  /// fraction of a millisecond ahead), that due is the anchor. Later dues
+  /// stay on T, T+interval, T+2*interval. Anchoring on [DateTime.now] would
+  /// fold the tick's offset into the next interval. A due that is still at
+  /// least a millisecond away is the immediate cycle after start; that pass
+  /// uses [DateTime.now] so the pre-set future due does not add a second
+  /// interval.
+  void _scheduleAutoScanCycleFromDue() {
+    final now = DateTime.now();
+    final dueAt = _nextAutoScanDueAt;
+    final triggerAt = (dueAt != null && _secondsUntilDue(dueAt, now) == 0)
+        ? dueAt
+        : now;
+    _scheduleNextAutoScanFrom(triggerAt);
+  }
+
+  /// Display-only countdown started as discovery is sent.
+  ///
+  /// Writes [bleNextScanCountdown] and notifies. It does not schedule the
+  /// next auto scan, touch the tick lock, or start or stop a cycle. The auto
+  /// loop reads the due time the cycle already set. A manual scan counts down
+  /// [discoverWait] from this moment.
   void _beginCountdownAtDiscoverSend({
     required bool autoLoopOwnsCountdown,
     required Duration discoverWait,
   }) {
-    if (autoLoopOwnsCountdown) {
-      _scheduleNextAutoScanFrom(DateTime.now());
-      return;
-    }
-    bleNextScanCountdown = discoverWait.inSeconds;
     _bleCountdownTimer?.cancel();
-    _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      final current = bleNextScanCountdown ?? 0;
-      if (current <= 1) {
-        bleNextScanCountdown = 0;
-        timer.cancel();
-        if (identical(_bleCountdownTimer, timer)) {
-          _bleCountdownTimer = null;
+    if (autoLoopOwnsCountdown) {
+      bleNextScanCountdown = _secondsUntilNextAutoScan(DateTime.now());
+      _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (!identical(_bleCountdownTimer, timer)) {
+          timer.cancel();
+          return;
         }
-      } else {
-        bleNextScanCountdown = current - 1;
-      }
-      notifyListeners();
-    });
+        bleNextScanCountdown = _secondsUntilNextAutoScan(DateTime.now());
+        notifyListeners();
+      });
+    } else {
+      bleNextScanCountdown = discoverWait.inSeconds;
+      _bleCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (!identical(_bleCountdownTimer, timer)) {
+          timer.cancel();
+          return;
+        }
+        final current = bleNextScanCountdown ?? 0;
+        if (current <= 1) {
+          bleNextScanCountdown = 0;
+          timer.cancel();
+          if (identical(_bleCountdownTimer, timer)) {
+            _bleCountdownTimer = null;
+          }
+        } else {
+          bleNextScanCountdown = current - 1;
+        }
+        notifyListeners();
+      });
+    }
     notifyListeners();
   }
 
@@ -4160,9 +4223,6 @@ class AppState extends ChangeNotifier {
     ) async {
       if (_autoScanTickInProgress) return;
       _autoScanTickInProgress = true;
-      // Drop the lock before a discover await so later ticks can refresh
-      // the countdown. Holding it froze the number until responses ended.
-      var holdTickLock = true;
       try {
         if (!bleScanning) {
           timer.cancel();
@@ -4214,8 +4274,6 @@ class AppState extends ChangeNotifier {
             'smart_scan',
             'Discover finished after due time; launching immediate next cycle',
           );
-          holdTickLock = false;
-          _autoScanTickInProgress = false;
           await _runAutoScanCycle();
           return;
         }
@@ -4228,8 +4286,6 @@ class AppState extends ChangeNotifier {
               'Auto loop trigger countdown reached 0; starting cycle '
                   'interval=${settings.scanIntervalSeconds}s',
             );
-            holdTickLock = false;
-            _autoScanTickInProgress = false;
             await _runAutoScanCycle();
           }
           return;
@@ -4237,9 +4293,7 @@ class AppState extends ChangeNotifier {
         bleNextScanCountdown = remainingSeconds;
         notifyListeners();
       } finally {
-        if (holdTickLock) {
-          _autoScanTickInProgress = false;
-        }
+        _autoScanTickInProgress = false;
       }
     });
     // After this synchronous turn, so the due time is scheduled before the
@@ -4302,8 +4356,7 @@ class AppState extends ChangeNotifier {
       _smartScanPausedForRecentCoverage = false;
       _smartScanPausedZoneId = null;
       _lastSmartScanPauseLogAt = null;
-      final triggerAt = DateTime.now();
-      _scheduleNextAutoScanFrom(triggerAt);
+      _scheduleAutoScanCycleFromDue();
       _debugLog.info(
         'ble_scan',
         'Cycle#$cycleId smart-scan disabled; running discovery',
@@ -4345,8 +4398,7 @@ class AppState extends ChangeNotifier {
     _smartScanPausedForRecentCoverage = false;
     _smartScanPausedZoneId = decision.zoneId;
     _lastSmartScanPauseLogAt = null;
-    final triggerAt = DateTime.now();
-    _scheduleNextAutoScanFrom(triggerAt);
+    _scheduleAutoScanCycleFromDue();
     final sinceSkipMs = _lastSmartScanSkipAt == null
         ? null
         : cycleStartedAt.difference(_lastSmartScanSkipAt!).inMilliseconds;
