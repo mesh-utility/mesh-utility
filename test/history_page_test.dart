@@ -180,7 +180,161 @@ void main() {
     expect(find.text('Cell history'), findsNothing);
     expect(find.text('2 scans'), findsOneWidget);
   });
+
+  testWidgets('cell history back is visible without expanding filters', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _historyApp(
+        scans: _scans(count: 2, hexLat: lat, hexLng: lng, nodeId: nodeId),
+        names: const <String, String>{},
+        hexId: hexId,
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Cell history'), findsOneWidget);
+    expect(find.byTooltip('Back to all scans in the cache area'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back to all scans in the cache area'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('All Scans'), findsOneWidget);
+    expect(find.text('Cell history'), findsNothing);
+  });
+
+  testWidgets('clearing initialHexId from the parent leaves All Scans', (
+    tester,
+  ) async {
+    String? selected = hexId;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              return Column(
+                children: [
+                  TextButton(
+                    onPressed: () => setState(() => selected = null),
+                    child: const Text('Open cache area'),
+                  ),
+                  Expanded(
+                    child: HistoryPage(
+                      key: const ValueKey<String>('history-page'),
+                      scans: _scans(
+                        count: 2,
+                        hexLat: lat,
+                        hexLng: lng,
+                        nodeId: nodeId,
+                      ),
+                      unitSystem: 'imperial',
+                      resolvedNodeNames: const <String, String>{},
+                      onOpenMapFromHex: (_) {},
+                      initialHexId: selected,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('Cell history'), findsOneWidget);
+
+    await tester.tap(find.text('Open cache area'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('All Scans'), findsOneWidget);
+    expect(find.text('Cell history'), findsNothing);
+  });
+
+  testWidgets('pinned hex list shows every grouped event, not a radius slice', (
+    tester,
+  ) async {
+    // Stay under heavyScanCount (250) so the widget test does not call
+    // compute(), which can hang pumpAndSettle.
+    final scans = _scans(
+      count: 40,
+      hexLat: lat,
+      hexLng: lng,
+      nodeId: nodeId,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HistoryPage(
+            key: const ValueKey<String>('history-page'),
+            scans: scans,
+            unitSystem: 'imperial',
+            resolvedNodeNames: const <String, String>{},
+            onOpenMapFromHex: (_) {},
+            initialHexId: hexId,
+            pinnedHexList: true,
+            // A tight radius around a far-away observer would drop these
+            // rows if the pin flag were ignored.
+            statsRadiusMiles: 1,
+            observerLat: 0,
+            observerLng: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('Cell history'), findsOneWidget);
+    expect(find.text('40 scans'), findsOneWidget);
+  });
+
+  testWidgets('a later pinned-list update is not dropped mid-filter', (
+    tester,
+  ) async {
+    var scans = _scans(
+      count: 8,
+      hexLat: lat,
+      hexLng: lng,
+      nodeId: nodeId,
+    );
+    late StateSetter setPageState;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              setPageState = setState;
+              return HistoryPage(
+                key: const ValueKey<String>('history-page'),
+                scans: scans,
+                unitSystem: 'imperial',
+                resolvedNodeNames: const <String, String>{},
+                onOpenMapFromHex: (_) {},
+                initialHexId: hexId,
+                pinnedHexList: true,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    setPageState(() {
+      scans = _scans(
+        count: 40,
+        hexLat: lat,
+        hexLng: lng,
+        nodeId: nodeId,
+      );
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('40 scans'), findsOneWidget);
+  });
+
 }
+
 
 Widget _historyApp({
   required List<ScanResult> scans,

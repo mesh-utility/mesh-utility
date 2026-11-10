@@ -90,9 +90,8 @@ Settings is grouped into **Radio / Connection**, **Scanning**, **Map & Display**
 
 - **Radio / Connection:** Update radio position (a radio without GPS; writes the current OS location onto the radio only) and Online / Offline Mode.
 - **Scanning:** Scan Interval (20–300 seconds) and Smart scan freshness days (1–14).
-- **Map & Display:** offline map tiles, **Max hex size when zoomed out** (Actual cells up to about 19.5 miles; default is 19.5). Lower shows more detail zoomed out. Far zoomed out, edge cells may be hidden so the map stays under 700 shapes. Also Stats Radius (`0` = all visible data), units, and theme.
+- **Map & Display:** offline map tiles, Stats Radius (`0` = all visible data), units, and theme. Coverage hexes stay at true size on the fixed grid at every zoom.
 - **Data & Cache > Scan cache area:** one control for what is downloaded and kept. Radius around the last location: 10, 25, 50, 100, 250, 500, or 800 miles. States and provinces (any country, with a search box). US counties. Global. Changing it downloads the new area or trims scans that no longer fit. Larger areas use more storage and can slow startup.
-- **Download where I travel:** off by default. Outside the cache area, download a 10, 25, or 50 mile bubble. The last 8 spots are kept for 30 days. A new download waits for about 10 miles or a new map hex, and 5 minutes. Nothing downloads in Offline Mode.
 - **Cloud History** and **Deadzone Retrieval:** how many days to load. Dead zones are a separate window.
 - **Upload Interval:** periodic worker sync (`30`–`1440` minutes), anchored to server time.
 - **App updates:** Android and Linux only. See above.

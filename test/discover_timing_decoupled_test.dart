@@ -59,31 +59,26 @@ void main() {
     expect((control.listenMs - stomped.listenMs).abs(), lessThan(1500));
   }, timeout: const Timeout(Duration(seconds: 20)));
 
-  test('auto-loop next cycle stays anchored at the trigger', () async {
+  test('force scan does not move the auto-loop due', () async {
     final control = await _runAnchoredCycle(stompDisplay: false);
     final stomped = await _runAnchoredCycle(stompDisplay: true);
 
     for (final run in [control, stomped]) {
-      expect(run.nextAnchor, run.forceDue);
+      expect(run.dueAfterForce, run.dueBeforeForce);
+      expect(run.nextAnchor, run.dueBeforeForce);
       expect(
-        run.nextDue!.difference(run.forceDue!),
+        run.nextDue!.difference(run.dueBeforeForce!),
         const Duration(seconds: _anchorIntervalSeconds),
-        reason: 'the forced due must chain by exactly one interval',
+        reason: 'the due after a force must stay on the original interval chain',
       );
       expect(
-        run.deltaFromTriggerMs,
-        inInclusiveRange(8000, 160000),
+        run.deltaFromOriginalDueMs.abs(),
+        lessThan(2000),
         reason:
-            'next send ${run.deltaFromTriggerMs}ms after trigger; '
-            'the 1s tick can be late when the suite is busy, '
-            'but it must not skip the interval',
+            'next auto send was ${run.deltaFromOriginalDueMs}ms from the '
+            'original due; force must not reschedule the loop',
       );
-      expect(
-        run.deltaFromForceSendMs,
-        greaterThan(1000),
-        reason: 'next send ${run.deltaFromForceSendMs}ms after the force send',
-      );
-      expect(run.countdownAtForceSend, inInclusiveRange(1, 6));
+      expect(run.deltaFromForceSendMs, greaterThan(1000));
     }
     expect(
       control.lockedCountdownAtSend,
@@ -93,11 +88,7 @@ void main() {
     if (countdownAtSend != null && countdownAtSend >= 2) {
       expect(control.lockedCountdownAfterHold, lessThan(countdownAtSend));
     }
-    expect(
-      (control.deltaFromTriggerMs - stomped.deltaFromTriggerMs).abs(),
-      lessThan(160000),
-    );
-  }, timeout: const Timeout(Duration(minutes: 6)));
+  }, timeout: const Timeout(Duration(seconds: 45)));
 
   test('auto-loop due chain matches scan interval with no drift', () async {
     var stop = false;
@@ -120,7 +111,6 @@ void main() {
 }
 
 const _anchorIntervalSeconds = 9;
-const _anchorSpinMs = 5000;
 
 class _ManualResult {
   const _ManualResult({
@@ -158,22 +148,22 @@ class _QuietResult {
 
 class _AnchorResult {
   const _AnchorResult({
-    required this.deltaFromTriggerMs,
+    required this.deltaFromOriginalDueMs,
     required this.deltaFromForceSendMs,
-    required this.countdownAtForceSend,
     required this.lockedCountdownAtSend,
     required this.lockedCountdownAfterHold,
-    required this.forceDue,
+    required this.dueBeforeForce,
+    required this.dueAfterForce,
     required this.nextAnchor,
     required this.nextDue,
   });
 
-  final int deltaFromTriggerMs;
+  final int deltaFromOriginalDueMs;
   final int deltaFromForceSendMs;
-  final int? countdownAtForceSend;
   final int? lockedCountdownAtSend;
   final int? lockedCountdownAfterHold;
-  final DateTime? forceDue;
+  final DateTime? dueBeforeForce;
+  final DateTime? dueAfterForce;
   final DateTime? nextAnchor;
   final DateTime? nextDue;
 }
@@ -356,10 +346,10 @@ Future<_AnchorResult> _runAnchoredCycle({required bool stompDisplay}) async {
     scanIntervalSeconds: _anchorIntervalSeconds,
   );
   final sends = <DateTime>[];
-  int? countdownAtForceSend;
   int? lockedCountdownAtSend;
   int? lockedCountdownAfterHold;
-  DateTime? forceDue;
+  DateTime? dueBeforeForce;
+  DateTime? dueAfterForce;
   DateTime? nextAnchor;
   DateTime? nextDue;
   var respondedForSend = 0;
@@ -378,8 +368,7 @@ Future<_AnchorResult> _runAnchoredCycle({required bool stompDisplay}) async {
   state.debugDiscoverSend = () async {
     sends.add(DateTime.now());
     if (sends.length == 2) {
-      countdownAtForceSend = state.bleNextScanCountdown;
-      forceDue = state.debugNextAutoScanDueAt;
+      dueAfterForce = state.debugNextAutoScanDueAt;
     }
     if (sends.length == 3) {
       nextAnchor = state.debugLastAutoScanTriggerAt;
@@ -396,35 +385,28 @@ Future<_AnchorResult> _runAnchoredCycle({required bool stompDisplay}) async {
   try {
     await state.toggleBleScan().timeout(const Duration(seconds: 8));
     expect(sends, hasLength(1));
-
-    var arm = true;
-    DateTime? triggerAt;
-    state.addListener(() {
-      if (!arm) return;
-      if (!StackTrace.current.toString().contains('forceBleScan')) return;
-      arm = false;
-      triggerAt = DateTime.now();
-      final spin = Stopwatch()..start();
-      while (spin.elapsedMilliseconds < _anchorSpinMs) {}
-    });
+    await _until(() => !state.bleBusy, timeout: const Duration(seconds: 8));
+    dueBeforeForce = state.debugNextAutoScanDueAt;
+    expect(dueBeforeForce, isNotNull);
 
     await state.forceBleScan().timeout(const Duration(seconds: 15));
     expect(sends, hasLength(2));
-    expect(triggerAt, isNotNull, reason: 'force scan did not notify');
+    expect(state.debugNextAutoScanDueAt, dueBeforeForce);
+
     await _until(
       () => sends.length >= 3,
-      timeout: const Duration(seconds: 150),
-      reason: 'the cycle after the forced scan',
+      timeout: const Duration(seconds: 20),
+      reason: 'the cycle after the forced scan, still on the original due',
     );
     await _until(() => !state.bleBusy, timeout: const Duration(seconds: 5));
     final nextSend = sends[2];
     return _AnchorResult(
-      deltaFromTriggerMs: nextSend.difference(triggerAt!).inMilliseconds,
+      deltaFromOriginalDueMs: nextSend.difference(dueBeforeForce!).inMilliseconds,
       deltaFromForceSendMs: nextSend.difference(sends[1]).inMilliseconds,
-      countdownAtForceSend: countdownAtForceSend,
       lockedCountdownAtSend: lockedCountdownAtSend,
       lockedCountdownAfterHold: lockedCountdownAfterHold,
-      forceDue: forceDue,
+      dueBeforeForce: dueBeforeForce,
+      dueAfterForce: dueAfterForce,
       nextAnchor: nextAnchor,
       nextDue: nextDue,
     );
@@ -434,6 +416,7 @@ Future<_AnchorResult> _runAnchoredCycle({required bool stompDisplay}) async {
     state.dispose();
   }
 }
+
 
 Future<void> _until(
   bool Function() ready, {

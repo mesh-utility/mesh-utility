@@ -40,8 +40,9 @@ class ContactStore {
     final id = radioId.trim().toUpperCase();
     if (!localContactsSupported || id.isEmpty) return;
     final db = await ReaxDatabase.instance();
-    final payload =
-        contacts.values.map((c) => c.toJson()).toList(growable: false);
+    final payload = contacts.values
+        .map((c) => c.toJson())
+        .toList(growable: false);
     await db.put(contactsKey(id), payload);
   }
 
@@ -57,8 +58,9 @@ class ContactStore {
       final prefix = c.publicKeyPrefix.trim().toUpperCase();
       if (prefix.isEmpty) continue;
       final existing = current[prefix];
-      current[prefix] =
-          existing == null ? c.copyWith(publicKeyPrefix: prefix) : mergeLocalContact(existing, c.copyWith(publicKeyPrefix: prefix));
+      current[prefix] = existing == null
+          ? c.copyWith(publicKeyPrefix: prefix)
+          : mergeLocalContact(existing, c.copyWith(publicKeyPrefix: prefix));
     }
     await saveContacts(id, current);
     return current;

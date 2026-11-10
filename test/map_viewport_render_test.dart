@@ -283,73 +283,55 @@ void main() {
   });
 
   group('low zoom bound', () {
-    test(
-      'stops at the max hex scale instead of growing to hold every zone',
-      () {
-        final zones = List<CoverageZone>.generate(9021, (index) {
-          final lat = -70.0 + (index % 140);
-          final lng = -180.0 + ((index * 7) % 360);
-          return _zone(
-            id: 'z$index',
-            lat: lat,
-            lng: lng,
-            polygon: const <LatLng>[],
-            isDeadZone: index.isEven,
-            scanCount: index + 1,
-          );
-        });
-        final viewport = _box(
-          south: -85,
-          north: 85,
-          west: -180,
-          east: 180,
-          zoom: 3,
-          spansAllLongitudes: true,
+    test('a zoomed-out world view draws every stored hex', () {
+      final zones = List<CoverageZone>.generate(902, (index) {
+        final lat = -70.0 + (index % 70) * 0.4;
+        final lng = -170.0 + (index % 41) * 0.5;
+        return _zone(
+          id: 'z$index',
+          lat: lat,
+          lng: lng,
+          isDeadZone: index.isEven,
+          scanCount: index + 1,
         );
+      });
+      final viewport = _box(
+        south: -85,
+        north: 85,
+        west: -180,
+        east: 180,
+        zoom: 3,
+        spansAllLongitudes: true,
+      );
 
-        final plan = planZonesForMapRender(zones: zones, viewport: viewport);
+      final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
-        expect(zones, hasLength(9021));
-        expect(plan.nominalScale, mapHexMaxScale);
-        expect(plan.scale, mapHexMaxScale);
-        expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
-        expect(plan.usedEmergencyBackstop, isTrue);
-        expect(plan.droppedChildren, isTrue);
-        expect(plan.representedChildren, lessThan(9021));
-        expect(plan.representedChildren, greaterThan(0));
-        final ids = zones.map((zone) => zone.id).toSet();
-        final represented = <String>{};
-        for (final polygon in plan.polygons) {
-          expect(polygon.points, hasLength(6));
-          expect(polygon.scale, mapHexMaxScale);
-          expect(ids, contains(polygon.hitZoneId));
-          represented.addAll(polygon.memberZoneIds);
-          for (var i = 0; i < polygon.points.length; i++) {
-            final next = polygon.points[(i + 1) % polygon.points.length];
-            expect(
-              (polygon.points[i].longitude - next.longitude).abs(),
-              lessThan(180),
-            );
-          }
+      expect(zones.length, greaterThan(700));
+      expect(plan.scale, mapTrueSizeScale);
+      expect(plan.polygons, hasLength(zones.length));
+      expect(plan.representedChildren, zones.length);
+      final byId = <String, CoverageZone>{
+        for (final zone in zones) zone.id: zone,
+      };
+      for (final polygon in plan.polygons) {
+        final zone = byId[polygon.hitZoneId]!;
+        expect(polygon.scale, mapTrueSizeScale);
+        expect(polygon.points, zone.polygon);
+        expect(polygon.memberZoneIds, <String>[zone.id]);
+        expect(polygon.isDeadZone, zone.isDeadZone);
+        for (var i = 0; i < polygon.points.length; i++) {
+          final next = polygon.points[(i + 1) % polygon.points.length];
+          expect(
+            (polygon.points[i].longitude - next.longitude).abs(),
+            lessThan(180),
+          );
         }
-        expect(represented, isNot(ids));
-        expect(represented.length, lessThan(ids.length));
-      },
-    );
+      }
+    });
 
     test('low zoom viewport does not paint a zone outside it', () {
-      final inside = _zone(
-        id: 'inside',
-        lat: 37.5,
-        lng: -122.5,
-        polygon: const <LatLng>[],
-      );
-      final outside = _zone(
-        id: 'outside',
-        lat: 0,
-        lng: 0,
-        polygon: const <LatLng>[],
-      );
+      final inside = _zone(id: 'inside', lat: 37.5, lng: -122.5);
+      final outside = _zone(id: 'outside', lat: 0, lng: 0);
       final viewport = _box(
         south: 37,
         north: 38,
@@ -367,7 +349,7 @@ void main() {
       expect(<CoverageZone>[inside, outside], hasLength(2));
     });
 
-    test('dead-only cells stay dead and mixed cells keep a heard zone', () {
+    test('overlapping cells stay separate at true size', () {
       final dead = _zone(
         id: 'dead',
         lat: 10,
@@ -376,7 +358,6 @@ void main() {
         avgRssi: null,
         avgSnr: null,
         scanCount: 9,
-        polygon: const <LatLng>[],
       );
       final heard = _zone(
         id: 'heard',
@@ -385,7 +366,6 @@ void main() {
         avgRssi: -70,
         avgSnr: 4,
         scanCount: 2,
-        polygon: const <LatLng>[],
       );
       final viewport = _box(south: 9, north: 11, west: 9, east: 11, zoom: 3);
 
@@ -394,31 +374,25 @@ void main() {
         viewport: viewport,
       );
 
-      expect(drawn, hasLength(1));
-      expect(drawn.single.isDeadZone, isFalse);
-      expect(drawn.single.hitZoneId, 'heard');
-      expect(drawn.single.avgRssi, closeTo(-70, 0.001));
+      expect(drawn, hasLength(2));
+      final deadDraw = drawn.firstWhere(
+        (polygon) => polygon.hitZoneId == 'dead',
+      );
+      final heardDraw = drawn.firstWhere(
+        (polygon) => polygon.hitZoneId == 'heard',
+      );
+      expect(deadDraw.isDeadZone, isTrue);
+      expect(deadDraw.scale, mapTrueSizeScale);
+      expect(deadDraw.points, dead.polygon);
+      expect(heardDraw.isDeadZone, isFalse);
+      expect(heardDraw.avgRssi, closeTo(-70, 0.001));
+      expect(heardDraw.points, heard.polygon);
     });
 
-    test('aggregate edges stay on one side of the date line', () {
-      final eastSide = _zone(
-        id: 'east',
-        lat: 0,
-        lng: 179,
-        polygon: const <LatLng>[],
-      );
-      final westSide = _zone(
-        id: 'west',
-        lat: 0,
-        lng: -179,
-        polygon: const <LatLng>[],
-      );
-      final remote = _zone(
-        id: 'remote',
-        lat: 0,
-        lng: 0,
-        polygon: const <LatLng>[],
-      );
+    test('stored edges stay on one side of the date line', () {
+      final eastSide = _zone(id: 'east', lat: 0, lng: 179);
+      final westSide = _zone(id: 'west', lat: 0, lng: -179);
+      final remote = _zone(id: 'remote', lat: 0, lng: 0);
       final viewport = _box(
         south: -5,
         north: 5,
@@ -449,8 +423,8 @@ void main() {
     });
   });
 
-  group('detail zoom cap', () {
-    test('draws every in-view hex when the count is under the cap', () {
+  group('true-size draw', () {
+    test('draws every in-view hex at its stored polygon', () {
       final zones = <CoverageZone>[
         _zone(id: 'a', lat: 1, lng: 1),
         _zone(id: 'b', lat: 1.2, lng: 1.2),
@@ -466,62 +440,43 @@ void main() {
         'b',
         'c',
       });
+      expect(
+        drawn.every((polygon) => polygon.scale == mapTrueSizeScale),
+        isTrue,
+      );
       expect(drawn.every((polygon) => polygon.points.length == 3), isTrue);
     });
 
-    test('coarsens a dense exact-zoom view instead of dropping cells', () {
-      final zones = List<CoverageZone>.generate(2000, (index) {
+    test('a dense view keeps every stored cell', () {
+      final zones = List<CoverageZone>.generate(800, (index) {
         final lat = (index % 40) * 0.12;
         final lng = (index ~/ 40) * 0.2;
         return _zone(id: 'd$index', lat: lat, lng: lng);
       });
-      final viewport = _box(south: -1, north: 6, west: -1, east: 12, zoom: 16);
+      final viewport = _box(south: -1, north: 6, west: -1, east: 12, zoom: 4);
 
       final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
-      expect(plan.nominalScale, 1);
-      expect(plan.scale, lessThanOrEqualTo(mapHexMaxScale));
-      expect(plan.scale, greaterThan(plan.nominalScale));
-      expect(plan.usedEmergencyBackstop, isTrue);
-      expect(plan.droppedChildren, isFalse);
-      expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      expect(plan.polygons.length, greaterThan(1));
+      expect(zones.length, greaterThan(700));
+      expect(plan.scale, mapTrueSizeScale);
+      expect(plan.polygons, hasLength(zones.length));
       expect(plan.representedChildren, zones.length);
       expect(
-        plan.polygons.every((polygon) => polygon.points.length == 6),
+        plan.polygons.every(
+          (polygon) =>
+              polygon.scale == mapTrueSizeScale && polygon.points.length == 3,
+        ),
         isTrue,
       );
-      final ids = <String>{
-        for (final polygon in plan.polygons) ...polygon.memberZoneIds,
-      };
-      expect(ids, zones.map((zone) => zone.id).toSet());
+      expect(
+        plan.polygons.map((polygon) => polygon.hitZoneId).toSet(),
+        zones.map((zone) => zone.id).toSet(),
+      );
+      final selected = plan.polygons.firstWhere(
+        (polygon) => polygon.hitZoneId == 'd10',
+      );
+      expect(selected.memberZoneIds, <String>['d10']);
+      expect(selected.points, zones[10].polygon);
     });
-
-    test(
-      'keeps a selected cell inside its cluster when the view is coarsened',
-      () {
-        final zones = List<CoverageZone>.generate(2000, (index) {
-          final lat = (index % 40) * 0.12;
-          final lng = (index ~/ 40) * 0.2;
-          return _zone(id: 'd$index', lat: lat, lng: lng, scanCount: 1);
-        });
-        final viewport = _box(
-          south: -1,
-          north: 6,
-          west: -1,
-          east: 12,
-          zoom: 16,
-        );
-
-        final drawn = selectZonesForMapRender(
-          zones: zones,
-          viewport: viewport,
-          pinZoneId: 'd10',
-        );
-
-        expect(drawn.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-        expect(drawn.any((polygon) => polygon.containsZone('d10')), isTrue);
-      },
-    );
   });
 }

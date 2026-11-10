@@ -33,8 +33,7 @@ class BleFrameAssembler {
   }
 
   void _append(Uint8List bytes, List<Uint8List> out) {
-    if (_code != null &&
-        _canFlushPartialOnBoundary(_code!, _buffer, bytes)) {
+    if (_code != null && _canFlushPartialOnBoundary(_code!, _buffer, bytes)) {
       out.add(Uint8List.fromList(_buffer));
       clear();
     }

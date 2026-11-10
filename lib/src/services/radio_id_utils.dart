@@ -43,6 +43,41 @@ bool hexIdsAreOneRadio(Iterable<String> hexes) {
   return true;
 }
 
+/// Whether a stored name key may be applied to [query].
+///
+/// Full public keys match only when they are the same radio (exact equality,
+/// or one is a prefix of the other, at least [minHexIdMatchLength] hex).
+/// An 8-character prefix is used only when the full key is unknown, and only
+/// if no other known key shares that prefix for a different radio. Shorter
+/// prefixes and name-word matching are never used.
+bool nameKeyAppliesTo(
+  String stored,
+  String query, {
+  Iterable<String> allKnownKeys = const [],
+}) {
+  final a = normalizeHexId(stored);
+  final b = normalizeHexId(query);
+  if (a.isEmpty || b.isEmpty) return false;
+  if (a != b && !idsLikelySameDevice(a, b)) return false;
+  final shorter = a.length <= b.length ? a : b;
+  if (shorter.length != minHexIdMatchLength) {
+    // Exact full-key match, or two long keys with a prefix relationship.
+    return a == b || idsLikelySameDevice(a, b);
+  }
+  // An 8-char key (or query) is only usable when every known key with that
+  // prefix belongs to the same radio. Two contacts sharing the prefix make
+  // the short id ambiguous, including an exact 8-char stored name.
+  final related = <String>{a, b};
+  for (final raw in allKnownKeys) {
+    final key = normalizeHexId(raw);
+    if (key.length < minHexIdMatchLength) continue;
+    if (key == shorter || key.startsWith(shorter)) {
+      related.add(key);
+    }
+  }
+  return hexIdsAreOneRadio(related);
+}
+
 /// Returns a normalised 8-char mesh radio ID, or null when [value] looks like
 /// a BLE MAC address or is otherwise unsafe.
 String? safePublicRadioId(String value) {
@@ -98,8 +133,9 @@ String? extractSelfInfoDisplayName(String text) {
   candidate = candidate.trim();
   if (candidate.isEmpty) return null;
 
+  // Keep apostrophes and other punctuation. Strip only control characters.
   candidate = candidate
-      .replaceAll(RegExp(r'[^A-Za-z0-9 ._\-]'), '')
+      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
       .replaceAll(RegExp(r'\s{2,}'), ' ')
       .trim();
   candidate = cleanRadioDisplayName(candidate);
@@ -147,6 +183,18 @@ String titleNameForNode({
   return shortNodeId(nodeId);
 }
 
+/// Advertised/sender name eligible for upload.
+///
+/// Empty, unknown, and id-shaped short ids are omitted so the worker can
+/// keep a historical real name. Local UI may still show [shortNodeId].
+String? uploadableNodeName(String? name, String nodeId) {
+  final trimmed = (name ?? '').trim();
+  if (trimmed.isEmpty || isPlaceholderNodeName(trimmed, nodeId)) {
+    return null;
+  }
+  return trimmed;
+}
+
 /// Stores [label] for [id] only when it is a real name.
 ///
 /// ID-shaped placeholders are omitted so [resolvedNameForNodeId] is not
@@ -162,8 +210,9 @@ void putResolvedNodeLabel(
   final cleaned = label.trim();
   if (cleaned.isEmpty || isPlaceholderNodeName(cleaned, trimmed)) return;
   final hex = normalizeHexId(trimmed);
-  final short = hex.length >= 8 ? hex.substring(0, 8) : hex;
-  for (final key in <String>{trimmed, hex, short}) {
+  // Store the exact id only. An 8-char alias of a longer public key would
+  // let a different radio that shares that prefix inherit the wrong name.
+  for (final key in <String>{trimmed, hex}) {
     if (key.isEmpty) continue;
     final existing = labels[key];
     if (existing != null &&
@@ -184,6 +233,7 @@ void putResolvedNodeLabel(
 String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
   if (names.isEmpty || nodeId.trim().isEmpty) return null;
   final target = normalizeHexId(nodeId);
+  final allKeys = names.keys;
   final matchedHex = <String>[];
   final matchedName = <String>[];
   for (final entry in names.entries) {
@@ -192,7 +242,8 @@ String? resolvedNameForNodeId(Map<String, String> names, String nodeId) {
     final key = normalizeHexId(rawKey);
     final same = target.isEmpty
         ? rawKey == nodeId.trim()
-        : key.isNotEmpty && (key == target || idsLikelySameDevice(key, target));
+        : key.isNotEmpty &&
+            nameKeyAppliesTo(key, target, allKnownKeys: allKeys);
     if (!same) continue;
     final name = entry.value.trim();
     if (name.isEmpty || isPlaceholderNodeName(name, nodeId)) continue;
@@ -243,3 +294,123 @@ bool _isHexIdShapedLabel(String value) {
   if (compact.length < 8) return false;
   return RegExp(r'^[0-9A-Fa-f]+$').hasMatch(compact);
 }
+
+
+/// Extra self-info attempts after the first timeout, before giving up.
+const int selfInfoTimeoutRetries = 1;
+
+/// Runs [action] and, on failure, retries up to [retries] more times.
+///
+/// Used for the post-connect self-info request so a single 3s timeout does
+/// not skip the public key and fall back to guessing identity from contacts.
+Future<T> runWithRetries<T>(
+  Future<T> Function() action, {
+  int retries = selfInfoTimeoutRetries,
+}) async {
+  Object? lastError;
+  StackTrace? lastTrace;
+  for (var attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await action();
+    } catch (e, st) {
+      lastError = e;
+      lastTrace = st;
+    }
+  }
+  Error.throwWithStackTrace(lastError!, lastTrace!);
+}
+
+/// Mesh identity of the radio this device is connected to.
+///
+/// [meshIdPrefix] comes only from a self-info public key (or that key's
+/// exact pubkey/prefix). Contact name words are never a source of identity.
+/// [displayName] prefers the self-info name; a contact name is never used
+/// to replace it. When self-info is missing, [meshIdPrefix] is null and
+/// [displayName] is the BLE advertisement name only.
+class ConnectedRadioIdentity {
+  const ConnectedRadioIdentity({this.meshIdPrefix, this.displayName});
+
+  final String? meshIdPrefix;
+  final String? displayName;
+}
+
+/// Resolves the connected radio's id and display name.
+///
+/// [contacts] may confirm an exact pubkey/prefix of [selfInfoMeshIdPrefix]
+/// or [selfInfoPublicKeyHex], but are never scored by shared name words and
+/// never supply a name that overrides [selfInfoDisplayName].
+ConnectedRadioIdentity resolveConnectedRadioIdentity({
+  String? selfInfoMeshIdPrefix,
+  String? selfInfoPublicKeyHex,
+  String? selfInfoDisplayName,
+  String bleDeviceName = '',
+  Map<String, String> contacts = const {},
+}) {
+  final selfName = (selfInfoDisplayName ?? '').trim();
+  final prefix = normalizeHexId(selfInfoMeshIdPrefix ?? '');
+  final pub = normalizeHexId(selfInfoPublicKeyHex ?? '');
+  String mesh = prefix;
+  if (mesh.isEmpty && pub.isNotEmpty) {
+    mesh = pub.length >= 8 ? pub.substring(0, 8) : pub;
+  }
+
+  if (mesh.isEmpty) {
+    // Leave identity unknown. Display the BLE name only — never a contact key.
+    final ble = cleanRadioDisplayName(bleDeviceName);
+    return ConnectedRadioIdentity(
+      meshIdPrefix: null,
+      displayName: ble.isEmpty ? null : ble,
+    );
+  }
+
+  // [contacts] is accepted so callers can confirm an exact key separately
+  // via exactContactNameForKey. It never contributes a name or mesh id here.
+  final display = selfName.isNotEmpty
+      ? selfName
+      : cleanRadioDisplayName(bleDeviceName);
+  return ConnectedRadioIdentity(
+    meshIdPrefix: mesh,
+    displayName: display.isEmpty ? null : display,
+  );
+}
+
+/// Contact name whose key is this radio's public key or a prefix of it.
+///
+/// Returns null when no key matches, or when more than one radio could
+/// match the same short id. Name-word scoring is not used.
+String? exactContactNameForKey(
+  Map<String, String> contacts,
+  String meshId, {
+  String publicKeyHex = '',
+}) {
+  if (contacts.isEmpty) return null;
+  final mesh = normalizeHexId(meshId);
+  final pub = normalizeHexId(publicKeyHex);
+  if (mesh.isEmpty && pub.isEmpty) return null;
+  final matches = <String, String>{};
+  final allKeys = contacts.keys;
+  for (final entry in contacts.entries) {
+    final key = normalizeHexId(entry.key);
+    if (key.isEmpty) continue;
+    final name = entry.value.trim();
+    if (name.isEmpty) continue;
+    final same = (pub.isNotEmpty &&
+            nameKeyAppliesTo(key, pub, allKnownKeys: allKeys)) ||
+        (mesh.isNotEmpty &&
+            nameKeyAppliesTo(key, mesh, allKnownKeys: allKeys));
+    if (!same) continue;
+    matches[key] = name;
+  }
+  if (matches.isEmpty) return null;
+  if (!hexIdsAreOneRadio(matches.keys)) return null;
+  String? best;
+  var bestLen = -1;
+  for (final entry in matches.entries) {
+    if (entry.key.length > bestLen) {
+      bestLen = entry.key.length;
+      best = entry.value;
+    }
+  }
+  return best;
+}
+

@@ -7,13 +7,14 @@
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
     "test:area": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/test-area-query.mjs",
-    "test:overview": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/test-coverage-overview.mjs",
-    "test": "npm run test:area && npm run test:overview",
+    "test": "npm run test:area && npm run test:hex-detail",
     "deploy": "wrangler deploy",
     "db:create": "wrangler d1 create mesh-utility-db",
     "db:init": "wrangler d1 execute mesh-utility-db --file=./schema.sql",
     "db:query": "wrangler d1 execute mesh-utility-db --command",
-    "secret:github": "wrangler secret put GITHUB_TOKEN"
+    "secret:github": "wrangler secret put GITHUB_TOKEN",
+    "test:hex-detail": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/test-hex-detail.mjs",
+    "backfill:hex-detail": "node --experimental-strip-types --import ./scripts/register-ts-ext.mjs scripts/backfill-hex-detail.mjs"
   },
   "keywords": [
     "cloudflare",

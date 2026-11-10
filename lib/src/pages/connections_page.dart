@@ -81,7 +81,7 @@ class ConnectionsPage extends StatelessWidget {
           children: [
             Expanded(
               child: FilledButton.tonalIcon(
-                onPressed: (!connected || busy)
+                onPressed: (!connected)
                     ? null
                     : () async {
                         _logButton('connections_disconnect');

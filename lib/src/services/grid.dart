@@ -68,6 +68,35 @@ List<LatLng> hexVertices(double centerLat, double centerLng, {int scale = 1}) {
   return vertices;
 }
 
+/// Bounding rectangle of the pointy-top cell ([row], [col]), padded slightly
+/// so vertex coordinates survive float rounding. Neighboring hex centers are
+/// still outside; callers must also filter with [hexCellAt].
+({double south, double north, double west, double east}) hexCellBounds(
+  int row,
+  int col, {
+  int scale = 1,
+}) {
+  final center = hexCellCenter(row, col, scale: scale);
+  final verts = hexVertices(center.lat, center.lng, scale: scale);
+  var south = verts.first.latitude;
+  var north = verts.first.latitude;
+  var west = verts.first.longitude;
+  var east = verts.first.longitude;
+  for (final v in verts.skip(1)) {
+    if (v.latitude < south) south = v.latitude;
+    if (v.latitude > north) north = v.latitude;
+    if (v.longitude < west) west = v.longitude;
+    if (v.longitude > east) east = v.longitude;
+  }
+  const pad = 1e-7;
+  return (
+    south: south - pad,
+    north: north + pad,
+    west: west - pad,
+    east: east + pad,
+  );
+}
+
 String hexKey(double lat, double lng) {
   final snapped = snapToHexGrid(lat, lng);
   return '${snapped.snapLat.toStringAsFixed(6)}:${snapped.snapLng.toStringAsFixed(6)}';

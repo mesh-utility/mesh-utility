@@ -3,9 +3,9 @@
 This repository has three GitHub Actions workflows:
 
 - `CI` (`.github/workflows/ci.yml`): analyze and test on pull requests and branch pushes. It does not build release artifacts.
-- `Deploy` (`.github/workflows/deploy.yml`): when a full release is published (or on a manual run), deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages. Pushes to `main` do not deploy.
-- `Announce Release on Discord` (`.github/workflows/discord-release.yml`): when a full release is published, posts its name, notes and download links to Discord using the `DISCORD_RELEASE_WEBHOOK` repository secret. Skipped for prereleases, drafts, or if the secret is missing.
-- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): when a GitHub release is published or prereleased, or when re-run by hand with a `release_tag`, builds artifacts and attaches the non-web files to that release.
+- `Deploy` (`.github/workflows/deploy.yml`): when a full release is published (or on a manual run), deploys the Flutter web app to Cloudflare Pages. The Worker deploy step is disabled for Alpha-25 so the already-live Worker is left unchanged. Pushes to `main` do not deploy.
+- `Announce Release on Discord` (`.github/workflows/discord-release.yml`): manual re-announce (`workflow_dispatch` with `release_tag`), plus a safety net after `Release Artifacts` completes. It does not post on `release: published`. A post runs only when the release is not a draft or prerelease and a `mesh-utility-*-android.apk` asset is already attached. Skipped if `DISCORD_RELEASE_WEBHOOK` is missing. The safety net does not post again when the `Announce on Discord` job in that artifact run already succeeded.
+- `Release Artifacts` (`.github/workflows/release-artifacts.yml`): when a GitHub release is published or prereleased, or when re-run by hand with a `release_tag`, builds artifacts and attaches the non-web files to that release. After `publish-release-assets` succeeds, `announce-discord` checks that the Android APK asset is on the release and then posts the same Discord embed. A missing APK, draft, or prerelease skips that post without failing the workflow.
 
 Publishing a full release tagged `Alpha-N` is what ships Android and Linux downloads. The live site at https://mesh-utility.org updates from the deploy workflow, not from the release-artifact web build.
 

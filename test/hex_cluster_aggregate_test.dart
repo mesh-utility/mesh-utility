@@ -75,43 +75,11 @@ List<CoverageZone> _city({int rows = 95, int cols = 95}) {
 }
 
 void main() {
-  group('zoom bands', () {
-    test('exact cells start at 15.5 and each lower band doubles the hex', () {
-      expect(mapDetailZoom, 15.5);
+  group('overview parent scale', () {
+    test('scale 256 is the overview preload width', () {
       expect(mapHexMaxScale, 256);
       expect(mapHexMaxScaleZoom, 7.5);
-      expect(hexClusterScaleForZoom(15.5), 1);
-      expect(hexClusterScaleForZoom(18), 1);
-      expect(hexClusterScaleForZoom(15.49), 2);
-      expect(hexClusterScaleForZoom(14.5), 2);
-      expect(hexClusterScaleForZoom(14.49), 4);
-      expect(hexClusterScaleForZoom(13.5), 4);
-      expect(hexClusterScaleForZoom(12.5), 8);
-      expect(hexClusterScaleForZoom(11.5), 16);
-      expect(hexClusterScaleForZoom(10.5), 32);
-      expect(hexClusterScaleForZoom(9.5), 64);
-      expect(hexClusterScaleForZoom(8.5), 128);
-      expect(hexClusterScaleForZoom(8.49), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(mapHexMaxScaleZoom), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(mapHexMaxScaleZoom - 0.01), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(6.5), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(3), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(0.5), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(0), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(-2), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(double.nan), mapHexMaxScale);
-      expect(coarserHexScale(1), 2);
-      expect(coarserHexScale(128), mapHexMaxScale);
-      expect(coarserHexScale(mapHexMaxScale), isNull);
-      expect(coarserHexScale(512), isNull);
-      expect(coarserHexScale(65536), isNull);
-      expect(
-        mapHexZoomBands.map((band) => band.scale),
-        everyElement(lessThanOrEqualTo(mapHexMaxScale)),
-      );
-    });
-
-    test('scale 256 is the central Pennsylvania width stop', () {
+      expect(mapTrueSizeScale, 1);
       const lat = 40.7;
       const lng = -77.7;
       final widthMiles = distanceMiles(
@@ -137,36 +105,6 @@ void main() {
       expect(widthMiles * 1.609344, closeTo(31.40, 0.1));
       expect(smallerMiles, lessThan(15));
       expect(largerMiles, greaterThan(20));
-    });
-
-    test('mile labels and the user-max steps share the band list', () {
-      expect(mapHexScaleSteps, <int>[1, 2, 4, 8, 16, 32, 64, 128, 256]);
-      expect(
-        mapHexZoomBands.map((band) => band.scale).toList(),
-        mapHexScaleSteps,
-      );
-      expect(hexScaleMilesLabel(1), 'Actual cells (~0.08 mi)');
-      expect(hexScaleMilesLabel(2), '~0.15 mi');
-      expect(hexScaleMilesLabel(4), '~0.3 mi');
-      expect(hexScaleMilesLabel(8), '~0.6 mi');
-      expect(hexScaleMilesLabel(16), '~1.2 mi');
-      expect(hexScaleMilesLabel(32), '~2.4 mi');
-      expect(hexScaleMilesLabel(64), '~4.9 mi');
-      expect(hexScaleMilesLabel(128), '~9.8 mi');
-      expect(hexScaleMilesLabel(mapHexMaxScale), '~19.5 mi');
-      expect(clampMaxHexScale(null), mapHexMaxScale);
-      expect(clampMaxHexScale(0), 1);
-      expect(clampMaxHexScale(3), 4);
-      expect(clampMaxHexScale(7), 8);
-      expect(clampMaxHexScale(1000), mapHexMaxScale);
-      expect(hexClusterScaleForZoom(5, maxScale: 8), 8);
-      expect(hexClusterScaleForZoom(5, maxScale: 1), 1);
-      expect(hexClusterScaleForZoom(16, maxScale: 8), 1);
-      expect(hexClusterScaleForZoom(12, maxScale: 8), 8);
-      expect(hexClusterScaleForZoom(14, maxScale: 8), 4);
-      expect(coarserHexScale(4, maxScale: 8), 8);
-      expect(coarserHexScale(8, maxScale: 8), isNull);
-      expect(coarserHexScale(1, maxScale: 1), isNull);
     });
   });
 
@@ -322,7 +260,7 @@ void main() {
       },
     );
 
-    test('aggregation sees only the filtered list', () {
+    test('paint draws each filtered zone at its stored size', () {
       final heard = _zone(id: 'heard', lat: 4, lng: 4, avgRssi: -70, avgSnr: 6);
       final dead = _zone(
         id: 'dead',
@@ -341,94 +279,30 @@ void main() {
         viewport: viewport,
       );
 
-      expect(all.polygons.single.isDeadZone, isFalse);
-      expect(all.polygons.single.hitZoneId, 'heard');
-      expect(all.representedChildren, 2);
+      expect(all.scale, mapTrueSizeScale);
+      expect(all.polygons, hasLength(2));
+      expect(all.polygons.map((polygon) => polygon.hitZoneId).toSet(), <String>{
+        'heard',
+        'dead',
+      });
+      final heardDraw = all.polygons.firstWhere(
+        (polygon) => polygon.hitZoneId == 'heard',
+      );
+      expect(heardDraw.isDeadZone, isFalse);
+      expect(heardDraw.scale, mapTrueSizeScale);
+      expect(heardDraw.points, heard.polygon);
+      expect(heardDraw.memberZoneIds, <String>['heard']);
+      expect(filtered.polygons, hasLength(1));
       expect(filtered.polygons.single.isDeadZone, isTrue);
-      expect(filtered.polygons.single.childCount, 1);
+      expect(filtered.polygons.single.hitZoneId, 'dead');
+      expect(filtered.polygons.single.points, dead.polygon);
       expect(filtered.polygons.single.memberZoneIds, <String>['dead']);
+      expect(filtered.representedChildren, 1);
     });
   });
 
-  group('low zoom coverage', () {
-    test('a city of fine cells is fully represented without the backstop', () {
-      final zones = _city();
-      final center = hexCellCenter(47, 47);
-      for (final zoom in <double>[8, 12, 14, 16]) {
-        final viewport = _phone(zoom: zoom, lat: center.lat, lng: center.lng);
-        final plan = planZonesForMapRender(zones: zones, viewport: viewport);
-        expect(plan.usedEmergencyBackstop, isFalse, reason: 'zoom $zoom');
-        expect(plan.droppedChildren, isFalse, reason: 'zoom $zoom');
-        expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-        expect(plan.scale, hexClusterScaleForZoom(zoom), reason: 'zoom $zoom');
-        final represented = <String>{
-          for (final polygon in plan.polygons) ...polygon.memberZoneIds,
-        };
-        for (final zone in zones) {
-          if (viewport.containsLatLng(zone.centerLat, zone.centerLng)) {
-            expect(
-              represented,
-              contains(zone.id),
-              reason: 'zoom $zoom ${zone.id}',
-            );
-          }
-        }
-        if (zoom < mapDetailZoom) {
-          expect(
-            plan.polygons.every((polygon) => polygon.points.length == 6),
-            isTrue,
-          );
-        }
-      }
-    });
-
-    test('world view of the same city keeps every filtered cell', () {
-      final zones = _city();
-      final plan = planZonesForMapRender(zones: zones, viewport: _world(3));
-      expect(plan.nominalScale, mapHexMaxScale);
-      expect(plan.scale, mapHexMaxScale);
-      expect(plan.usedEmergencyBackstop, isFalse);
-      expect(plan.droppedChildren, isFalse);
-      expect(plan.representedChildren, zones.length);
-      expect(plan.polygons.length, lessThan(20));
-      final ids = plan.polygons
-          .expand((polygon) => polygon.memberZoneIds)
-          .toSet();
-      expect(ids, zones.map((zone) => zone.id).toSet());
-    });
-
-    test('zoom below the cutoff does not change hex geometry', () {
-      final zones = _city(rows: 6, cols: 6);
-      final atBand = planZonesForMapRender(
-        zones: zones,
-        viewport: _world(mapHexMaxScaleZoom),
-      );
-      final below = planZonesForMapRender(
-        zones: zones,
-        viewport: _world(mapHexMaxScaleZoom - 0.01),
-      );
-      final extreme = planZonesForMapRender(zones: zones, viewport: _world(0));
-      final negative = planZonesForMapRender(
-        zones: zones,
-        viewport: _world(-2),
-      );
-      for (final plan in <MapRenderPlan>[atBand, below, extreme, negative]) {
-        expect(plan.scale, mapHexMaxScale);
-        expect(plan.nominalScale, mapHexMaxScale);
-        expect(plan.droppedChildren, isFalse);
-        expect(plan.usedEmergencyBackstop, isFalse);
-        expect(plan.representedChildren, zones.length);
-        expect(plan.polygons, hasLength(1));
-        expect(plan.polygons.single.scale, mapHexMaxScale);
-      }
-      expect(below.polygons.single.points, atBand.polygons.single.points);
-      expect(extreme.polygons.single.points, atBand.polygons.single.points);
-      expect(negative.polygons.single.points, atBand.polygons.single.points);
-    });
-  });
-
-  group('emergency backstop', () {
-    List<CoverageZone> parentGrid({
+  group('true-size map paint', () {
+    List<CoverageZone> spacedGrid({
       required int rowMin,
       required int rowMax,
       required int colMin,
@@ -437,65 +311,81 @@ void main() {
       final zones = <CoverageZone>[];
       for (var row = rowMin; row <= rowMax; row++) {
         for (var col = colMin; col <= colMax; col++) {
-          final center = hexCellCenter(row, col, scale: mapHexMaxScale);
+          final center = hexCellCenter(row, col);
           zones.add(_zone(id: 'r$row:c$col', lat: center.lat, lng: center.lng));
         }
       }
       return zones;
     }
 
+    test('every zoom draws stored cells and keeps every in-view hex', () {
+      final zones = _city(rows: 40, cols: 40);
+      final byId = <String, CoverageZone>{
+        for (final zone in zones) zone.id: zone,
+      };
+      final center = hexCellCenter(20, 20);
+      for (final zoom in <double>[3, 8, 12, 16]) {
+        final viewport = _phone(zoom: zoom, lat: center.lat, lng: center.lng);
+        final plan = planZonesForMapRender(zones: zones, viewport: viewport);
+        expect(plan.scale, mapTrueSizeScale, reason: 'zoom $zoom');
+        final drawn = <String>{};
+        for (final polygon in plan.polygons) {
+          expect(polygon.scale, mapTrueSizeScale, reason: 'zoom $zoom');
+          final zone = byId[polygon.hitZoneId];
+          expect(zone, isNotNull, reason: polygon.hitZoneId);
+          expect(polygon.points, zone!.polygon, reason: 'zoom $zoom');
+          expect(polygon.memberZoneIds, <String>[zone.id]);
+          expect(drawn.add(polygon.hitZoneId), isTrue);
+        }
+        for (final zone in zones) {
+          if (viewport.containsLatLng(zone.centerLat, zone.centerLng)) {
+            expect(drawn, contains(zone.id), reason: 'zoom $zoom ${zone.id}');
+          }
+        }
+        expect(plan.representedChildren, plan.polygons.length);
+      }
+    });
+
+    test('a world view draws every filtered cell at true size', () {
+      final zones = _city(rows: 30, cols: 30);
+      expect(zones.length, greaterThan(700));
+      final plan = planZonesForMapRender(zones: zones, viewport: _world(3));
+      expect(plan.scale, mapTrueSizeScale);
+      expect(plan.polygons, hasLength(zones.length));
+      expect(plan.representedChildren, zones.length);
+      expect(
+        plan.polygons.every((polygon) => polygon.scale == mapTrueSizeScale),
+        isTrue,
+      );
+      final ids = plan.polygons.map((polygon) => polygon.hitZoneId).toSet();
+      expect(ids, zones.map((zone) => zone.id).toSet());
+    });
+
+    test('zoom does not change stored geometry', () {
+      final zones = _city(rows: 6, cols: 6);
+      final plans = <MapRenderPlan>[
+        for (final zoom in <double>[
+          mapHexMaxScaleZoom,
+          mapHexMaxScaleZoom - 0.01,
+          0,
+          -2,
+          16,
+        ])
+          planZonesForMapRender(zones: zones, viewport: _world(zoom)),
+      ];
+      for (final plan in plans) {
+        expect(plan.scale, mapTrueSizeScale);
+        expect(plan.polygons, hasLength(zones.length));
+        expect(plan.representedChildren, zones.length);
+      }
+      final first = plans.first.polygons.map((polygon) => polygon.points);
+      for (final plan in plans.skip(1)) {
+        expect(plan.polygons.map((polygon) => polygon.points), first);
+      }
+    });
+
     test(
-      'keeps the central parents when the capped scale is still overfull',
-      () {
-        final zones = <CoverageZone>[
-          for (var row = -3; row <= 3; row++)
-            _zone(
-              id: 'r$row',
-              lat: hexCellCenter(row, 0, scale: mapHexMaxScale).lat,
-              lng: hexCellCenter(row, 0, scale: mapHexMaxScale).lng,
-            ),
-        ];
-        final plan = planZonesForMapRender(
-          zones: zones,
-          viewport: _world(0),
-          maxDrawn: 3,
-        );
-
-        expect(plan.nominalScale, mapHexMaxScale);
-        expect(plan.scale, mapHexMaxScale);
-        expect(plan.usedEmergencyBackstop, isTrue);
-        expect(plan.droppedChildren, isTrue);
-        expect(plan.polygons, hasLength(3));
-        expect(
-          plan.polygons.map((polygon) => polygon.hitZoneId).toSet(),
-          <String>{'r-1', 'r0', 'r1'},
-        );
-        expect(
-          plan.polygons.every((polygon) => polygon.scale == mapHexMaxScale),
-          isTrue,
-        );
-
-        final pinned = planZonesForMapRender(
-          zones: zones,
-          viewport: _world(0),
-          maxDrawn: 3,
-          pinZoneId: 'r3',
-        );
-        expect(pinned.polygons, hasLength(3));
-        expect(pinned.scale, mapHexMaxScale);
-        expect(
-          pinned.polygons.any((polygon) => polygon.containsZone('r3')),
-          isTrue,
-        );
-        expect(
-          pinned.polygons.any((polygon) => polygon.containsZone('r0')),
-          isTrue,
-        );
-      },
-    );
-
-    test(
-      '700 backstop stops at the max scale and prefers the viewport center',
+      'a dense view keeps every true-size cell including the corners',
       () async {
         final scales = <int>[];
         final session = HexRenderSession(
@@ -504,175 +394,72 @@ void main() {
             return aggregateCoverageHexes(zones, scale: scale);
           },
         );
-        final zones = parentGrid(
+        final zones = spacedGrid(
           rowMin: -20,
           rowMax: 20,
           colMin: -10,
           colMax: 10,
         );
-        expect(zones.length, greaterThan(mapMaxDrawnPolygons));
+        expect(zones.length, greaterThan(700));
         final plan = await session.render(
           identity: 1,
           zones: zones,
           viewport: _world(16),
         );
 
-        expect(scales, <int>[1, 2, 4, 8, 16, 32, 64, 128, mapHexMaxScale]);
+        expect(scales, <int>[mapTrueSizeScale]);
         expect(plan, isNotNull);
-        expect(plan!.nominalScale, 1);
-        expect(plan.scale, mapHexMaxScale);
-        expect(plan.usedEmergencyBackstop, isTrue);
-        expect(plan.droppedChildren, isTrue);
-        expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
-        expect(plan.representedChildren, lessThan(zones.length));
+        expect(plan!.scale, mapTrueSizeScale);
+        expect(plan.polygons, hasLength(zones.length));
+        expect(plan.representedChildren, zones.length);
         expect(
-          plan.polygons.every((polygon) => polygon.scale == mapHexMaxScale),
+          plan.polygons.every(
+            (polygon) =>
+                polygon.scale == mapTrueSizeScale && polygon.points.length == 6,
+          ),
           isTrue,
         );
-        final kept = plan.polygons
-            .expand((polygon) => polygon.memberZoneIds)
-            .toSet();
+        final kept = plan.polygons.map((polygon) => polygon.hitZoneId).toSet();
         expect(kept, contains('r0:c0'));
-        expect(kept, isNot(contains('r20:c10')));
-        expect(kept, isNot(contains('r-20:c-10')));
+        expect(kept, contains('r20:c10'));
+        expect(kept, contains('r-20:c-10'));
       },
     );
 
-    test('culling still drops parents outside the viewport at the cap', () {
-      final zones = parentGrid(
+    test('culling drops cells outside the viewport and keeps the rest', () {
+      final zones = spacedGrid(
         rowMin: -25,
         rowMax: 25,
         colMin: -15,
         colMax: 15,
       );
-      final farNorth = hexCellCenter(200, 0, scale: mapHexMaxScale);
-      final farEast = hexCellCenter(0, 80, scale: mapHexMaxScale);
-      zones.add(_zone(id: 'far-north', lat: farNorth.lat, lng: farNorth.lng));
-      zones.add(_zone(id: 'far-east', lat: farEast.lat, lng: farEast.lng));
-      final center = hexCellCenter(0, 0, scale: mapHexMaxScale);
+      const farNorthLat = 70.0;
+      const farEastLng = 120.0;
+      zones.add(_zone(id: 'far-north', lat: farNorthLat, lng: 0));
+      zones.add(_zone(id: 'far-east', lat: 0, lng: farEastLng));
+      final center = hexCellCenter(0, 0);
       final viewport = _phone(zoom: 6, lat: center.lat, lng: center.lng);
       final plan = planZonesForMapRender(zones: zones, viewport: viewport);
 
-      expect(plan.scale, mapHexMaxScale);
-      expect(plan.polygons.length, lessThanOrEqualTo(mapMaxDrawnPolygons));
-      final ids = plan.polygons
-          .expand((polygon) => polygon.memberZoneIds)
-          .toSet();
+      expect(plan.scale, mapTrueSizeScale);
+      final ids = plan.polygons.map((polygon) => polygon.hitZoneId).toSet();
       expect(ids, contains('r0:c0'));
       expect(ids, isNot(contains('far-north')));
       expect(ids, isNot(contains('far-east')));
-      expect(viewport.containsLatLng(farNorth.lat, farNorth.lng), isFalse);
-      expect(viewport.containsLatLng(farEast.lat, farEast.lng), isFalse);
-    });
-
-    test(
-      'a user max of 1 stays on actual cells and drops by viewport priority',
-      () async {
-        final scales = <int>[];
-        final session = HexRenderSession(
-          aggregate: (zones, scale) async {
-            scales.add(scale);
-            return aggregateCoverageHexes(zones, scale: scale);
-          },
-        );
-        final zones = parentGrid(
-          rowMin: -20,
-          rowMax: 20,
-          colMin: -10,
-          colMax: 10,
-        );
-        expect(zones.length, greaterThan(mapMaxDrawnPolygons));
-        final plan = await session.render(
-          identity: 1,
-          zones: zones,
-          viewport: _world(5),
-          maxScale: 1,
-        );
-
-        expect(scales, <int>[1]);
-        expect(plan, isNotNull);
-        expect(plan!.nominalScale, 1);
-        expect(plan.scale, 1);
-        expect(plan.usedEmergencyBackstop, isTrue);
-        expect(plan.droppedChildren, isTrue);
-        expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
-        expect(plan.polygons.every((polygon) => polygon.scale == 1), isTrue);
-        final kept = plan.polygons
-            .expand((polygon) => polygon.memberZoneIds)
-            .toSet();
-        expect(kept, contains('r0:c0'));
-        expect(kept, isNot(contains('r20:c10')));
-        expect(kept, isNot(contains('r-20:c-10')));
-      },
-    );
-  });
-
-  group('user max hex scale', () {
-    test('zoom 5 with max scale 8 does not draw the regional parent', () {
-      final zones = _city(rows: 12, cols: 12);
-      final capped = planZonesForMapRender(
-        zones: zones,
-        viewport: _world(5),
-        maxScale: 8,
-      );
-      final hard = planZonesForMapRender(zones: zones, viewport: _world(5));
-
-      expect(hexClusterScaleForZoom(5), mapHexMaxScale);
-      expect(capped.nominalScale, 8);
-      expect(capped.scale, 8);
-      expect(capped.scale, lessThan(hard.scale));
-      expect(hard.scale, mapHexMaxScale);
-      expect(capped.usedEmergencyBackstop, isFalse);
-      expect(capped.droppedChildren, isFalse);
-      expect(capped.representedChildren, zones.length);
-      expect(capped.polygons.every((polygon) => polygon.scale == 8), isTrue);
-    });
-
-    test('explicit default cap matches the hard ceiling', () {
-      final zones = _city(rows: 6, cols: 6);
-      final implicit = planZonesForMapRender(zones: zones, viewport: _world(3));
-      final explicit = planZonesForMapRender(
-        zones: zones,
-        viewport: _world(3),
-        maxScale: mapHexMaxScale,
-      );
-
-      expect(explicit.nominalScale, implicit.nominalScale);
-      expect(explicit.scale, mapHexMaxScale);
-      expect(explicit.droppedChildren, isFalse);
-      expect(explicit.representedChildren, zones.length);
-      expect(explicit.polygons.single.points, implicit.polygons.single.points);
-    });
-
-    test('backstop coarsens only up to the user max', () async {
-      final scales = <int>[];
-      final session = HexRenderSession(
-        aggregate: (zones, scale) async {
-          scales.add(scale);
-          return aggregateCoverageHexes(zones, scale: scale);
-        },
-      );
-      final zones = <CoverageZone>[];
-      for (var row = -20; row <= 20; row++) {
-        for (var col = -10; col <= 10; col++) {
-          final center = hexCellCenter(row, col, scale: mapHexMaxScale);
-          zones.add(_zone(id: 'r$row:c$col', lat: center.lat, lng: center.lng));
-        }
+      expect(viewport.containsLatLng(farNorthLat, 0), isFalse);
+      expect(viewport.containsLatLng(0, farEastLng), isFalse);
+      var inView = 0;
+      for (final zone in zones) {
+        if (!viewport.containsLatLng(zone.centerLat, zone.centerLng)) continue;
+        inView++;
+        expect(ids, contains(zone.id));
       }
-      final plan = await session.render(
-        identity: 1,
-        zones: zones,
-        viewport: _world(16),
-        maxScale: 8,
+      expect(inView, greaterThan(0));
+      expect(plan.polygons.length, greaterThanOrEqualTo(inView));
+      expect(
+        plan.polygons.every((polygon) => polygon.scale == mapTrueSizeScale),
+        isTrue,
       );
-
-      expect(scales, <int>[1, 2, 4, 8]);
-      expect(plan, isNotNull);
-      expect(plan!.nominalScale, 1);
-      expect(plan.scale, 8);
-      expect(plan.droppedChildren, isTrue);
-      expect(plan.polygons, hasLength(mapMaxDrawnPolygons));
-      expect(plan.polygons.every((polygon) => polygon.scale == 8), isTrue);
     });
   });
 
@@ -715,7 +502,7 @@ void main() {
     );
 
     test(
-      'a zoom band change aggregates again and shares one in-flight job',
+      'concurrent renders share one aggregate and zoom does not aggregate again',
       () async {
         var calls = 0;
         final session = HexRenderSession(
@@ -743,14 +530,19 @@ void main() {
         ]);
         expect(calls, 1);
         expect(plans.every((plan) => plan != null), isTrue);
+        expect(plans.every((plan) => plan!.scale == mapTrueSizeScale), isTrue);
 
         final high = await session.render(
           identity: 7,
           zones: zones,
           viewport: _phone(zoom: 3, lat: origin.lat, lng: origin.lng),
         );
-        expect(calls, 2);
-        expect(high!.scale, hexClusterScaleForZoom(3));
+        expect(calls, 1);
+        expect(high!.scale, mapTrueSizeScale);
+        expect(
+          high.polygons.every((polygon) => polygon.scale == mapTrueSizeScale),
+          isTrue,
+        );
       },
     );
 

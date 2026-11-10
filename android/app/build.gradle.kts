@@ -112,6 +112,12 @@ android {
 
     buildTypes {
         release {
+            // Phone ABIs only. Debug and profile keep the default ABIs,
+            // including x86_64, so an emulator still runs. A release build
+            // on an x86_64 emulator needs a local abiFilters override.
+            ndk {
+                abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
+            }
             // Debug signing keeps local and CI builds working until secrets exist.
             signingConfig = if (hasReleaseKeystore) {
                 signingConfigs.getByName("release")

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/transport/linux_ble_error_classifier.dart';
+import 'package:mesh_utility/transport/radio_in_use.dart';
 import 'package:mesh_utility/transport/linux_ble_pairing_service_base.dart';
 import 'package:mesh_utility/transport/ble_frame_assembler.dart';
 import 'package:mesh_utility/transport/transport_core.dart';
@@ -105,6 +106,9 @@ class BleTransport extends Transport {
     _debugLog.info('ble_transport', 'Target device selected: $targetDeviceId');
 
     if (_isLinuxDesktop) {
+      // BlueZ disconnect is system-wide. Refuse before _prepareFreshLink,
+      // which calls UniversalBle.disconnect, when another client owns the link.
+      await _throwIfLinuxRadioHeldElsewhere(targetDeviceId);
       await _prepareFreshLink(targetDeviceId);
       await _connectLinux(targetDeviceId);
     } else {
@@ -115,16 +119,20 @@ class BleTransport extends Transport {
   // ---------------------------------------------------------------------------
   // Linux connect flow – modeled after MeshCore-open.
   //
-  // 1. Pre-connect BlueZ disconnect (clear stale link state).
-  // 2. Short 6 s connect timeout (+ 2 s hard-timeout wrapper).
-  // 3. On failure: BlueZ disconnect → 700 ms → retry.
+  // 1. If BlueZ already shows Connected and this session does not own it,
+  //    stop. Do not bluetoothctl-disconnect another app's hold.
+  // 2. Pre-connect BlueZ disconnect only to clear our own stale link.
+  // 3. Short 6 s connect timeout (+ 2 s hard-timeout wrapper).
+  // 4. On a non-busy failure: BlueZ disconnect → 700 ms → retry.
   //    On "abort-by-local": extra 1200 ms → third attempt.
   //    Still failing: pairing/trust recovery → BlueZ disconnect → reconnect.
-  // 4. Post-connect: ensure BlueZ paired + trusted (trust repair or full pair).
+  //    A busy/held failure throws [RadioInUseException] and skips those.
+  // 5. Post-connect: ensure BlueZ paired + trusted (trust repair or full pair).
   // ---------------------------------------------------------------------------
 
   Future<void> _connectLinux(String targetDeviceId) async {
-    // Pre-connect BlueZ disconnect to release any prior stale link.
+    await _throwIfLinuxRadioHeldElsewhere(targetDeviceId);
+    // Pre-connect BlueZ disconnect to release any prior stale link of ours.
     _debugLog.info(
       'linux_ble',
       'Pre-connect BlueZ disconnect for $targetDeviceId',
@@ -157,8 +165,11 @@ class BleTransport extends Transport {
 
     try {
       await attemptConnect();
-    } catch (error) {
+    } catch (error, stackTrace) {
       _debugLog.error('ble_transport', 'device.connect() failure: $error');
+      if (isRadioHeldElsewhereError(error)) {
+        Error.throwWithStackTrace(RadioInUseException(error), stackTrace);
+      }
 
       // Fast-fail on deviceNotFound – the device hasn't been scanned yet.
       // Let the higher-level _recoverConnectAfterDeviceNotFound() in
@@ -190,6 +201,12 @@ class BleTransport extends Transport {
         await attemptConnect();
         _debugLog.info('linux_ble', 'Immediate retry connect succeeded');
       } catch (retryError, retryStackTrace) {
+        if (isRadioHeldElsewhereError(retryError)) {
+          Error.throwWithStackTrace(
+            RadioInUseException(retryError),
+            retryStackTrace,
+          );
+        }
         Object finalConnectError = retryError;
         StackTrace finalConnectStackTrace = retryStackTrace;
         final retryErrorText = retryError.toString().toLowerCase();
@@ -213,6 +230,12 @@ class BleTransport extends Transport {
             );
             recoveredOnThirdAttempt = true;
           } catch (thirdError, thirdStackTrace) {
+            if (isRadioHeldElsewhereError(thirdError)) {
+              Error.throwWithStackTrace(
+                RadioInUseException(thirdError),
+                thirdStackTrace,
+              );
+            }
             finalConnectError = thirdError;
             finalConnectStackTrace = thirdStackTrace;
             _debugLog.error(
@@ -262,9 +285,11 @@ class BleTransport extends Transport {
 
   /// Non-Linux connect (Android, iOS, Windows, Web).
   ///
-  /// Drops a stale GATT session before each attempt. On failure, disconnects,
-  /// backs off, and retries twice. A live link to the same device is rebound
-  /// instead of opened a second time.
+  /// Drops a stale GATT session before each attempt. On an ordinary failure,
+  /// disconnects our client, backs off, and retries twice. A failure that
+  /// means another app holds the radio stops immediately and does not
+  /// disconnect that hold. A live link to the same device is rebound instead
+  /// of opened a second time.
   Future<void> _connectNonLinux(String targetDeviceId) async {
     if (_connected && _deviceId == targetDeviceId) {
       _debugLog.info(
@@ -298,14 +323,25 @@ class BleTransport extends Transport {
           );
         }
         return;
-      } catch (e) {
+      } catch (e, stackTrace) {
         lastError = e;
+        final decision = decideBleConnectAttempt(
+          error: e,
+          attempt: attempt,
+          maxAttempts: maxAttempts,
+        );
         _debugLog.warn(
           'ble_transport',
           'Connect attempt $attempt/$maxAttempts failed for $targetDeviceId: $e',
         );
-        await _cleanupFailedNonLinuxConnect(targetDeviceId);
-        if (attempt >= maxAttempts) break;
+        await _cleanupFailedNonLinuxConnect(
+          targetDeviceId,
+          disconnectPlatformLink: decision.disconnectPlatformLink,
+        );
+        if (decision.radioInUse) {
+          Error.throwWithStackTrace(RadioInUseException(e), stackTrace);
+        }
+        if (!decision.retry) break;
         final backoffMs = attempt == 1 ? 400 : 700;
         await Future<void>.delayed(Duration(milliseconds: backoffMs));
       }
@@ -313,8 +349,14 @@ class BleTransport extends Transport {
     throw lastError ?? StateError('BLE connect failed for $targetDeviceId');
   }
 
-  Future<void> _cleanupFailedNonLinuxConnect(String targetDeviceId) async {
-    if (!kIsWeb) {
+  Future<void> _cleanupFailedNonLinuxConnect(
+    String targetDeviceId, {
+    bool disconnectPlatformLink = true,
+  }) async {
+    // Skip the platform disconnect when the radio is held elsewhere.
+    // UniversalBle.disconnect on Linux drops whichever client BlueZ has, and
+    // a GATT disconnect on some Android stacks can kick the other central.
+    if (disconnectPlatformLink && !kIsWeb) {
       try {
         await UniversalBle.disconnect(targetDeviceId);
       } catch (_) {}
@@ -451,6 +493,11 @@ class BleTransport extends Transport {
   Future<void> _prepareFreshLink(String targetDeviceId) async {
     // Ensure scan and any stale connection state from a previous app session
     // are cleared before a fresh connect attempt.
+    //
+    // On Linux this disconnects whatever client BlueZ has. Callers must
+    // [_throwIfLinuxRadioHeldElsewhere] first so another app's hold is left
+    // alone. On Android, UniversalBle.disconnect only closes this process's
+    // GATT client.
     try {
       await UniversalBle.stopScan();
     } catch (_) {}
@@ -480,6 +527,36 @@ class BleTransport extends Transport {
 
   bool get _isLinuxDesktop =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
+  /// BlueZ reports Connected for every client. When this session does not own
+  /// the link, refuse instead of issuing disconnect.
+  Future<bool> _bluezLinkHeldElsewhere(String targetDeviceId) async {
+    BleConnectionState? state;
+    try {
+      state = await UniversalBle.getConnectionState(targetDeviceId);
+    } catch (e) {
+      _debugLog.debug('linux_ble', 'BlueZ connection check failed: $e');
+      return false;
+    }
+    final locallyConnected = _connected && _deviceId == targetDeviceId;
+    return linuxLinkIsHeldElsewhere(
+      locallyConnected: locallyConnected,
+      systemState: state,
+    );
+  }
+
+  Future<void> _throwIfLinuxRadioHeldElsewhere(String targetDeviceId) async {
+    if (!_isLinuxDesktop) return;
+    if (!await _bluezLinkHeldElsewhere(targetDeviceId)) return;
+    _debugLog.warn(
+      'linux_ble',
+      'Not taking $targetDeviceId: BlueZ already has a connection '
+          'this session does not own',
+    );
+    throw RadioInUseException(
+      'BlueZ reports $targetDeviceId connected to another client',
+    );
+  }
 
   Future<void> _connectAndBind(String targetDeviceId) async {
     // Ensure scanner is not left running from a previous discovery pass.

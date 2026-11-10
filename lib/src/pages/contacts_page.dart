@@ -52,7 +52,9 @@ class _ContactsPageState extends State<ContactsPage> {
         )
         .toList();
     final filtered = showSearch ? filterLocalContacts(all, _query) : all;
-    filtered.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    filtered.sort(
+      (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+    );
 
     final progress = widget.syncProgress;
     final searching = showSearch && _query.trim().isNotEmpty;
@@ -118,7 +120,10 @@ class _ContactsPageState extends State<ContactsPage> {
                 LinearProgressIndicator(
                   value: progress.expected == null || progress.expected == 0
                       ? null
-                      : (progress.received / progress.expected!).clamp(0.0, 1.0),
+                      : (progress.received / progress.expected!).clamp(
+                          0.0,
+                          1.0,
+                        ),
                 ),
             ],
           ),
@@ -134,7 +139,9 @@ class _ContactsPageState extends State<ContactsPage> {
                 return ListTile(
                   title: Text(c.name),
                   subtitle: Text(
-                    type.isEmpty ? c.publicKeyPrefix : '${c.publicKeyPrefix} · $type',
+                    type.isEmpty
+                        ? c.publicKeyPrefix
+                        : '${c.publicKeyPrefix} · $type',
                   ),
                 );
               },

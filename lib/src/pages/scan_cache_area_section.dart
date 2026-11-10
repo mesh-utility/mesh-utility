@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mesh_utility/src/services/boundary_catalog.dart';
+import 'package:mesh_utility/src/services/division_picker.dart';
 import 'package:mesh_utility/src/services/scan_cache_area.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 
@@ -89,7 +90,7 @@ class ScanCacheAreaSection extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'Downloads and keeps scans within this distance of your last known location. '
+            'Chooses the area for an optional Download coverage pack. The live map still loads tiles for the view. '
             'Choices above 250 miles also send a bounding box so a current server can return the full area. '
             'An older server still returns only 250 miles. '
             'Rows already on the device are kept out to the distance you picked. '
@@ -118,6 +119,11 @@ class ScanCacheAreaSection extends StatelessWidget {
             'The download uses the bounding box of those outlines. This device then keeps only the outlines. An older server still caps the request at 250 miles around the center.',
             style: noteStyle,
           ),
+          const SizedBox(height: 4),
+          Text(
+            'Expand a country to see states, and a state to see counties when that mode is on. Select all selects every division under that row. A dash means only some of them are selected.',
+            style: noteStyle,
+          ),
           if ((mode == scanCacheModeAdmin1
                   ? settings.scanCacheAdmin1Ids
                   : settings.scanCacheAdmin2Ids)
@@ -131,85 +137,9 @@ class ScanCacheAreaSection extends StatelessWidget {
         ],
         if (mode == scanCacheModeGlobal) ...[
           const SizedBox(height: 6),
-          Text('Downloads and keeps scans from everywhere.', style: noteStyle),
-        ],
-        const SizedBox(height: 8),
-        _TravelDownloadControls(
-          settings: settings,
-          mode: mode,
-          onChanged: onChanged,
-          labelStyle: labelStyle,
-          floatingStyle: floatingStyle,
-          noteStyle: noteStyle,
-        ),
-      ],
-    );
-  }
-}
-
-class _TravelDownloadControls extends StatelessWidget {
-  const _TravelDownloadControls({
-    required this.settings,
-    required this.mode,
-    required this.onChanged,
-    required this.labelStyle,
-    required this.floatingStyle,
-    required this.noteStyle,
-  });
-
-  final AppSettings settings;
-  final String mode;
-  final Future<void> Function(AppSettings value) onChanged;
-  final TextStyle? labelStyle;
-  final TextStyle? floatingStyle;
-  final TextStyle? noteStyle;
-
-  @override
-  Widget build(BuildContext context) {
-    final global = mode == scanCacheModeGlobal;
-    if (global) {
-      return Text(
-        'Global already covers every place, so travel download stays off.',
-        style: noteStyle,
-      );
-    }
-    final enabled = settings.travelDownloadEnabled;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('Download where I travel'),
-          value: enabled,
-          onChanged: (value) {
-            onChanged(settings.copyWith(travelDownloadEnabled: value));
-          },
-        ),
-        Text(travelDownloadNote, style: noteStyle),
-        if (enabled) ...[
-          const SizedBox(height: 10),
-          DropdownButtonFormField<String>(
-            key: ValueKey<String>(
-              'travel-radius-${settings.travelRadiusMiles}',
-            ),
-            isExpanded: true,
-            initialValue: '${settings.travelRadiusMiles}',
-            decoration: InputDecoration(
-              labelText: 'Travel radius',
-              labelStyle: labelStyle,
-              floatingLabelStyle: floatingStyle,
-              border: const OutlineInputBorder(),
-            ),
-            items: [
-              for (final miles in travelRadiusMileChoices)
-                DropdownMenuItem(value: '$miles', child: Text('$miles miles')),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              final miles = int.parse(value);
-              if (miles == settings.travelRadiusMiles) return;
-              onChanged(settings.copyWith(travelRadiusMiles: miles));
-            },
+          Text(
+            'Global means you can pan anywhere; the map loads true-size tiles for the view. Use Download coverage pack only if you want an offline copy of a chosen area.',
+            style: noteStyle,
           ),
         ],
       ],
@@ -283,12 +213,20 @@ class _DivisionPickerDialog extends StatefulWidget {
   State<_DivisionPickerDialog> createState() => _DivisionPickerDialogState();
 }
 
+class _VisibleDivisionRow {
+  const _VisibleDivisionRow(this.node, this.depth);
+
+  final DivisionPickerNode node;
+  final int depth;
+}
+
 class _DivisionPickerDialogState extends State<_DivisionPickerDialog> {
   late final Set<String> _selected = Set<String>.of(widget.initialSelection);
   final TextEditingController _search = TextEditingController();
   BoundaryIndex? _index;
+  List<DivisionPickerNode> _roots = const <DivisionPickerNode>[];
+  final Set<String> _expanded = <String>{};
   Object? _error;
-  String? _countryCode;
 
   @override
   void initState() {
@@ -296,7 +234,14 @@ class _DivisionPickerDialogState extends State<_DivisionPickerDialog> {
     widget.indexFuture
         .then((index) {
           if (!mounted) return;
-          setState(() => _index = index);
+          final roots = buildDivisionPickerTree(index);
+          setState(() {
+            _index = index;
+            _roots = roots;
+            _expanded
+              ..clear()
+              ..addAll(expandedKeysForPartialSelection(roots, _selected));
+          });
         })
         .catchError((Object error) {
           if (!mounted) return;
@@ -359,99 +304,146 @@ class _DivisionPickerDialogState extends State<_DivisionPickerDialog> {
   }
 
   Widget _buildList(BoundaryIndex index) {
-    final query = _search.text.trim().toLowerCase();
+    final query = _search.text.trim();
     if (query.isNotEmpty) {
-      final matches = <BoundaryDivision>[];
-      for (final division in index.divisions) {
-        if (division.name.toLowerCase().contains(query) ||
-            division.parentName.toLowerCase().contains(query) ||
-            division.id.toLowerCase().contains(query)) {
-          matches.add(division);
-        }
+      final matches = matchingDivisions(index, query);
+      if (matches.isEmpty) {
+        return const Center(child: Text('No matches'));
       }
       return ListView.builder(
         itemCount: matches.length,
-        itemBuilder: (context, i) =>
-            _divisionTile(matches[i], showParent: true),
+        itemBuilder: (context, i) => _searchTile(matches[i]),
       );
     }
 
-    if (_countryCode == null) {
-      final counts = <String, int>{};
-      final selectedCounts = <String, int>{};
-      for (final division in index.divisions) {
-        counts[division.countryCode] = (counts[division.countryCode] ?? 0) + 1;
-        if (_selected.contains(division.id)) {
-          selectedCounts[division.countryCode] =
-              (selectedCounts[division.countryCode] ?? 0) + 1;
-        }
-      }
-      final countries = index.countries
-          .where((country) => (counts[country.code] ?? 0) > 0)
-          .toList(growable: false);
-      return ListView.builder(
-        itemCount: countries.length,
-        itemBuilder: (context, i) {
-          final country = countries[i];
-          final chosen = selectedCounts[country.code] ?? 0;
-          final total = counts[country.code] ?? 0;
-          return ListTile(
-            title: Text(country.name),
-            subtitle: Text(
-              chosen == 0 ? '$total' : '$chosen of $total selected',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => setState(() => _countryCode = country.code),
-          );
-        },
-      );
+    final rows = _visibleRows();
+    if (rows.isEmpty) {
+      return const Center(child: Text('No divisions in this list.'));
     }
-
-    final divisions = <BoundaryDivision>[
-      for (final division in index.divisions)
-        if (division.countryCode == _countryCode) division,
-    ];
-    final countryName = divisions.isEmpty
-        ? _countryCode!
-        : divisions.first.parentName;
-    return Column(
-      children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: () => setState(() => _countryCode = null),
-            icon: const Icon(Icons.arrow_back, size: 16),
-            label: Text(countryName),
-          ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: divisions.length,
-            itemBuilder: (context, i) => _divisionTile(divisions[i]),
-          ),
-        ),
-      ],
+    return ListView.builder(
+      itemCount: rows.length,
+      itemBuilder: (context, i) => _nodeRow(rows[i]),
     );
   }
 
-  Widget _divisionTile(BoundaryDivision division, {bool showParent = false}) {
+  List<_VisibleDivisionRow> _visibleRows() {
+    final rows = <_VisibleDivisionRow>[];
+    void walk(DivisionPickerNode node, int depth) {
+      rows.add(_VisibleDivisionRow(node, depth));
+      if (node.isLeaf || !_expanded.contains(node.key)) return;
+      for (final child in node.children) {
+        walk(child, depth + 1);
+      }
+    }
+
+    for (final root in _roots) {
+      walk(root, 0);
+    }
+    return rows;
+  }
+
+  void _toggleExpanded(String key) {
+    setState(() {
+      if (!_expanded.add(key)) _expanded.remove(key);
+    });
+  }
+
+  void _toggleNode(DivisionPickerNode node) {
+    setState(() => toggleDivisionSelection(_selected, node.leafIds));
+  }
+
+  Widget _nodeRow(_VisibleDivisionRow row) {
+    final node = row.node;
+    final expanded = _expanded.contains(node.key);
+    final state = divisionSelectionState(_selected, node.leafIds);
+    final hits = selectedLeafCount(_selected, node.leafIds);
+    final total = node.leafIds.length;
+    final subtitle = node.isLeaf
+        ? null
+        : (hits == 0 ? '$total' : '$hits of $total selected');
+    return Padding(
+      padding: EdgeInsets.only(left: row.depth * 12.0),
+      child: Row(
+        children: [
+          if (node.isLeaf)
+            const SizedBox(width: 32)
+          else
+            IconButton(
+              key: Key('division-expand-${node.key}'),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              tooltip: expanded ? 'Collapse' : 'Expand',
+              icon: Icon(
+                expanded ? Icons.expand_more : Icons.chevron_right,
+                size: 20,
+              ),
+              onPressed: () => _toggleExpanded(node.key),
+            ),
+          Checkbox(
+            key: Key('division-check-${node.key}'),
+            visualDensity: VisualDensity.compact,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            tristate: !node.isLeaf,
+            value: node.isLeaf ? (state ?? false) : state,
+            onChanged: (_) => _toggleNode(node),
+          ),
+          Expanded(
+            child: InkWell(
+              onTap: () =>
+                  node.isLeaf ? _toggleNode(node) : _toggleExpanded(node.key),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      node.title,
+                      key: Key('division-title-${node.key}'),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (subtitle != null)
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (!node.isLeaf)
+            TextButton(
+              key: Key('division-select-all-${node.key}'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              onPressed: () => _toggleNode(node),
+              child: Text(state == true ? 'Clear' : 'Select all'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _searchTile(BoundaryDivision division) {
     final checked = _selected.contains(division.id);
     return CheckboxListTile(
+      key: Key('division-check-div:${division.id}'),
       value: checked,
       dense: true,
       controlAffinity: ListTileControlAffinity.leading,
       title: Text(division.name),
-      subtitle: showParent && division.parentName.isNotEmpty
+      subtitle: division.parentName.isNotEmpty
           ? Text(division.parentName)
           : null,
-      onChanged: (value) {
-        setState(() {
-          if (value ?? false) {
-            _selected.add(division.id);
-          } else {
-            _selected.remove(division.id);
-          }
-        });
+      onChanged: (_) {
+        setState(
+          () => toggleDivisionSelection(_selected, <String>[division.id]),
+        );
       },
     );
   }

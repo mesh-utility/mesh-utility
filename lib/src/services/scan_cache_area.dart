@@ -44,28 +44,6 @@ const String scanCacheCloudNote =
 /// Requests above this still prune locally to the real cache area.
 const int workerScanRadiusCapMiles = 250;
 
-const List<int> travelRadiusMileChoices = <int>[10, 25, 50];
-
-const int defaultTravelRadiusMiles = 25;
-
-/// A travel download waits until the device has moved at least this far, or
-/// entered a new hex, and at least [travelMinInterval] has passed.
-const double travelMoveThresholdMiles = 10;
-
-const Duration travelMinInterval = Duration(minutes: 5);
-
-/// Retained travel centers older than this are dropped.
-const Duration travelAnchorMaxAge = Duration(days: 30);
-
-/// Newest travel centers kept. Older ones are dropped first.
-const int travelAnchorLimit = 8;
-
-const String travelDownloadNote =
-    'When you leave this area, scans within the travel radius are downloaded around you. '
-    'The last 8 spots are kept for 30 days, so those scans stay after you leave. '
-    'Each spot keeps the radius used for that download. '
-    'A new download waits until you move about 10 miles or enter a new map hex, and at least 5 minutes. '
-    'Nothing is downloaded while Offline Mode is on, the network is down, or a sync is already running.';
 
 bool isScanCacheMode(String mode) {
   return mode == scanCacheModeRadius ||
@@ -243,7 +221,6 @@ ScanCachePruneResult pruneScansToCacheArea({
   Map<String, List<List<List<List<double>>>>> polygonsById =
       const <String, List<List<List<List<double>>>>>{},
   Map<String, bool> priorMembership = const <String, bool>{},
-  List<TravelAreaAnchor> travelAreas = const <TravelAreaAnchor>[],
 }) {
   final normalized = clampScanCacheMode(mode);
   if (!scanCacheWillFilter(
@@ -288,9 +265,7 @@ ScanCachePruneResult pruneScansToCacheArea({
       );
       membership[hex] = inside;
     }
-    final inTravel =
-        !inside && _insideTravel(cell.snapLat, cell.snapLng, travelAreas);
-    if (inside || inTravel) {
+    if (inside) {
       kept.add(scan);
     } else {
       dropped += 1;
@@ -540,72 +515,6 @@ Map<String, Set<String>> groupScanCacheIds(Iterable<String> ids) {
   return grouped;
 }
 
-bool _insideTravel(double lat, double lng, List<TravelAreaAnchor> areas) {
-  for (final area in areas) {
-    if (distanceMiles(lat, lng, area.latitude, area.longitude) <=
-        area.radiusMiles) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/// One downloaded travel bubble. [fetchedAtMillis] is UTC milliseconds.
-class TravelAreaAnchor {
-  const TravelAreaAnchor({
-    required this.latitude,
-    required this.longitude,
-    required this.radiusMiles,
-    required this.fetchedAtMillis,
-  });
-
-  final double latitude;
-  final double longitude;
-  final int radiusMiles;
-  final int fetchedAtMillis;
-
-  Map<String, Object> toJson() {
-    return <String, Object>{
-      'lat': latitude,
-      'lng': longitude,
-      'radiusMiles': radiusMiles,
-      'at': fetchedAtMillis,
-    };
-  }
-
-  static TravelAreaAnchor? fromJson(Object? raw) {
-    if (raw is! Map) return null;
-    final lat = _asDouble(raw['lat'] ?? raw['latitude']);
-    final lng = _asDouble(raw['lng'] ?? raw['longitude']);
-    final radius = (raw['radiusMiles'] as num?)?.toInt();
-    final at =
-        (raw['at'] as num?)?.toInt() ??
-        (raw['fetchedAtMillis'] as num?)?.toInt();
-    if (lat == null || lng == null || radius == null || at == null) {
-      return null;
-    }
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-    return TravelAreaAnchor(
-      latitude: lat,
-      longitude: lng,
-      radiusMiles: clampTravelRadiusMiles(radius),
-      fetchedAtMillis: at,
-    );
-  }
-}
-
-double? _asDouble(Object? value) {
-  if (value is num) return value.toDouble();
-  if (value is String) return double.tryParse(value);
-  return null;
-}
-
-int clampTravelRadiusMiles(int value) {
-  if (travelRadiusMileChoices.contains(value)) return value;
-  return defaultTravelRadiusMiles;
-}
-
-/// Smallest allowed cache radius that is still at least [miles], capped at 800.
 int ceilScanCacheRadiusMiles(int miles) {
   for (final choice in scanCacheRadiusMileChoices) {
     if (choice >= miles) return choice;
@@ -792,11 +701,7 @@ CloudFetchQuery cloudQueryForCache({
     case scanCacheModeAdmin2:
       final bbox = divisionBbox;
       if (bbox == null || !bbox.isValid) return CloudFetchQuery.skipped;
-      return _queryAroundBbox(
-        bbox,
-        deviceLat: centerLat,
-        deviceLng: centerLng,
-      );
+      return _queryAroundBbox(bbox, deviceLat: centerLat, deviceLng: centerLng);
     default:
       return CloudFetchQuery.skipped;
   }
@@ -807,7 +712,12 @@ CloudFetchQuery cloudQueryForCache({
 /// `latDelta = miles / 69` and `lngDelta = miles / (69 * max(|cos(lat)|, 0.1))`.
 /// Latitude is clamped to [-90, 90]. A longitude past ±180 is returned with
 /// [minLongitude] greater than [maxLongitude], which is the antimeridian split.
-({double minLatitude, double maxLatitude, double minLongitude, double maxLongitude})
+({
+  double minLatitude,
+  double maxLatitude,
+  double minLongitude,
+  double maxLongitude,
+})
 boundsForRadiusMiles({
   required double latitude,
   required double longitude,
@@ -929,188 +839,6 @@ bool pointInsideSelectedDivisions({
   );
 }
 
-class TravelFetchDecision {
-  const TravelFetchDecision({required this.fetch, required this.reason});
-
-  final bool fetch;
-  final String reason;
-}
-
-/// Whether a location update should download the travel bubble.
-///
-/// Global is never outside. The first time the device is outside, the fetch
-/// runs immediately. Later fetches wait [travelMinInterval] and then require
-/// a move of [travelMoveThresholdMiles] or a new [hexKey].
-TravelFetchDecision decideTravelFetch({
-  required bool enabled,
-  required bool forceOffline,
-  required bool networkAvailable,
-  required bool syncInFlight,
-  required String mode,
-  required bool outsideCacheArea,
-  required double? deviceLat,
-  required double? deviceLng,
-  required double? lastFetchLat,
-  required double? lastFetchLng,
-  required DateTime? lastFetchAt,
-  required DateTime now,
-}) {
-  if (!enabled) {
-    return const TravelFetchDecision(fetch: false, reason: 'off');
-  }
-  if (clampScanCacheMode(mode) == scanCacheModeGlobal) {
-    return const TravelFetchDecision(fetch: false, reason: 'global');
-  }
-  if (forceOffline) {
-    return const TravelFetchDecision(fetch: false, reason: 'offline');
-  }
-  if (!networkAvailable) {
-    return const TravelFetchDecision(fetch: false, reason: 'no-network');
-  }
-  if (syncInFlight) {
-    return const TravelFetchDecision(fetch: false, reason: 'sync-in-flight');
-  }
-  if (deviceLat == null || deviceLng == null) {
-    return const TravelFetchDecision(fetch: false, reason: 'no-fix');
-  }
-  if (!outsideCacheArea) {
-    return const TravelFetchDecision(fetch: false, reason: 'inside');
-  }
-  if (lastFetchAt == null || lastFetchLat == null || lastFetchLng == null) {
-    return const TravelFetchDecision(fetch: true, reason: 'first');
-  }
-  if (now.difference(lastFetchAt) < travelMinInterval) {
-    return const TravelFetchDecision(fetch: false, reason: 'interval');
-  }
-  final moved = distanceMiles(deviceLat, deviceLng, lastFetchLat, lastFetchLng);
-  final newHex =
-      hexKey(deviceLat, deviceLng) != hexKey(lastFetchLat, lastFetchLng);
-  if (moved >= travelMoveThresholdMiles) {
-    return const TravelFetchDecision(fetch: true, reason: 'moved');
-  }
-  if (newHex) {
-    return const TravelFetchDecision(fetch: true, reason: 'new-hex');
-  }
-  return const TravelFetchDecision(fetch: false, reason: 'not-moved');
-}
-
-List<TravelAreaAnchor> activeTravelAnchors(
-  List<TravelAreaAnchor> anchors,
-  DateTime now,
-) {
-  final cutoff = now.subtract(travelAnchorMaxAge).millisecondsSinceEpoch;
-  final fresh = <TravelAreaAnchor>[
-    for (final anchor in anchors)
-      if (anchor.fetchedAtMillis >= cutoff) anchor,
-  ];
-  fresh.sort((a, b) => b.fetchedAtMillis.compareTo(a.fetchedAtMillis));
-  if (fresh.length <= travelAnchorLimit) {
-    return List<TravelAreaAnchor>.unmodifiable(fresh);
-  }
-  return List<TravelAreaAnchor>.unmodifiable(
-    fresh.sublist(0, travelAnchorLimit),
-  );
-}
-
-/// Records a travel download. A center at least [travelMoveThresholdMiles]
-/// from every stored center is added. A smaller step refreshes the nearest
-/// center's clock and does not use another slot. The list then drops anything
-/// older than 30 days and keeps the newest [travelAnchorLimit] centers.
-List<TravelAreaAnchor> rememberTravelFetch({
-  required List<TravelAreaAnchor> anchors,
-  required double latitude,
-  required double longitude,
-  required int radiusMiles,
-  required DateTime now,
-}) {
-  final active = activeTravelAnchors(anchors, now).toList();
-  final at = now.millisecondsSinceEpoch;
-  final radius = clampTravelRadiusMiles(radiusMiles);
-  var nearestIndex = -1;
-  var nearestMiles = double.infinity;
-  for (var i = 0; i < active.length; i++) {
-    final miles = distanceMiles(
-      latitude,
-      longitude,
-      active[i].latitude,
-      active[i].longitude,
-    );
-    if (miles < nearestMiles) {
-      nearestMiles = miles;
-      nearestIndex = i;
-    }
-  }
-  if (nearestIndex >= 0 && nearestMiles < travelMoveThresholdMiles) {
-    final nearest = active[nearestIndex];
-    final keptRadius = radius > nearest.radiusMiles
-        ? radius
-        : nearest.radiusMiles;
-    active[nearestIndex] = TravelAreaAnchor(
-      latitude: nearest.latitude,
-      longitude: nearest.longitude,
-      radiusMiles: keptRadius,
-      fetchedAtMillis: at,
-    );
-    return activeTravelAnchors(active, now);
-  }
-  active.add(
-    TravelAreaAnchor(
-      latitude: latitude,
-      longitude: longitude,
-      radiusMiles: radius,
-      fetchedAtMillis: at,
-    ),
-  );
-  return activeTravelAnchors(active, now);
-}
-
-/// Downloaded rows that sit outside the cache area but inside a travel
-/// circle. Full sync keeps these when the worker response is only the home area.
-List<RawScan> scansKeptOnlyByTravel({
-  required List<RawScan> scans,
-  required String mode,
-  required int radiusMiles,
-  double? centerLat,
-  double? centerLng,
-  Set<String> selectedIds = const <String>{},
-  Map<String, List<List<List<List<double>>>>> polygonsById =
-      const <String, List<List<List<List<double>>>>>{},
-  List<TravelAreaAnchor> travelAreas = const <TravelAreaAnchor>[],
-}) {
-  if (travelAreas.isEmpty) return const <RawScan>[];
-  final normalized = clampScanCacheMode(mode);
-  if (!scanCacheWillFilter(
-    mode: normalized,
-    centerLat: centerLat,
-    centerLng: centerLng,
-  )) {
-    return const <RawScan>[];
-  }
-  final prepared = _prepareDivisions(
-    normalized == scanCacheModeRadius ? const <String>{} : selectedIds,
-    polygonsById,
-  );
-  final kept = <RawScan>[];
-  for (final scan in scans) {
-    if (!scan.downloadedFromWorker || scan.locallyRecorded) continue;
-    final cell = snapToHexGrid(scan.latitude, scan.longitude);
-    final inArea = _hexInside(
-      mode: normalized,
-      hexLat: cell.snapLat,
-      hexLng: cell.snapLng,
-      radiusMiles: radiusMiles,
-      centerLat: centerLat,
-      centerLng: centerLng,
-      divisions: prepared,
-    );
-    if (inArea) continue;
-    if (_insideTravel(cell.snapLat, cell.snapLng, travelAreas)) {
-      kept.add(scan);
-    }
-  }
-  return kept;
-}
-
 Map<String, List<List<List<List<double>>>>> polygonsFromGeometryMessage(
   Map<String, Object?> message,
 ) {
@@ -1137,19 +865,8 @@ Map<String, List<List<List<List<double>>>>> polygonsFromGeometryMessage(
   return polygons;
 }
 
-List<TravelAreaAnchor> travelAnchorsFromMessage(Object? raw) {
-  if (raw is! List) return const <TravelAreaAnchor>[];
-  final anchors = <TravelAreaAnchor>[];
-  for (final item in raw) {
-    final anchor = TravelAreaAnchor.fromJson(item);
-    if (anchor != null) anchors.add(anchor);
-  }
-  return anchors;
-}
-
 /// Isolate entry. Message keys: `scans`, `mode`, `radiusMiles`, `centerLat`,
-/// `centerLng`, `selectedIds`, `geometry` (`[{country, json}]`), `membership`,
-/// `travel`.
+/// `centerLng`, `selectedIds`, `geometry` (`[{country, json}]`), `membership`.
 ScanCachePruneResult pruneScanCacheWorker(Map<String, Object?> message) {
   final polygons = polygonsFromGeometryMessage(message);
   final selected = <String>{
@@ -1182,7 +899,6 @@ ScanCachePruneResult pruneScanCacheWorker(Map<String, Object?> message) {
     selectedIds: selected,
     polygonsById: polygons,
     priorMembership: prior,
-    travelAreas: travelAnchorsFromMessage(message['travel']),
   );
 }
 
@@ -1212,32 +928,6 @@ bool pointInsideGeometryWorker(Map<String, Object?> message) {
     longitude: lng,
     selectedIds: selected,
     polygonsById: polygonsFromGeometryMessage(message),
-  );
-}
-
-/// Isolate entry for rows a full sync must not drop before prune.
-List<RawScan> travelPreserveWorker(Map<String, Object?> message) {
-  final scansRaw = message['scans'];
-  final scans = scansRaw is List<RawScan>
-      ? scansRaw
-      : scansRaw is List
-      ? List<RawScan>.from(scansRaw)
-      : const <RawScan>[];
-  final selected = <String>{
-    ...((message['selectedIds'] as List?) ?? const <Object>[])
-        .whereType<String>(),
-  };
-  return scansKeptOnlyByTravel(
-    scans: scans,
-    mode: message['mode']?.toString() ?? scanCacheModeRadius,
-    radiusMiles:
-        (message['radiusMiles'] as num?)?.toInt() ??
-        defaultScanCacheRadiusMiles,
-    centerLat: (message['centerLat'] as num?)?.toDouble(),
-    centerLng: (message['centerLng'] as num?)?.toDouble(),
-    selectedIds: selected,
-    polygonsById: polygonsFromGeometryMessage(message),
-    travelAreas: travelAnchorsFromMessage(message['travel']),
   );
 }
 

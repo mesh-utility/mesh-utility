@@ -348,6 +348,17 @@ void main() {
     expect(fallbackLabel.startsWith(longPrefix), isFalse);
     semantics.dispose();
   });
+
+  test('uploadableNodeName omits short ids and keeps a real name', () {
+    const id = '8B7DE94C';
+    expect(uploadableNodeName(id, id), isNull);
+    expect(uploadableNodeName('Unknown (8B7DE94C)', id), isNull);
+    expect(uploadableNodeName('', id), isNull);
+    expect(uploadableNodeName(null, id), isNull);
+    expect(uploadableNodeName('CPAMe.sh Millheim', id), 'CPAMe.sh Millheim');
+    expect(uploadableNodeName('TestAbe', 'A1B2C3D4'), 'TestAbe');
+  });
+
 }
 
 MeshNode _node({required String nodeId, required String? name}) {

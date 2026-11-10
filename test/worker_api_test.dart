@@ -347,115 +347,99 @@ void main() {
     });
   });
 
-  group('WorkerApi fetchCoverageOverview', () {
-    const headers = {'content-type': 'application/json'};
-    const body = {
-      'generatedDay': '2026-11-09',
-      'scale': 256,
-      'cells': [
-        {
-          'id': '152:-209',
-          's': 4,
-          'r': 0,
-          'n': 1,
-          'radioId': 'SECRET',
-          'lat': 40.7,
-          'timestamp': 1,
-        },
-      ],
-    };
 
-    test('parses a 200 body and drops private fields', () async {
+  group('responseHeader', () {
+    test('reads mixed-case and lowercase header names', () {
+      final response = http.Response(
+        '',
+        200,
+        headers: const {
+          'X-Has-More': '1',
+          'X-Next-Cursor-Timestamp': '1700000000000',
+        },
+      );
+      expect(responseHeader(response, 'x-has-more'), '1');
+      expect(responseHeader(response, 'X-Has-More'), '1');
+      expect(
+        responseHeader(response, 'x-next-cursor-timestamp'),
+        '1700000000000',
+      );
+      expect(responseHeader(response, 'x-next-cursor-id'), isNull);
+    });
+  });
+
+  group('WorkerApi fetchAreaScans pagination', () {
+    String line(int i) {
+      final ts = DateTime.utc(2026, 11, 10, 8, 0, 0)
+          .subtract(Duration(minutes: i))
+          .toIso8601String();
+      return '{"nodeId":"N$i","rssi":-70,"snr":5,"latitude":40.891200,'
+          '"longitude":-77.479000,"timestamp":"$ts","radioId":"AAAA1111",'
+          '"receiverName":"KD3CGK TDeck"}\n';
+    }
+
+    test('follows mixed-case X-Has-More past the old 20-page cap, days=0',
+        () async {
+      const pages = 25;
+      final calls = <Uri>[];
+      Future<http.Response> onGet(Uri uri) async {
+        calls.add(uri);
+        expect(uri.path, '/scans/area');
+        final cursorTs = uri.queryParameters['cursorTimestamp'];
+        final page = cursorTs == null ? 0 : (int.parse(cursorTs) + 1);
+        final more = page < pages - 1;
+        return http.Response(
+          line(page),
+          200,
+          headers: {
+            'content-type': 'application/x-ndjson',
+            // Mixed case, as some stacks preserve the original header names.
+            'X-Has-More': more ? '1' : '0',
+            'X-Next-Cursor-Timestamp': '$page',
+            'X-Next-Cursor-Id': '${page + 1}',
+          },
+        );
+      }
+
+      final api = WorkerApi('https://worker.example', httpGet: onGet);
+      final scans = await api.fetchAreaScans(
+        minLatitude: 40.89,
+        maxLatitude: 40.90,
+        minLongitude: -77.48,
+        maxLongitude: -77.47,
+        days: 0,
+        maxRows: 100000,
+      );
+
+      expect(calls, hasLength(pages));
+      expect(calls.first.queryParameters['days'], '0');
+      expect(scans, hasLength(pages));
+      expect(scans.first.nodeId, 'N0');
+      expect(scans.last.nodeId, 'N${pages - 1}');
+    });
+
+    test('stops when X-Has-More is missing', () async {
+      var calls = 0;
       final api = WorkerApi(
         'https://worker.example',
         httpGet: (uri) async {
-          expect(uri.path, '/coverage/overview');
-          expect(uri.queryParameters, isEmpty);
-          return http.Response(jsonEncode(body), 200, headers: headers);
+          calls += 1;
+          return http.Response(
+            line(0),
+            200,
+            headers: const {'content-type': 'application/x-ndjson'},
+          );
         },
       );
-
-      final overview = await api.fetchCoverageOverview();
-      expect(overview, isNotNull);
-      expect(overview!.generatedDay, '2026-11-09');
-      expect(overview.scale, 256);
-      expect(overview.cells, hasLength(1));
-      expect(overview.cells.single.id, '152:-209');
-      expect(overview.cells.single.strength, 4);
-      expect(overview.cells.single.recency, 0);
-      expect(overview.cells.single.toJson().keys, ['id', 's', 'r', 'n']);
-    });
-
-    test('a 404 on the primary tries the fallback', () async {
-      final hosts = <String>[];
-      final api = WorkerApi(
-        'https://primary.example',
-        fallbackBaseUrl: 'https://fallback.example',
-        httpGet: (uri) async {
-          hosts.add(uri.host);
-          if (uri.host == 'primary.example') {
-            return http.Response('missing', 404);
-          }
-          return http.Response(jsonEncode(body), 200, headers: headers);
-        },
+      final scans = await api.fetchAreaScans(
+        minLatitude: 40.89,
+        maxLatitude: 40.90,
+        minLongitude: -77.48,
+        maxLongitude: -77.47,
+        days: 0,
       );
-
-      final overview = await api.fetchCoverageOverview();
-      expect(hosts, ['primary.example', 'fallback.example']);
-      expect(overview?.cells.single.id, '152:-209');
-    });
-
-    test('404 on every base returns null', () async {
-      final api = WorkerApi(
-        'https://primary.example',
-        fallbackBaseUrl: 'https://fallback.example',
-        httpGet: (uri) async => http.Response('nope', 404),
-      );
-
-      expect(await api.fetchCoverageOverview(), isNull);
-    });
-
-    test('a 500 on the primary still uses a later 200', () async {
-      final api = WorkerApi(
-        'https://primary.example',
-        fallbackBaseUrl: 'https://fallback.example',
-        httpGet: (uri) async {
-          if (uri.host == 'primary.example') {
-            return http.Response('busy', 500, headers: headers);
-          }
-          return http.Response(jsonEncode(body), 200, headers: headers);
-        },
-      );
-
-      expect((await api.fetchCoverageOverview())?.cells.single.strength, 4);
-    });
-
-    test('a non-JSON 200 is skipped', () async {
-      final api = WorkerApi(
-        'https://primary.example',
-        fallbackBaseUrl: 'https://fallback.example',
-        httpGet: (uri) async {
-          if (uri.host == 'primary.example') {
-            return http.Response(
-              '<html></html>',
-              200,
-              headers: const {'content-type': 'text/html'},
-            );
-          }
-          return http.Response(jsonEncode(body), 200, headers: headers);
-        },
-      );
-
-      expect((await api.fetchCoverageOverview())?.generatedDay, '2026-11-09');
-    });
-
-    test('a network error returns null instead of throwing', () async {
-      final api = WorkerApi(
-        'https://worker.example',
-        httpGet: (uri) async => throw Exception('offline'),
-      );
-
-      expect(await api.fetchCoverageOverview(), isNull);
+      expect(calls, 1);
+      expect(scans, hasLength(1));
     });
   });
 }

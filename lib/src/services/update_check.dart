@@ -1,8 +1,13 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/app_version.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
+
+/// Shown when a newer tag exists but this platform cannot install it yet.
+const String updateStillUploadingMessage =
+    'Latest release is still uploading, try again later.';
 
 /// Parsed GitHub release used for in-app update checks.
 class AppReleaseInfo {
@@ -25,6 +30,73 @@ class AppReleaseInfo {
   final String? androidApkUrl;
   final String? sha256SumsUrl;
   final String? linuxArchiveUrl;
+}
+
+bool _assetPresent(String? value) => value != null && value.trim().isNotEmpty;
+
+/// True when [release] has the file this platform can install.
+///
+/// Android needs the APK. Linux needs the archive. Both installers refuse
+/// to continue without SHA256SUMS.txt, so a missing checksum is not installable.
+bool releaseHasInstallableAsset(
+  AppReleaseInfo release,
+  TargetPlatform platform,
+) {
+  if (!_assetPresent(release.sha256SumsUrl)) return false;
+  switch (platform) {
+    case TargetPlatform.android:
+      return _assetPresent(release.androidApkUrl);
+    case TargetPlatform.linux:
+      return _assetPresent(release.linuxArchiveUrl);
+    case TargetPlatform.fuchsia:
+    case TargetPlatform.iOS:
+    case TargetPlatform.macOS:
+    case TargetPlatform.windows:
+      return false;
+  }
+}
+
+/// What [AppUpdateService.check] should surface for [latest].
+///
+/// A newer tag with no installable asset sets [release] to null. Callers must
+/// not store that tag as `updates:skippedTag`.
+class UpdateAvailability {
+  const UpdateAvailability({this.release, this.statusMessage});
+
+  final AppReleaseInfo? release;
+  final String? statusMessage;
+}
+
+UpdateAvailability decideUpdateAvailability({
+  required AppReleaseInfo latest,
+  required String currentVersion,
+  required String? skippedTag,
+  required bool force,
+  required TargetPlatform platform,
+}) {
+  final newer = isNewerAlphaRelease(
+    currentVersion: currentVersion,
+    latestTag: latest.tagName,
+  );
+  if (!newer) {
+    return UpdateAvailability(
+      statusMessage: force
+          ? 'Up to date (${alphaReleaseLabel(currentVersion)}).'
+          : null,
+    );
+  }
+  if (!releaseHasInstallableAsset(latest, platform)) {
+    return UpdateAvailability(
+      statusMessage: force ? updateStillUploadingMessage : null,
+    );
+  }
+  if (skippedTag != null && skippedTag == latest.tagName && !force) {
+    return const UpdateAvailability();
+  }
+  return UpdateAvailability(
+    release: latest,
+    statusMessage: 'Update available: ${latest.tagName}',
+  );
 }
 
 /// True when [latestTag] is a newer Alpha-N than [currentVersion].

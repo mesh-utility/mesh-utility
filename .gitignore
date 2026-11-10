@@ -59,3 +59,9 @@ app.*.map.json
 *.jks
 *.p12
 *.keystore
+
+# Local Worker / D1 scratch (never commit)
+worker/.seed/
+worker/.tmp/
+worker/scripts/_seed_tmp.mjs
+worker/wrangler.toml.bak.prod

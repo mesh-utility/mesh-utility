@@ -1,5 +1,7 @@
 name: Release Artifacts
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name || 'Release Artifacts' }}
+
 on:
   release:
     types:
@@ -360,3 +362,85 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
+
+  # Runs only after assets are attached. Windows can fail the workflow and
+  # this job still runs, because it needs publish-release-assets, not the
+  # Windows job. A failed verify skips the post and does not fail the workflow.
+  announce-discord:
+    name: Announce on Discord
+    needs: [publish-release-assets]
+    if: ${{ !cancelled() && needs.publish-release-assets.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify APK asset and announce
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ env.RELEASE_TAG }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "No release tag; skipping Discord announcement."
+            exit 0
+          fi
+          tag_path=$(printf '%s' "$TAG" | jq -sRr @uri)
+          set +e
+          release_json=$(gh api "/repos/${REPO}/releases/tags/${tag_path}" 2>/tmp/gh-release-err)
+          gh_status=$?
+          set -e
+          rm -f /tmp/gh-release-err
+          if [ "$gh_status" -ne 0 ] || [ -z "$release_json" ]; then
+            echo "Could not read GitHub release ${TAG}; skipping Discord announcement."
+            exit 0
+          fi
+          draft=$(printf '%s' "$release_json" | jq -r '.draft')
+          prerelease=$(printf '%s' "$release_json" | jq -r '.prerelease')
+          if [ "$draft" = "true" ] || [ "$prerelease" = "true" ]; then
+            echo "Release ${TAG} is draft or prerelease; skipping Discord announcement."
+            exit 0
+          fi
+          apk_name=$(printf '%s' "$release_json" | jq -r '[.assets[]?.name | select(startswith("mesh-utility-") and endswith("-android.apk"))] | first // empty')
+          if [ -z "$apk_name" ]; then
+            echo "Android APK asset not attached for ${TAG}; skipping Discord announcement."
+            exit 0
+          fi
+          echo "Found Android APK asset: ${apk_name}"
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "DISCORD_RELEASE_WEBHOOK not set; skipping."
+            exit 0
+          fi
+          NAME=$(printf '%s' "$release_json" | jq -r '.name // empty')
+          URL=$(printf '%s' "$release_json" | jq -r '.html_url // empty')
+          BODY=$(printf '%s' "$release_json" | jq -r '.body // empty')
+          notes=$(printf '%s' "$BODY" | head -c 3000)
+          if [ "${#BODY}" -gt 3000 ]; then
+            notes="${notes}"$'\n\n…full notes on GitHub.'
+          fi
+          apk="https://github.com/${REPO}/releases/download/${TAG}/mesh-utility-${TAG}-android.apk"
+          payload=$(jq -n \
+            --arg title "Mesh Utility ${NAME:-$TAG} is out" \
+            --arg url "$URL" \
+            --arg desc "$notes" \
+            --arg apk "$apk" \
+            --arg rel "$URL" \
+            '{username:"Mesh Utility", allowed_mentions:{parse:[]},
+              embeds:[{title:$title, url:$url, description:$desc, color:5763719,
+                fields:[{name:"Download", value:("[Android APK](" + $apk + ") · [All downloads](" + $rel + ")")}]}]}')
+          set +e
+          http_code=$(curl -sS -o /tmp/discord-announce-body -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            --url "$WEBHOOK" 2>/tmp/discord-announce-err)
+          curl_status=$?
+          set -e
+          rm -f /tmp/discord-announce-body /tmp/discord-announce-err
+          case "${http_code:-}" in
+            200|201|202|204)
+              echo "Announced ${TAG}"
+              ;;
+            *)
+              echo "Discord webhook request failed (HTTP ${http_code:-none}, curl ${curl_status})."
+              exit 1
+              ;;
+          esac

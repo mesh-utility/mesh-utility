@@ -4,9 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/pages/scan_cache_area_section.dart';
+import 'package:mesh_utility/src/services/scan_cache_area.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/battery_optimization.dart';
-import 'package:mesh_utility/src/services/hex_coverage_aggregate.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/services/tile_cache_stats.dart';
@@ -17,6 +17,7 @@ class SettingsPage extends StatefulWidget {
     required this.settings,
     required this.onChanged,
     required this.onSync,
+    this.onDownloadCoveragePack,
     required this.syncing,
     required this.localScanCount,
     required this.uploadQueueCount,
@@ -46,6 +47,7 @@ class SettingsPage extends StatefulWidget {
   final AppSettings settings;
   final Future<void> Function(AppSettings value) onChanged;
   final Future<void> Function() onSync;
+  final Future<void> Function()? onDownloadCoveragePack;
   final bool syncing;
   final int localScanCount;
   final int uploadQueueCount;
@@ -144,6 +146,40 @@ class _SettingsPageState extends State<SettingsPage>
       }
       await _loadBatteryOptimization();
     }
+  }
+
+  Future<void> _handleDownloadCoveragePack() async {
+    final download = widget.onDownloadCoveragePack;
+    if (download == null) return;
+    final mode = clampScanCacheMode(widget.settings.scanCacheMode);
+    if (mode == scanCacheModeGlobal) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Download entire worldwide pack?'),
+          content: const Text(
+            'Cache area is set to Global. This downloads an uncapped worldwide '
+            'coverage dump and can use a lot of data, time, and storage.\n\n'
+            'Sync already refreshes only the tiles you are viewing. Continue '
+            'only if you explicitly want the full worldwide pack.',
+          ),
+          actions: [
+            TextButton(
+              key: const Key('downloadCoveragePackCancel'),
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const Key('downloadCoveragePackConfirm'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Download worldwide pack'),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+    await download();
   }
 
   Future<void> _loadTileCacheStats() async {
@@ -481,30 +517,6 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               const _SectionDivider(),
               _SectionTitle(
-                icon: Icons.hexagon_outlined,
-                label:
-                    'Max hex size when zoomed out: ${hexScaleMilesLabel(s.maxHexScale)}',
-              ),
-              Slider(
-                key: const Key('maxHexScaleSlider'),
-                value: _maxHexScaleSliderIndex(s.maxHexScale).toDouble(),
-                min: 0,
-                max: (mapHexScaleSteps.length - 1).toDouble(),
-                divisions: mapHexScaleSteps.length - 1,
-                label: hexScaleMilesLabel(s.maxHexScale),
-                onChanged: (v) {
-                  final index = v.round().clamp(0, mapHexScaleSteps.length - 1);
-                  widget.onChanged(
-                    s.copyWith(maxHexScale: mapHexScaleSteps[index]),
-                  );
-                },
-              ),
-              Text(
-                'Smaller sizes show more detail. Zoomed far out, cells near the edges may be hidden so the map stays under 700 shapes and keeps the ones nearest the center.',
-                style: noteStyle,
-              ),
-              const _SectionDivider(),
-              _SectionTitle(
                 icon: Icons.radar_outlined,
                 label:
                     'Stats Radius: ${radiusDisplay == 0 ? 'All map' : '$radiusDisplay $unitLabel'}',
@@ -700,6 +712,12 @@ class _SettingsPageState extends State<SettingsPage>
               const SizedBox(height: 4),
               Text(syncMeta, style: noteStyle),
               const SizedBox(height: 8),
+              Text(
+                'Sync uploads your scans and refreshes map tiles for the area you are viewing. '
+                'It does not download the whole cache area. Use Download coverage pack for that.',
+                style: noteStyle,
+              ),
+              const SizedBox(height: 8),
               OutlinedButton.icon(
                 onPressed: (widget.syncing || s.forceOffline)
                     ? null
@@ -712,6 +730,18 @@ class _SettingsPageState extends State<SettingsPage>
                       ? 'Syncing...'
                       : 'Sync now (${widget.uploadQueueCount})',
                 ),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('downloadCoveragePackButton'),
+                onPressed:
+                    (widget.syncing ||
+                        s.forceOffline ||
+                        widget.onDownloadCoveragePack == null)
+                    ? null
+                    : () => unawaited(_handleDownloadCoveragePack()),
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('Download coverage pack'),
               ),
               const _SectionDivider(),
               const Text(
@@ -1120,12 +1150,6 @@ class _SectionDivider extends StatelessWidget {
       child: Divider(height: 1),
     );
   }
-}
-
-int _maxHexScaleSliderIndex(int scale) {
-  final index = mapHexScaleSteps.indexOf(clampMaxHexScale(scale));
-  if (index < 0) return mapHexScaleSteps.length - 1;
-  return index;
 }
 
 String _historyDaysValue(int value) {

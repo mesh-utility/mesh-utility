@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
-import 'package:mesh_utility/src/services/coverage_overview.dart';
+import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/history_pipeline.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
 
@@ -52,11 +52,7 @@ DateTime? parseHttpDateHeader(String raw) {
     final hour = int.parse(rfc.group(4)!);
     final minute = int.parse(rfc.group(5)!);
     final second = int.parse(rfc.group(6)!);
-    if (month == null ||
-        hour > 23 ||
-        minute > 59 ||
-        second > 59 ||
-        day < 1) {
+    if (month == null || hour > 23 || minute > 59 || second > 59 || day < 1) {
       return null;
     }
     final parsed = DateTime.utc(year, month, day, hour, minute, second);
@@ -66,6 +62,18 @@ DateTime? parseHttpDateHeader(String raw) {
     return parsed;
   }
   return DateTime.tryParse(trimmed)?.toUtc();
+}
+
+/// Reads an HTTP header in a case-insensitive way.
+///
+/// Some HTTP stacks preserve the original `X-Has-More` casing; looking up
+/// only the lowercase key would stop `/scans/area` pagination after page 1.
+String? responseHeader(http.Response response, String name) {
+  final want = name.toLowerCase();
+  for (final entry in response.headers.entries) {
+    if (entry.key.toLowerCase() == want) return entry.value;
+  }
+  return null;
 }
 
 Map<String, String> _queryWithOptionalArea({
@@ -349,32 +357,148 @@ class WorkerApi {
     }
   }
 
-  /// Coarse worldwide coverage. Null on 404, a non-JSON body, or a dead network
-  /// so an older Worker is skipped instead of failing startup.
-  Future<CoverageOverview?> fetchCoverageOverview() async {
+  Future<List<HexDetail>> fetchHexWorld({
+    int days = 0,
+    bool includeNodes = true,
+  }) async {
     Object? lastError;
     for (final base in _baseUrls) {
       try {
         final response = await _httpGet(
-          _uri(base, '/coverage/overview'),
-        ).timeout(const Duration(seconds: 15));
+          _uri(base, '/coverage/hex-world', <String, String>{
+            'days': '$days',
+            'nodes': includeNodes ? '1' : '0',
+          }),
+        ).timeout(const Duration(seconds: 45));
         _captureServerDate(response);
         if (response.statusCode == 404) continue;
         if (response.statusCode == 200 && _looksLikeJsonResponse(response)) {
           final decoded = jsonDecode(_decodeUtf8(response));
-          return parseCoverageOverview(
-            decoded,
-            fetchedAt: DateTime.now().toUtc(),
-          );
+          return parseHexListPayload(decoded);
         }
       } catch (error) {
         lastError = error;
       }
     }
-    if (lastError != null) {
-      return null;
+    if (lastError != null) return const <HexDetail>[];
+    return const <HexDetail>[];
+  }
+
+  Future<List<HexDetail>> fetchHexViewport({
+    required double minLatitude,
+    required double maxLatitude,
+    required double minLongitude,
+    required double maxLongitude,
+    int days = 0,
+    bool includeNodes = true,
+  }) async {
+    Object? lastError;
+    for (final base in _baseUrls) {
+      try {
+        final response = await _httpGet(
+          _uri(base, '/coverage/hex-viewport', <String, String>{
+            'minLat': minLatitude.toStringAsFixed(6),
+            'maxLat': maxLatitude.toStringAsFixed(6),
+            'minLng': minLongitude.toStringAsFixed(6),
+            'maxLng': maxLongitude.toStringAsFixed(6),
+            'days': '$days',
+            'nodes': includeNodes ? '1' : '0',
+          }),
+        ).timeout(const Duration(seconds: 30));
+        _captureServerDate(response);
+        if (response.statusCode == 404) continue;
+        if (response.statusCode == 200 && _looksLikeJsonResponse(response)) {
+          final decoded = jsonDecode(_decodeUtf8(response));
+          return parseHexListPayload(decoded);
+        }
+      } catch (error) {
+        lastError = error;
+      }
     }
+    if (lastError != null) return const <HexDetail>[];
+    return const <HexDetail>[];
+  }
+
+  Future<HexDetail?> fetchIndexedHexDetail(String hexId, {int days = 0}) async {
+    final parsed = parseHexDetailId(hexId);
+    if (parsed == null) return null;
+    final id = '${parsed.row}:${parsed.col}';
+    Object? lastError;
+    for (final base in _baseUrls) {
+      try {
+        final response = await _httpGet(
+          _uri(base, '/coverage/hex/$id', <String, String>{'days': '$days'}),
+        ).timeout(const Duration(seconds: 15));
+        _captureServerDate(response);
+        if (response.statusCode == 404) continue;
+        if (response.statusCode == 200 && _looksLikeJsonResponse(response)) {
+          final decoded = jsonDecode(_decodeUtf8(response));
+          return parseHexDetailPayload(decoded);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError != null) return null;
     return null;
+  }
+
+  /// Indexed area scans across days from `/scans/area` (one request per page).
+  /// Never uses the static whole-day files. [maxRows] caps the total.
+  Future<List<RawScan>> fetchAreaScans({
+    required double minLatitude,
+    required double maxLatitude,
+    required double minLongitude,
+    required double maxLongitude,
+    int days = 30,
+    int maxRows = 5000,
+    bool markDownloaded = false,
+  }) async {
+    final all = <RawScan>[];
+    int? cursorTimestamp;
+    int? cursorId;
+    // Worker caps pageSize at 1000 scan rows (each may expand to several
+    // NDJSON node lines). Follow X-Has-More until every page is in, not a
+    // fixed 20-page ceiling.
+    const maxPages = 500;
+    for (var page = 0; page < maxPages && all.length < maxRows; page++) {
+      final query = <String, String>{
+        'minLat': minLatitude.toStringAsFixed(6),
+        'maxLat': maxLatitude.toStringAsFixed(6),
+        'minLng': minLongitude.toStringAsFixed(6),
+        'maxLng': maxLongitude.toStringAsFixed(6),
+        'days': '$days',
+        'pageSize': '$_historyPageSize',
+      };
+      if (cursorTimestamp != null && cursorId != null) {
+        query['cursorTimestamp'] = '$cursorTimestamp';
+        query['cursorId'] = '$cursorId';
+      }
+      final response = await _getWithFallback(
+        '/scans/area',
+        query: query,
+        accept: (response) =>
+            response.statusCode == 200 && _looksLikeNdjsonOrJson(response),
+      );
+      if (response.statusCode != 200) break;
+      all.addAll(
+        await _parseScansOffUi(
+          response.bodyBytes,
+          markDownloaded: markDownloaded,
+        ),
+      );
+      final hasMore =
+          (responseHeader(response, 'x-has-more') ?? '').trim() == '1';
+      if (!hasMore) break;
+      cursorTimestamp = int.tryParse(
+        (responseHeader(response, 'x-next-cursor-timestamp') ?? '').trim(),
+      );
+      cursorId = int.tryParse(
+        (responseHeader(response, 'x-next-cursor-id') ?? '').trim(),
+      );
+      if (cursorTimestamp == null || cursorId == null) break;
+    }
+    return all;
   }
 
   Future<List<RawScan>> fetchRawScans({

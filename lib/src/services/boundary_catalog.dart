@@ -9,6 +9,19 @@ class BoundaryCountry {
   final String name;
 }
 
+/// Mid-level row. US states in the county index. Empty for admin-1.
+class BoundaryRegion {
+  const BoundaryRegion({
+    required this.code,
+    required this.name,
+    required this.countryCode,
+  });
+
+  final String code;
+  final String name;
+  final String countryCode;
+}
+
 class BoundaryDivision {
   const BoundaryDivision({
     required this.id,
@@ -28,11 +41,15 @@ class BoundaryIndex {
     required this.source,
     required this.countries,
     required this.divisions,
+    this.regions = const <BoundaryRegion>[],
   });
 
   final String source;
   final List<BoundaryCountry> countries;
   final List<BoundaryDivision> divisions;
+
+  /// States under [countries]. Present for the US county index only.
+  final List<BoundaryRegion> regions;
 
   static const empty = BoundaryIndex(
     source: '',
@@ -79,7 +96,11 @@ class BoundaryCatalog {
   ) async {
     try {
       final raw = await _bundle.loadString(path);
-      final decoded = await runOffUi(parseBoundaryIndexWorker, raw, force: true);
+      final decoded = await runOffUi(
+        parseBoundaryIndexWorker,
+        raw,
+        force: true,
+      );
       final index = boundaryIndexFromDecoded(decoded);
       store(index);
       return index;
@@ -136,16 +157,21 @@ BoundaryIndex boundaryIndexFromDecoded(Object? decoded) {
     }
   }
   final stateNames = <String, String>{};
+  final regions = <BoundaryRegion>[];
   final stateRaw = decoded['states'];
+  // Keep the country (United States). States used to replace countries, which
+  // made the county picker treat each state as a top-level country.
+  final regionCountry = countries.length == 1 ? countries.first.code : '';
   if (stateRaw is List && stateRaw.isNotEmpty) {
-    countries.clear();
     for (final row in stateRaw) {
       if (row is! Map) continue;
       final code = row['c']?.toString() ?? '';
       final name = row['n']?.toString() ?? code;
       if (code.isEmpty) continue;
       stateNames[code] = name;
-      countries.add(BoundaryCountry(code: code, name: name));
+      regions.add(
+        BoundaryRegion(code: code, name: name, countryCode: regionCountry),
+      );
     }
   }
   final divisions = <BoundaryDivision>[];
@@ -172,6 +198,7 @@ BoundaryIndex boundaryIndexFromDecoded(Object? decoded) {
   return BoundaryIndex(
     source: source,
     countries: List<BoundaryCountry>.unmodifiable(countries),
+    regions: List<BoundaryRegion>.unmodifiable(regions),
     divisions: List<BoundaryDivision>.unmodifiable(divisions),
   );
 }

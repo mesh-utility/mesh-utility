@@ -11,6 +11,13 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterActivity() {
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTask: notification / launcher taps must update the current activity intent
+        // so Flutter plugins see the resume path instead of spawning another task.
+        setIntent(intent)
+    }
+
     private val settingsChannel = "org.meshutility.app/settings"
     private val updateChannel = "org.meshutility.app/updates"
 

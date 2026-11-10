@@ -3,6 +3,10 @@ import 'dart:typed_data';
 
 import 'package:mesh_utility/transport/protocol.dart';
 
+/// Quiet window after the last inbound frame before a GET_CONTACTS pass
+/// is treated as stalled and released so scans can use the radio.
+const Duration kContactSyncStallTimeout = Duration(seconds: 12);
+
 /// Progress for an in-flight GET_CONTACTS sync.
 class ContactSyncProgress {
   const ContactSyncProgress({
@@ -12,6 +16,8 @@ class ContactSyncProgress {
     this.completed = false,
     this.incomplete = false,
     this.disconnected = false,
+    this.stalled = false,
+    this.cancelled = false,
   });
 
   final bool active;
@@ -27,6 +33,14 @@ class ContactSyncProgress {
   /// The transport closed before RESP_END_OF_CONTACTS.
   final bool disconnected;
 
+  /// No inbound frame arrived within [kContactSyncStallTimeout].
+  /// The caller may resume with the latest lastMod.
+  final bool stalled;
+
+  /// The pass was aborted so a scan or force-scan can use the radio.
+  /// The caller should resume after the scan.
+  final bool cancelled;
+
   static const idle = ContactSyncProgress(active: false, received: 0);
 
   /// `Contacts n/total` while the radio's book size is known.
@@ -36,13 +50,17 @@ class ContactSyncProgress {
   }
 
   /// True once the sync has stopped with a terminal outcome.
-  bool get hasOutcome => !active && (completed || incomplete || disconnected);
+  bool get hasOutcome =>
+      !active &&
+      (completed || incomplete || disconnected || stalled || cancelled);
 
   /// [progressLabel] while running. After the sync stops, the terminal status.
   /// A dropped link reads "Bluetooth disconnected", never "incomplete".
   String get statusLabel {
     if (disconnected) return 'Bluetooth disconnected';
     if (!hasOutcome) return progressLabel;
+    if (cancelled) return progressLabel;
+    if (stalled) return '$progressLabel stalled';
     final outcome = completed ? 'complete' : 'incomplete';
     return '$progressLabel $outcome';
   }
@@ -66,7 +84,7 @@ class SyncedContact {
 }
 
 /// How a one-pass GET_CONTACTS finished.
-enum ContactSyncOutcome { completed, incomplete, disconnected }
+enum ContactSyncOutcome { completed, incomplete, disconnected, stalled, cancelled }
 
 /// Result of a contact book sync.
 class ContactSyncResult {
@@ -101,8 +119,10 @@ class ContactSyncResult {
 /// (0x80+), is ignored. RESP_ERR (code 1) before START finishes as
 /// [ContactSyncOutcome.incomplete] and is not retried. The inbound stream
 /// closing, or [linkClosed] completing, finishes as
-/// [ContactSyncOutcome.disconnected]. There is no timeout and no second
-/// request.
+/// [ContactSyncOutcome.disconnected]. A quiet stall of [stallTimeout]
+/// finishes as [ContactSyncOutcome.stalled] so the caller can resume.
+/// [cancel] finishing aborts as [ContactSyncOutcome.cancelled] so a scan
+/// can use the radio. RESP_ERR before START is still not retried.
 ///
 /// [onContacts] receives newly accepted contacts in batches so the caller can
 /// merge them into the per-radio store without blocking the frame parser.
@@ -111,6 +131,8 @@ Future<ContactSyncResult> collectContactsFromInbound({
   required Future<void> Function(int? since) sendGetContacts,
   int? initialSince,
   Future<void>? linkClosed,
+  Duration? stallTimeout,
+  Future<void>? cancel,
   Map<String, String> seedContacts = const {},
   Map<String, int> seedTypes = const {},
   Map<String, int> seedLastMods = const {},
@@ -139,6 +161,8 @@ Future<ContactSyncResult> collectContactsFromInbound({
         completed: terminal && outcome == ContactSyncOutcome.completed,
         incomplete: terminal && outcome == ContactSyncOutcome.incomplete,
         disconnected: terminal && outcome == ContactSyncOutcome.disconnected,
+        stalled: terminal && outcome == ContactSyncOutcome.stalled,
+        cancelled: terminal && outcome == ContactSyncOutcome.cancelled,
       ),
     );
   }
@@ -217,9 +241,18 @@ Future<ContactSyncResult> collectContactsFromInbound({
     framesDone.complete();
   }
 
+  Timer? stallTimer;
+  void armStall() {
+    stallTimer?.cancel();
+    final timeout = stallTimeout;
+    if (timeout == null) return;
+    stallTimer = Timer(timeout, () => finish(ContactSyncOutcome.stalled));
+  }
+
   void onFrame(Uint8List frame) {
     framesSeen++;
     if (frame.isEmpty || framesDone.isCompleted) return;
+    armStall();
     final code = frame[0];
     if (code == respCodeContactsStart) {
       sawStart = true;
@@ -256,25 +289,37 @@ Future<ContactSyncResult> collectContactsFromInbound({
     onDone: () => finish(ContactSyncOutcome.disconnected),
   );
   emit();
+  if (cancel != null) {
+    unawaited(
+      cancel.then<void>(
+        (_) => finish(ContactSyncOutcome.cancelled),
+        onError: (_) => finish(ContactSyncOutcome.cancelled),
+      ),
+    );
+  }
   try {
     await sendGetContacts(requestSince);
+    armStall();
     if (!framesDone.isCompleted) {
-      if (linkClosed == null) {
-        await framesDone.future;
-      } else {
-        try {
-          await Future.any([framesDone.future, linkClosed]);
-        } catch (_) {
-          // linkClosed failed closed. Same as a dropped connection.
-        }
-        if (!framesDone.isCompleted) {
-          finish(ContactSyncOutcome.disconnected);
-        }
+      final racers = <Future<void>>[framesDone.future];
+      if (linkClosed != null) racers.add(linkClosed);
+      try {
+        await Future.any(racers);
+      } catch (_) {
+        // linkClosed failed closed. Same as a dropped connection.
+      }
+      if (!framesDone.isCompleted) {
+        finish(
+          linkClosed != null
+              ? ContactSyncOutcome.disconnected
+              : ContactSyncOutcome.stalled,
+        );
       }
     }
   } catch (_) {
     finish(ContactSyncOutcome.disconnected);
   } finally {
+    stallTimer?.cancel();
     await sub.cancel();
   }
   try {

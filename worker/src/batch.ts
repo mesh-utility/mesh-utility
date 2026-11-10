@@ -5,6 +5,14 @@
 
 import { batchCommitToGitHub, getGitHubFileContent } from './github';
 import { upsertScanDay, utcDayFromTs } from './scan_days';
+import {
+  applyScanToHexDetail,
+  findExistingScanId,
+  fineHexAt,
+  isPlaceholderNodeName,
+  recomputeHexFromScans,
+  usableNodeName,
+} from './hex_detail';
 
 interface ScanPayload {
   radioId: string;
@@ -117,11 +125,37 @@ export class ScanBatcher {
       if (db) {
         try {
           for (const scan of newScans) {
+            const normalizedRadioId = this.normalizeRadioId(scan.radioId);
+            const scanRow = {
+              radioId: normalizedRadioId,
+              timestamp: scan.timestamp,
+              latitude: scan.location.lat,
+              longitude: scan.location.lon,
+              altitude: scan.location.altitude || null,
+              nodes: scan.nodes,
+            };
+
             if (this.hasSuccessfulNodes(scan.nodes)) {
-              await this.deleteDeadZonesForHex(scan.location.lat, scan.location.lon);
+              const deleted = await this.deleteDeadZonesForHex(scan.location.lat, scan.location.lon);
+              if (deleted > 0) {
+                try {
+                  const hex = fineHexAt(scan.location.lat, scan.location.lon);
+                  await recomputeHexFromScans(db, hex.id);
+                } catch (e) {
+                  console.error('Failed to recompute hex_detail after deadzone delete:', e);
+                }
+              }
             }
 
-            const normalizedRadioId = this.normalizeRadioId(scan.radioId);
+            // Idempotent: exact resubmits skip both the scans insert and the index.
+            try {
+              const existingId = await findExistingScanId(db, scanRow);
+              if (existingId != null) {
+                continue;
+              }
+            } catch (e) {
+              console.error('Failed to look up existing scan for hex_detail dedupe:', e);
+            }
 
             await db.prepare(`
               INSERT INTO scans (radioId, timestamp, latitude, longitude, altitude, nodes, committed)
@@ -142,6 +176,13 @@ export class ScanBatcher {
               await upsertScanDay(db, utcDayFromTs(scan.timestamp), scan.timestamp);
             } catch (e) {
               console.error('Failed to upsert scan_days:', e);
+            }
+
+            // Incremental hex index in the same request as the insert.
+            try {
+              await applyScanToHexDetail(db, scanRow, { skipDedupeLookup: true });
+            } catch (e) {
+              console.error('Failed to upsert hex_detail:', e);
             }
           }
 
@@ -514,9 +555,9 @@ export class ScanBatcher {
     };
   }
 
-  private async deleteDeadZonesForHex(lat: number, lon: number): Promise<void> {
+  private async deleteDeadZonesForHex(lat: number, lon: number): Promise<number> {
     const db = this.env.DB;
-    if (!db) return;
+    if (!db) return 0;
 
     const targetHex = this.hexKey(lat, lon);
     const range = 0.01;
@@ -552,6 +593,7 @@ export class ScanBatcher {
     if (deleted > 0) {
       console.log(`[scan_batch] Deleted ${deleted} deadzone row(s) for hex ${targetHex}`);
     }
+    return deleted;
   }
 
   private hasSuccessfulNodes(
@@ -640,11 +682,8 @@ export class ScanBatcher {
     for (const scan of scans) {
       for (const node of scan.nodes) {
         const nodeId = this.normalizeHexId(node.nodeId);
-        const name = typeof node.name === 'string' ? node.name.trim() : '';
+        const name = usableNodeName(typeof node.name === 'string' ? node.name : '', nodeId);
         if (!nodeId || !name) {
-          continue;
-        }
-        if (name.startsWith('Unknown (')) {
           continue;
         }
         nameUpdates.set(nodeId, name);
@@ -691,9 +730,11 @@ export class ScanBatcher {
           }
           const existingName =
             typeof parsedNode.name === 'string' ? parsedNode.name.trim() : '';
-          const existingIsUnknown = this.isUnknownLike(existingName);
-          // Always upgrade unknown/empty names when ID matches a known node.
-          if (!existingIsUnknown && existingName === latestName) {
+          // Never replace a real name. Only fill empty / unknown / id-shaped placeholders.
+          if (!isPlaceholderNodeName(existingName, parsedNodeId)) {
+            continue;
+          }
+          if (existingName === latestName) {
             continue;
           }
           parsedNode.name = latestName;

@@ -29,14 +29,21 @@ import {
   type ScanDayRow,
 } from './scan_days';
 import {
-  OVERVIEW_LOOKBACK_DAYS,
-  overviewAggregateBinds,
-  overviewAggregateSql,
-  overviewCacheKey,
-  serveCoverageOverview,
-  workerOverviewCache,
-  type OverviewAggRow,
-} from './coverage_overview';
+  DETAIL_CACHE_CONTROL,
+  HEX_VIEWPORT_PATH,
+  HEX_WORLD_PATH,
+  VIEWPORT_CACHE_CONTROL,
+  WORLD_CACHE_CONTROL,
+  buildHexDetailPayload,
+  buildHexListPayload,
+  extractHexIdFromPath,
+  hexWorldCacheKey,
+  loadHexesForWindow,
+  loadOneHex,
+  parseDaysParam,
+  serveCachedJson,
+  workerHexCache,
+} from './hex_detail';
 
 export interface Env {
   DB: D1Database;
@@ -117,7 +124,7 @@ function parsePositiveInt(raw: string | null, fallback: number, max: number): nu
 }
 
 /** Max calendar days /coverage will scan even when days=0 (all). Prevents bind storms. */
-const COVERAGE_MAX_DAYS = OVERVIEW_LOOKBACK_DAYS;
+const COVERAGE_MAX_DAYS = 90;
 
 function wantsDebugRows(request: Request, env: Env): boolean {
   const url = new URL(request.url);
@@ -344,20 +351,7 @@ function stripApiPrefix(request: Request): { request: Request; url: URL } {
   return { request: new Request(url.toString(), request), url };
 }
 
-async function loadOverviewRows(env: Env, nowMs: number): Promise<OverviewAggRow[]> {
-  const result = await env.DB.prepare(overviewAggregateSql())
-    .bind(...overviewAggregateBinds(nowMs))
-    .all();
-  return ((result.results || []) as OverviewAggRow[]).map((row) => ({
-    row_key: row.row_key,
-    col_key: row.col_key,
-    max_ts: row.max_ts,
-    n: row.n,
-    heard: row.heard,
-    best_rssi: row.best_rssi,
-    best_snr: row.best_snr,
-  }));
-}
+
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -443,21 +437,80 @@ export default {
         );
       }
 
-      // Coarse worldwide coverage. Same cache short-circuit as the other
-      // reads, the same 90-day ceiling, and no query parameters to widen it.
-      if (url.pathname === '/coverage/overview' && request.method === 'GET') {
+      // Full-field hex index (replaces privacy tiles/overview once 0006 lands).
+      if (url.pathname === HEX_WORLD_PATH && request.method === 'GET') {
         const nowMs = Date.now();
-        return serveCoverageOverview({
+        const days = parseDaysParam(url.searchParams.get('days'), 0);
+        // World stays compact: node lists are served on demand via viewport / one-hex.
+        return serveCachedJson({
           nowMs,
           corsHeaders,
+          cacheControl: WORLD_CACHE_CONTROL,
           bypassCache: wantsDebugRows(request, env),
           ifNoneMatch: request.headers.get('If-None-Match'),
-          cacheKey: overviewCacheKey(url.toString()),
+          cacheKey: hexWorldCacheKey(url.toString(), days),
           waitUntil: (promise) => ctx.waitUntil(promise),
-          cache: workerOverviewCache(),
-          loadRows: (generatedAt) => loadOverviewRows(env, generatedAt),
+          cache: workerHexCache(),
+          load: async () => {
+            const rows = await loadHexesForWindow(env.DB, { days, nowMs, includeNodes: false });
+            return buildHexListPayload(rows, { days, includeNodes: false }).body;
+          },
         });
       }
+
+      if (url.pathname === HEX_VIEWPORT_PATH && request.method === 'GET') {
+        const nowMs = Date.now();
+        const days = parseDaysParam(url.searchParams.get('days'), 0);
+        // Viewport may include the full per-hex node/observer lists; never drop them for size.
+        const includeNodes = url.searchParams.get('nodes') !== '0';
+        const south = Number(url.searchParams.get('minLat') ?? url.searchParams.get('south'));
+        const north = Number(url.searchParams.get('maxLat') ?? url.searchParams.get('north'));
+        const west = Number(url.searchParams.get('minLng') ?? url.searchParams.get('west'));
+        const east = Number(url.searchParams.get('maxLng') ?? url.searchParams.get('east'));
+        if (![south, north, west, east].every(Number.isFinite)) {
+          return new Response(JSON.stringify({ error: 'minLat, maxLat, minLng, maxLng required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
+        }
+        const rows = await loadHexesForWindow(env.DB, {
+          days,
+          nowMs,
+          includeNodes,
+          bounds: { south, north, west, east },
+        });
+        const body = buildHexListPayload(rows, { days, includeNodes, softByteCap: Number.POSITIVE_INFINITY }).body;
+        return serveCachedJson({
+          nowMs,
+          corsHeaders,
+          cacheControl: VIEWPORT_CACHE_CONTROL,
+          bypassCache: true,
+          ifNoneMatch: request.headers.get('If-None-Match'),
+          load: async () => body,
+        });
+      }
+
+      {
+        const hexId = extractHexIdFromPath(url.pathname);
+        if (hexId && request.method === 'GET') {
+          const nowMs = Date.now();
+          const days = parseDaysParam(url.searchParams.get('days'), 0);
+          const fields = await loadOneHex(env.DB, hexId, days, nowMs);
+          const body = fields
+            ? buildHexDetailPayload(fields, days)
+            : JSON.stringify({ v: 1, days, hex: null });
+          return serveCachedJson({
+            nowMs,
+            corsHeaders,
+            cacheControl: DETAIL_CACHE_CONTROL,
+            bypassCache: true,
+            ifNoneMatch: request.headers.get('If-None-Match'),
+            load: async () => body,
+          });
+        }
+      }
+
+
 
       // Fast aggregated coverage endpoint for map rendering.
       if (
@@ -687,6 +740,75 @@ type CoverageAgg = {
       }
 
       // Fetch scans for a specific day (NDJSON format)
+      // Indexed area scans across days (same rows/format as /history/:day, one
+      // time window). Used for tap popups, History and Nodes. Uses the
+      // (latitude, longitude, timestamp) index; bbox is required.
+      if (url.pathname === '/scans/area' && request.method === 'GET') {
+        const geo = resolveGeoBounds(url);
+        if (geo.error) return withCorsResponse(geo.error, corsHeaders);
+        if (geo.kind !== 'bbox') {
+          return new Response(JSON.stringify({ error: 'bbox required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const daysRaw = Number.parseInt(url.searchParams.get('days') || '', 10);
+        // days=0 means all days (no lower time bound).
+        const days = Number.isFinite(daysRaw) && daysRaw >= 0 ? Math.min(daysRaw, 3650) : 30;
+        const pageSize = parsePositiveInt(url.searchParams.get('pageSize'), HISTORY_PAGE_SIZE_DEFAULT, HISTORY_PAGE_SIZE_MAX);
+        const cursorTimestampRaw = Number.parseInt(url.searchParams.get('cursorTimestamp') || '', 10);
+        const cursorIdRaw = Number.parseInt(url.searchParams.get('cursorId') || '', 10);
+        const hasCursor = Number.isFinite(cursorTimestampRaw) && Number.isFinite(cursorIdRaw);
+        const debug = wantsDebugRows(request, env);
+        const tracker: RowsReadTracker = { rowsRead: 0 };
+        // Exact box (no 0.1 degree rounding) so a one-hex lookup stays one hex.
+        const ranges = geo.empty ? null : geo.ranges;
+        const nowMs = Date.now();
+        const queries = buildHistoryQueries({
+          ranges,
+          dayStart: days === 0 ? 0 : nowMs - days * 86_400_000,
+          dayEnd: nowMs + 86_400_000,
+          pageSize,
+          cursorTimestamp: hasCursor ? cursorTimestampRaw : undefined,
+          cursorId: hasCursor ? cursorIdRaw : undefined,
+        });
+        const fetched = await readAreaQueries(env, tracker, queries);
+        const merged = mergeHistoryRows([fetched], pageSize);
+        const encoder = new TextEncoder();
+        const chunks: HistoryChunk[] = [];
+        const texts: Array<string | null> = [];
+        for (const row of merged.rows) {
+          const lines = scanRowToNdjsonLines(row, true);
+          if (lines.length === 0) {
+            chunks.push(null);
+            texts.push(null);
+            continue;
+          }
+          const text = lines.join('\n');
+          texts.push(text);
+          chunks.push({ bytes: encoder.encode(text).length });
+        }
+        const plan = planHistoryPage(chunks, merged.hasMore);
+        const parts: string[] = [];
+        for (let i = 0; i < texts.length; i++) {
+          if (!plan.emit[i] || texts[i] == null) continue;
+          parts.push(texts[i] as string);
+        }
+        const cursorRow = plan.cursorIndex >= 0 ? merged.rows[plan.cursorIndex] : null;
+        const headers: Record<string, string> = withDebugRows({
+          ...corsHeaders,
+          'Content-Type': 'application/x-ndjson',
+          'Cache-Control': 'public, max-age=120, s-maxage=300',
+          'X-Page-Size': `${pageSize}`,
+          'X-Has-More': plan.hasMore ? '1' : '0',
+        }, tracker, debug);
+        if (plan.hasMore && cursorRow != null) {
+          headers['X-Next-Cursor-Timestamp'] = `${cursorRow.timestamp}`;
+          headers['X-Next-Cursor-Id'] = `${cursorRow.id ?? 0}`;
+        }
+        return new Response(parts.join('\n'), { headers });
+      }
+
       if (url.pathname.startsWith('/history/') && request.method === 'GET') {
         const day = url.pathname.split('/')[2].replace('.ndjson', '');
         // Validate date format (YYYY-MM-DD)

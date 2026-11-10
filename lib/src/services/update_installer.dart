@@ -6,11 +6,9 @@ import 'package:mesh_utility/src/services/update_installer_stub.dart'
 Future<String?> installAndroidApk({
   required AppReleaseInfo release,
   void Function(String status)? onStatus,
-}) =>
-    impl.installAndroidApk(release: release, onStatus: onStatus);
+}) => impl.installAndroidApk(release: release, onStatus: onStatus);
 
 Future<String?> installLinuxArchive({
   required AppReleaseInfo release,
   void Function(String status)? onStatus,
-}) =>
-    impl.installLinuxArchive(release: release, onStatus: onStatus);
+}) => impl.installLinuxArchive(release: release, onStatus: onStatus);

@@ -11,16 +11,15 @@ class _HexName {
 /// First usable advertised name for a radio id.
 ///
 /// Walks nodes, then scan results, then raw scans once. A later lookup does
-/// not walk the history again. Matching follows [idsLikelySameDevice]: the
-/// earliest usable name in an 8-char prefix group wins, including a short id
-/// that appears before a longer one. Queries shorter than 8 hex characters
-/// only match an exact stored id, so a path hash cannot copy a name from
-/// another cell.
+/// not walk the history again. Matching uses the full public key when it is
+/// known, and an exact 8-char prefix only when the full key is unknown and
+/// no other stored key shares that prefix for a different radio.
 class FirstAdvertisedNameIndex {
-  final Map<String, _HexName> _by8 = <String, _HexName>{};
+  final Map<String, List<_HexName>> _by8 = <String, List<_HexName>>{};
   final List<_HexName> _shorts = <_HexName>[];
   final Map<String, String> _raw = <String, String>{};
   final Set<String> _seen = <String>{};
+  final Set<String> _allHex = <String>{};
   var _seq = 0;
 
   void add(String rawId, String? rawName) {
@@ -34,16 +33,11 @@ class FirstAdvertisedNameIndex {
       return;
     }
     if (!_seen.add(hex)) return;
+    _allHex.add(hex);
     if (hex.length >= 8) {
-      final key = hex.substring(0, 8);
-      // Bucket identity is the 8-char scan id, so two longer prefixes of the
-      // same radio share one advertised name. Contact uniqueness lives in
-      // LongestHexNameIndex.
-      final candidate = _HexName(key, name, _seq++);
-      final existing = _by8[key];
-      if (existing == null || candidate.order < existing.order) {
-        _by8[key] = candidate;
-      }
+      _by8
+          .putIfAbsent(hex.substring(0, 8), () => <_HexName>[])
+          .add(_HexName(hex, name, _seq++));
       return;
     }
     _shorts.add(_HexName(hex, name, _seq++));
@@ -56,27 +50,35 @@ class FirstAdvertisedNameIndex {
       if (raw.isEmpty) return null;
       return _raw[raw];
     }
-    _HexName? best;
-    void consider(_HexName? candidate) {
-      if (candidate == null) return;
-      if (candidate.hex != target &&
-          !idsLikelySameDevice(candidate.hex, target)) {
+    final matches = <_HexName>[];
+    void consider(_HexName candidate) {
+      if (!nameKeyAppliesTo(candidate.hex, target, allKnownKeys: _allHex)) {
         return;
       }
-      if (best == null || candidate.order < best!.order) best = candidate;
+      matches.add(candidate);
     }
 
     if (target.length >= 8) {
-      consider(_by8[target.substring(0, 8)]);
+      final bucket = _by8[target.substring(0, 8)];
+      if (bucket != null) {
+        for (final candidate in bucket) {
+          consider(candidate);
+        }
+      }
     } else {
-      for (final candidate in _by8.values) {
-        consider(candidate);
+      for (final bucket in _by8.values) {
+        for (final candidate in bucket) {
+          consider(candidate);
+        }
       }
     }
     for (final candidate in _shorts) {
       consider(candidate);
     }
-    return best?.name;
+    if (matches.isEmpty) return null;
+    if (!hexIdsAreOneRadio(matches.map((m) => m.hex))) return null;
+    matches.sort((a, b) => a.order.compareTo(b.order));
+    return matches.first.name;
   }
 }
 
@@ -111,8 +113,9 @@ class LongestHexNameIndex {
     final upper = normalizeHexId(rawId);
     if (upper.isEmpty) return null;
     final matches = <_HexName>[];
+    final allKeys = _allKeys();
     _visit(upper, (entry) {
-      if (entry.hex != upper && !idsLikelySameDevice(entry.hex, upper)) {
+      if (!nameKeyAppliesTo(entry.hex, upper, allKnownKeys: allKeys)) {
         return;
       }
       if (isPlaceholderNodeName(entry.name, upper)) return;
@@ -143,6 +146,17 @@ class LongestHexNameIndex {
       }
     });
     return found;
+  }
+
+  Iterable<String> _allKeys() sync* {
+    for (final bucket in _by8.values) {
+      for (final entry in bucket) {
+        yield entry.hex;
+      }
+    }
+    for (final entry in _shorts) {
+      yield entry.hex;
+    }
   }
 
   void _visit(String upper, void Function(_HexName entry) consider) {
@@ -188,8 +202,12 @@ class LongestHexTypeIndex {
     final upper = normalizeHexId(rawId);
     if (upper.isEmpty) return null;
     final matches = <_HexType>[];
+    final allKeys = <String>[
+      for (final bucket in _by8.values) for (final e in bucket) e.hex,
+      for (final e in _shorts) e.hex,
+    ];
     void consider(_HexType entry) {
-      if (entry.hex != upper && !idsLikelySameDevice(entry.hex, upper)) {
+      if (!nameKeyAppliesTo(entry.hex, upper, allKnownKeys: allKeys)) {
         return;
       }
       matches.add(entry);

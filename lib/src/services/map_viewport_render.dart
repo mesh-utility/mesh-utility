@@ -8,35 +8,23 @@ import 'package:mesh_utility/src/services/hex_coverage_aggregate.dart';
 export 'package:mesh_utility/src/services/hex_coverage_aggregate.dart'
     show
         HexCoverageCluster,
-        HexZoomBand,
         aggregateCoverageHexes,
         aggregateCoverageHexesOffUi,
-        clampMaxHexScale,
-        coarserHexScale,
         coverageFilterIdentity,
         coverageFractionMeaning,
         formatCoverageFraction,
-        hexClusterScaleForZoom,
-        hexScaleMilesLabel,
-        hexScaleWidthMiles,
-        mapDetailZoom,
         mapHexMaxScale,
         mapHexMaxScaleZoom,
-        mapHexScaleSteps,
-        mapHexZoomBands;
+        mapTrueSizeScale;
 
 /// Extra fraction of the camera kept on each edge so hexes do not pop
 /// while the view is still moving.
 const double mapViewportMarginFraction = 0.15;
 
-/// Emergency ceiling on polygons sent to the map layer.
-///
-/// Zoom bands keep a phone or 1024×768 view of regional coverage under this
-/// count. Above it, the renderer coarsens the parent hex up to
-/// [mapHexMaxScale], or a tighter max scale from settings. It does not grow
-/// past that. Clusters nearest the viewport center are kept, and the rest
-/// are dropped.
-const int mapMaxDrawnPolygons = 700;
+/// Debug hint only. A view with at least this many true-size hexes is heavy
+/// until raster tiles exist. Every hex that intersects the viewport is still
+/// drawn. This is not a cap.
+const int mapHeavyTrueSizeDrawCount = 4000;
 
 /// Quiet period before a pan or zoom recomputes the visible set.
 const Duration mapViewportDebounce = Duration(milliseconds: 100);
@@ -219,30 +207,17 @@ class MapDrawPolygon {
   }
 }
 
-/// Polygons for one camera, plus whether the emergency cap had to run.
+/// True-size polygons for one camera.
+///
+/// [scale] is always [mapTrueSizeScale]. Nothing is merged or dropped to
+/// keep a count down.
 class MapRenderPlan {
-  const MapRenderPlan({
-    required this.polygons,
-    required this.nominalScale,
-    required this.scale,
-    required this.usedEmergencyBackstop,
-    required this.droppedChildren,
-  });
+  const MapRenderPlan({required this.polygons, this.scale = mapTrueSizeScale});
 
   final List<MapDrawPolygon> polygons;
 
-  /// Zoom-band scale after the user max and [mapHexMaxScale], before
-  /// emergency coarsening.
-  final int nominalScale;
-
-  /// Hex scale actually drawn.
+  /// Hex scale actually drawn. Always the stored cell.
   final int scale;
-
-  /// True when [scale] is coarser than [nominalScale], or clusters were dropped.
-  final bool usedEmergencyBackstop;
-
-  /// True only when the draw set omitted filtered children to stay at the cap.
-  final bool droppedChildren;
 
   int get representedChildren {
     var sum = 0;
@@ -272,47 +247,24 @@ class MapRenderNeedsScale extends MapRenderAttempt {
 ///
 /// The input list is not modified. Stats and filters stay on that full
 /// selection; this only chooses what the layer draws. Pass an already
-/// filtered list: aggregation never sees zones the caller removed.
-///
-/// At and above [mapDetailZoom], polygons are the stored hexes. Below that,
-/// zones are grouped into parent hexes from [mapHexZoomBands]. The parent
-/// never exceeds [mapHexMaxScale], and [maxScale] can stop it sooner on both
-/// the zoom-band scale and emergency coarsening. Every finite filtered zone
-/// in view belongs to one drawn hex unless [maxDrawn] still does not fit at
-/// that ceiling. The overflow keeps clusters closest to the viewport center
-/// ([MapRenderPlan.droppedChildren]).
+/// filtered list. Every finite zone whose stored hex intersects the viewport
+/// is drawn at [mapTrueSizeScale]. Zoom does not resize, merge, or drop hexes.
 List<MapDrawPolygon> selectZonesForMapRender({
   required List<CoverageZone> zones,
   required MapRenderViewport viewport,
-  int maxDrawn = mapMaxDrawnPolygons,
-  String? pinZoneId,
-  int? maxScale,
 }) {
-  return planZonesForMapRender(
-    zones: zones,
-    viewport: viewport,
-    maxDrawn: maxDrawn,
-    pinZoneId: pinZoneId,
-    maxScale: maxScale,
-  ).polygons;
+  return planZonesForMapRender(zones: zones, viewport: viewport).polygons;
 }
 
-/// Full render decision, including the scale that was drawn and whether the
-/// 700-polygon ceiling had to coarsen or drop.
+/// Full render decision. The drawn scale is always the stored cell.
 MapRenderPlan planZonesForMapRender({
   required List<CoverageZone> zones,
   required MapRenderViewport viewport,
-  int maxDrawn = mapMaxDrawnPolygons,
-  String? pinZoneId,
-  int? maxScale,
   Map<int, List<HexCoverageCluster>>? clustersByScale,
 }) {
   final attempt = resolveMapRender(
     zones: zones,
     viewport: viewport,
-    maxDrawn: maxDrawn,
-    pinZoneId: pinZoneId,
-    maxScale: maxScale,
     allowCompute: true,
     lookup: (scale) => clustersByScale?[scale],
   );
@@ -326,58 +278,21 @@ MapRenderAttempt resolveMapRender({
   required List<CoverageZone> zones,
   required MapRenderViewport viewport,
   required List<HexCoverageCluster>? Function(int scale) lookup,
-  int maxDrawn = mapMaxDrawnPolygons,
-  String? pinZoneId,
-  int? maxScale,
   bool allowCompute = false,
 }) {
-  final cap = maxDrawn < 1 ? 1 : maxDrawn;
-  // Start at the band, already clamped to the user max and the hard ceiling.
-  // Freezing only after a 256 start would still draw oversized hexes.
-  final ceiling = clampMaxHexScale(maxScale);
-  final nominal = hexClusterScaleForZoom(viewport.zoom, maxScale: ceiling);
-  var scale = nominal;
-  for (var guard = 0; guard < 40; guard++) {
-    final found = lookup(scale);
-    if (found == null && !allowCompute) {
-      return MapRenderNeedsScale(scale);
-    }
-    final clusters = found ?? aggregateCoverageHexes(zones, scale: scale);
-    final drawable = <HexCoverageCluster>[];
-    for (final cluster in clusters) {
-      if (cluster.points.length < 3) continue;
-      if (_clusterIntersectsViewport(cluster, viewport)) {
-        drawable.add(cluster);
-      }
-    }
-    final next = coarserHexScale(scale, maxScale: ceiling);
-    final frozen = scale >= ceiling;
-    if (drawable.length <= cap || next == null || frozen) {
-      final polygons = <MapDrawPolygon>[
-        for (final cluster in drawable) _polygonForCluster(cluster),
-      ];
-      final capped = polygons.length > cap;
-      final kept = capped
-          ? _capPolygons(
-              polygons,
-              cap: cap,
-              pinZoneId: pinZoneId,
-              viewport: viewport,
-            )
-          : polygons;
-      return MapRenderReady(
-        MapRenderPlan(
-          polygons: kept,
-          nominalScale: nominal,
-          scale: scale,
-          usedEmergencyBackstop: scale > nominal || capped,
-          droppedChildren: capped,
-        ),
-      );
-    }
-    scale = next;
+  const scale = mapTrueSizeScale;
+  final found = lookup(scale);
+  if (found == null && !allowCompute) {
+    return MapRenderNeedsScale(scale);
   }
-  throw StateError('Hex scale search did not finish.');
+  final clusters = found ?? aggregateCoverageHexes(zones, scale: scale);
+  final polygons = <MapDrawPolygon>[
+    for (final cluster in clusters)
+      if (cluster.points.length >= 3 &&
+          _clusterIntersectsViewport(cluster, viewport))
+        _polygonForCluster(cluster),
+  ];
+  return MapRenderReady(MapRenderPlan(polygons: polygons, scale: scale));
 }
 
 /// Cached parent-hex aggregates for one filtered dataset.
@@ -416,33 +331,27 @@ class HexRenderSession {
     _inflight.clear();
   }
 
-  /// Draws [zones] for [viewport]. Returns null when [identity] changed
-  /// before the aggregate finished.
+  /// Draws [zones] for [viewport] at true size. Returns null when [identity]
+  /// changed before the aggregate finished.
+  ///
+  /// Pan and zoom reuse the scale-1 cache. A new filter identity drops it.
   Future<MapRenderPlan?> render({
     required int identity,
     required List<CoverageZone> zones,
     required MapRenderViewport viewport,
-    String? pinZoneId,
-    int maxDrawn = mapMaxDrawnPolygons,
-    int? maxScale,
   }) async {
     if (_identity != identity) reset(identity);
     final generation = _generation;
-    for (var guard = 0; guard < 40; guard++) {
-      if (_generation != generation || _identity != identity) return null;
-      final attempt = resolveMapRender(
-        zones: zones,
-        viewport: viewport,
-        lookup: (scale) => _cache[scale],
-        maxDrawn: maxDrawn,
-        pinZoneId: pinZoneId,
-        maxScale: maxScale,
-      );
-      if (attempt is MapRenderReady) return attempt.plan;
-      final needed = (attempt as MapRenderNeedsScale).scale;
-      final loaded = await _load(generation, identity, zones, needed);
-      if (loaded == null) return null;
+    final loaded = await _load(generation, identity, zones, mapTrueSizeScale);
+    if (loaded == null || _generation != generation || _identity != identity) {
+      return null;
     }
+    final attempt = resolveMapRender(
+      zones: zones,
+      viewport: viewport,
+      lookup: (scale) => _cache[scale],
+    );
+    if (attempt is MapRenderReady) return attempt.plan;
     return null;
   }
 
@@ -515,88 +424,6 @@ MapDrawPolygon _polygonForCluster(HexCoverageCluster cluster) {
     scale: cluster.scale,
     memberZoneIds: cluster.memberZoneIds,
   );
-}
-
-/// Keeps [cap] polygons closest to the viewport center.
-///
-/// Distance is equirectangular around that center, with longitude wrapped, so
-/// a full-world view prefers the area under the camera. Child count breaks
-/// ties, then [MapDrawPolygon.hitZoneId]. The result never exceeds [cap].
-List<MapDrawPolygon> _capPolygons(
-  List<MapDrawPolygon> polygons, {
-  required int cap,
-  required String? pinZoneId,
-  required MapRenderViewport viewport,
-}) {
-  final centerLat = (viewport.south + viewport.north) / 2;
-  final centerLng = viewport.longitudeCenter;
-  final ranked = List<MapDrawPolygon>.of(polygons)
-    ..sort((a, b) {
-      final byDistance = _viewportPriority(
-        a,
-        centerLat,
-        centerLng,
-      ).compareTo(_viewportPriority(b, centerLat, centerLng));
-      if (byDistance != 0) return byDistance;
-      final byCount = b.childCount.compareTo(a.childCount);
-      if (byCount != 0) return byCount;
-      return a.hitZoneId.compareTo(b.hitZoneId);
-    });
-  final kept = ranked.length <= cap ? ranked : ranked.sublist(0, cap);
-  return _withPin(kept: kept, source: polygons, cap: cap, pinZoneId: pinZoneId);
-}
-
-double _viewportPriority(
-  MapDrawPolygon polygon,
-  double centerLat,
-  double centerLng,
-) {
-  var latSum = 0.0;
-  var sinSum = 0.0;
-  var cosSum = 0.0;
-  var count = 0;
-  for (final point in polygon.points) {
-    if (!point.latitude.isFinite || !point.longitude.isFinite) continue;
-    latSum += point.latitude;
-    final radians = point.longitude * (math.pi / 180);
-    sinSum += math.sin(radians);
-    cosSum += math.cos(radians);
-    count++;
-  }
-  if (count == 0) return double.infinity;
-  final lat = latSum / count;
-  final lng = math.atan2(sinSum, cosSum) * (180 / math.pi);
-  final dLat = lat - centerLat;
-  var dLng = lng - centerLng;
-  if (dLng > 180) dLng -= 360;
-  if (dLng < -180) dLng += 360;
-  final cosLat = math.cos(centerLat * (math.pi / 180));
-  return (dLat * dLat) + ((dLng * cosLat) * (dLng * cosLat));
-}
-
-List<MapDrawPolygon> _withPin({
-  required List<MapDrawPolygon> kept,
-  required List<MapDrawPolygon> source,
-  required int cap,
-  required String? pinZoneId,
-}) {
-  if (pinZoneId == null || pinZoneId.isEmpty) return kept;
-  for (final polygon in kept) {
-    if (polygon.containsZone(pinZoneId)) return kept;
-  }
-  MapDrawPolygon? pinned;
-  for (final polygon in source) {
-    if (polygon.containsZone(pinZoneId)) {
-      pinned = polygon;
-      break;
-    }
-  }
-  if (pinned == null) return kept;
-  if (kept.length < cap) return <MapDrawPolygon>[...kept, pinned];
-  if (kept.isEmpty) return <MapDrawPolygon>[pinned];
-  final copy = List<MapDrawPolygon>.of(kept);
-  copy[copy.length - 1] = pinned;
-  return copy;
 }
 
 double _wrapLongitude(double longitude) {

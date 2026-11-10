@@ -7,8 +7,8 @@ import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
-import 'package:mesh_utility/src/services/coverage_overview.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/map_viewport_render.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
@@ -16,16 +16,39 @@ import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
+import 'package:mesh_utility/src/widgets/coverage_hex_batch_layer.dart';
 import 'package:mesh_utility/src/widgets/map_top_controls.dart';
 import 'dart:math';
 
 enum BaseLayer { dark, standard, satellite }
 
+/// How long an overlay-button tap can still be delivered to the map.
+///
+/// flutter_map confirms a tap after its double-tap window (250ms). A layer
+/// or upload tap in that window must not select a hex.
+const Duration mapOverlayHitSuppressWindow = Duration(milliseconds: 350);
+
+/// True when [focusHexId] should open the coverage popup.
+///
+/// Applying it again because the zone list was rebuilt (sync, upload, tiles)
+/// re-opens a popup the user already closed. A new id clears that latch.
+bool shouldApplyMapHexFocus({
+  required String? focusHexId,
+  required String? appliedFocusHexId,
+  required bool suppressed,
+}) {
+  if (suppressed) return false;
+  if (focusHexId == null || focusHexId.isEmpty) return false;
+  if (focusHexId == appliedFocusHexId) return false;
+  return true;
+}
+
 class MapPage extends StatefulWidget {
   const MapPage({
     super.key,
     required this.zones,
-    this.overviewCells = const [],
+    this.onViewportHexes,
+    this.onFetchHexDetail,
     required this.onRefresh,
     required this.syncing,
     required this.forceOffline,
@@ -53,7 +76,6 @@ class MapPage extends StatefulWidget {
     required this.rawScans,
     required this.nodesCount,
     required this.statsRadiusMiles,
-    required this.maxHexScale,
     required this.unitSystem,
     required this.tileCachingEnabled,
     required this.bleUiEnabled,
@@ -64,10 +86,19 @@ class MapPage extends StatefulWidget {
     this.onTapNodes,
     this.onTapScans,
     this.onClearFocusNodeId,
+    this.onClearFocusHexId,
   });
 
   final List<CoverageZone> zones;
-  final List<CoverageOverviewCell> overviewCells;
+  final Future<void> Function({
+    double? south,
+    double? north,
+    double? west,
+    double? east,
+    bool force,
+  })?
+  onViewportHexes;
+  final Future<List<RawScan>> Function(String zoneId)? onFetchHexDetail;
   final Future<void> Function() onRefresh;
   final bool syncing;
   final bool forceOffline;
@@ -98,7 +129,6 @@ class MapPage extends StatefulWidget {
   final List<RawScan> rawScans;
   final int nodesCount;
   final int statsRadiusMiles;
-  final int maxHexScale;
   final String unitSystem;
   final bool tileCachingEnabled;
   final bool bleUiEnabled;
@@ -110,21 +140,36 @@ class MapPage extends StatefulWidget {
   final VoidCallback? onTapScans;
   final VoidCallback? onClearFocusNodeId;
 
+  /// Clears a one-shot "open this hex" request after the map page leaves.
+  /// Without this, creating the page again selects the hex and the popup
+  /// is still there when the user comes back.
+  final VoidCallback? onClearFocusHexId;
+
   @override
   State<MapPage> createState() => _MapPageState();
 }
 
-class _MapPageState extends State<MapPage> {
+class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   final MapController _mapController = MapController();
   final AppDebugLogService _debugLog = AppDebugLogService.instance;
   BaseLayer _baseLayer = BaseLayer.standard;
   Brightness? _lastThemeBrightness;
   bool _layerSelectorExpanded = false;
   bool _legendExpanded = false;
-  final LayerHitNotifier<String> _polygonHitNotifier = ValueNotifier(null);
   double _mapViewportHeight = 700;
   CoverageZone? _selectedZone;
-  String? _selectedOverviewId;
+
+  /// Focus id that already opened the popup. Zone-list rebuilds must not
+  /// apply it again.
+  String? _appliedFocusHexId;
+
+  /// Set when the popup is dismissed, the page pauses, or a modal opens.
+  /// Stays set until [MapPage.focusHexId] changes to a new id.
+  bool _suppressHexFocus = false;
+
+  /// Map taps that arrive while this is in the future must not select a hex.
+  DateTime? _blockHexSelectUntil;
+  bool _modalDismissQueued = false;
   String? _lastNodeFilterDebugSignature;
   String? _lastPopupDebugSignature;
   LatLng? _lastAutoCenterTarget;
@@ -140,7 +185,7 @@ class _MapPageState extends State<MapPage> {
   final HexRenderSession _hexSession = HexRenderSession();
   List<CoverageZone> _datasetZones = const [];
   int _renderSignature = 0;
-  List<Polygon<String>> _renderPolygons = const [];
+  List<CoverageBatchHex> _batchHexes = const [];
   List<MapDrawPolygon> _drawnPolygons = const [];
   MapDrawPolygon? _clusterPopup;
   MapRenderViewport? _appliedViewport;
@@ -149,10 +194,12 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tileProvider = TileCacheService.createTileProvider(
       enabled: widget.tileCachingEnabled,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _focusHexIfRequested();
       _maybeAutoCenterOnObserver();
     });
@@ -162,9 +209,31 @@ class _MapPageState extends State<MapPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final brightness = Theme.of(context).brightness;
-    if (_lastThemeBrightness == brightness) return;
-    _lastThemeBrightness = brightness;
-    _baseLayer = _defaultBaseLayerForBrightness(brightness);
+    if (_lastThemeBrightness != brightness) {
+      _lastThemeBrightness = brightness;
+      _baseLayer = _defaultBaseLayerForBrightness(brightness);
+    }
+    _dismissHexPopupIfCoveredByModal();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _dismissHexPopup();
+    }
+  }
+
+  @override
+  void deactivate() {
+    // Page leave (Cell History and the other tabs replace this page).
+    // Clear local selection and ask the owner to drop the one-shot focus so
+    // the next visit does not open the popup again.
+    _clearHexPopupFields();
+    final clearFocus = widget.onClearFocusHexId;
+    super.deactivate();
+    if (clearFocus != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => clearFocus());
+    }
   }
 
   @override
@@ -174,11 +243,6 @@ class _MapPageState extends State<MapPage> {
       _tileProvider = TileCacheService.createTileProvider(
         enabled: widget.tileCachingEnabled,
       );
-    }
-    if (widget.maxHexScale != oldWidget.maxHexScale) {
-      _renderRequest++;
-      _renderReady = false;
-      _scheduleViewportRender(immediate: true);
     }
     if (widget.autoCenter) {
       final observerMoved =
@@ -191,21 +255,147 @@ class _MapPageState extends State<MapPage> {
         );
       }
     }
-    if (widget.focusHexId != oldWidget.focusHexId ||
+    final focusChanged = widget.focusHexId != oldWidget.focusHexId;
+    if (focusChanged && (widget.focusHexId ?? '').isNotEmpty) {
+      _suppressHexFocus = false;
+      _appliedFocusHexId = null;
+    }
+    final focusNeedsApply = shouldApplyMapHexFocus(
+      focusHexId: widget.focusHexId,
+      appliedFocusHexId: _appliedFocusHexId,
+      suppressed: _suppressHexFocus,
+    );
+    // Zone-list identity changes on sync, upload, and tile refresh. Those
+    // rebuilds must not re-select a hex that was already shown or dismissed.
+    if (focusChanged ||
         widget.focusNodeId != oldWidget.focusNodeId ||
-        widget.zones != oldWidget.zones) {
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _focusHexIfRequested(),
-      );
+        (widget.zones != oldWidget.zones && focusNeedsApply)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _focusHexIfRequested();
+      });
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _viewportRenderTimer?.cancel();
     _tileProvider.dispose();
-    _polygonHitNotifier.dispose();
     super.dispose();
+  }
+
+  bool get _hexPopupOpen =>
+      _selectedZone != null ||
+      _clusterPopup != null;
+
+  void _clearHexPopupFields() {
+    _suppressHexFocus = true;
+    _selectedZone = null;
+    _clusterPopup = null;
+    _lastPopupDebugSignature = null;
+  }
+
+  /// Drops the coverage popup and blocks focus from opening it again.
+  void _dismissHexPopup() {
+    _suppressHexFocus = true;
+    if (!_hexPopupOpen) return;
+    _clearHexPopupFields();
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _markOverlayInteraction() {
+    _blockHexSelectUntil = DateTime.now().add(mapOverlayHitSuppressWindow);
+  }
+
+  bool get _blockHexSelect {
+    final until = _blockHexSelectUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  void _dismissHexPopupIfCoveredByModal() {
+    final route = ModalRoute.of(context);
+    if (route == null || route.isCurrent) {
+      _modalDismissQueued = false;
+      return;
+    }
+    if (!_hexPopupOpen || _modalDismissQueued) return;
+    _modalDismissQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _modalDismissQueued = false;
+      if (!mounted) return;
+      final current = ModalRoute.of(context);
+      if (current != null && !current.isCurrent) {
+        _dismissHexPopup();
+      }
+    });
+  }
+
+  /// Prefer the painted hex under the finger.
+  ///
+  /// Map taps are converted to lat/lng by a different path than the one that
+  /// paints the rings. After an overlay rebuild that conversion can land
+  /// inside a hex the finger is not on. A geographic hit counts only when
+  /// the painted ring is actually next to the finger.
+  String? _hitCoverage(
+    TapPosition tapPosition,
+    LatLng latLng,
+    List<CoverageBatchHex> hexes,
+  ) {
+    final relative = tapPosition.relative;
+    if (relative != null) {
+      try {
+        final project = _mapController.camera.latLngToScreenOffset;
+        final visual = hitTestCoverageBatchHexesOnScreen(
+          relative,
+          hexes,
+          project,
+        );
+        if (visual != null) return visual;
+        final geographic = hitTestCoverageBatchHexes(latLng, hexes);
+        if (geographic == null) return null;
+        if (_screenPointNearHex(relative, geographic, hexes, project)) {
+          return geographic;
+        }
+        return null;
+      } catch (_) {
+        // Camera is not ready yet. Fall through to the geographic test.
+      }
+    }
+    return hitTestCoverageBatchHexes(latLng, hexes);
+  }
+
+  bool _screenPointNearHex(
+    Offset screen,
+    String hitId,
+    List<CoverageBatchHex> hexes,
+    Offset Function(LatLng point) project,
+  ) {
+    const slop = 8.0;
+    for (final hex in hexes) {
+      if (hex.hitId != hitId) continue;
+      var minX = double.infinity;
+      var minY = double.infinity;
+      var maxX = double.negativeInfinity;
+      var maxY = double.negativeInfinity;
+      for (final point in hex.points) {
+        final projected = project(point);
+        if (!projected.dx.isFinite || !projected.dy.isFinite) return true;
+        if (projected.dx < minX) minX = projected.dx;
+        if (projected.dy < minY) minY = projected.dy;
+        if (projected.dx > maxX) maxX = projected.dx;
+        if (projected.dy > maxY) maxY = projected.dy;
+      }
+      if (minX == double.infinity) return true;
+      if (screen.dx >= minX - slop &&
+          screen.dx <= maxX + slop &&
+          screen.dy >= minY - slop &&
+          screen.dy <= maxY + slop) {
+        return true;
+      }
+    }
+    return false;
   }
 
   void _noteDataset(List<CoverageZone> zones, int identity) {
@@ -215,7 +405,7 @@ class _MapPageState extends State<MapPage> {
     _renderRequest++;
     _hexSession.reset(identity);
     _renderReady = false;
-    _renderPolygons = const [];
+    _batchHexes = const [];
     _drawnPolygons = const [];
     _clusterPopup = null;
     _appliedViewport = null;
@@ -327,8 +517,6 @@ class _MapPageState extends State<MapPage> {
           identity: identity,
           zones: _datasetZones,
           viewport: viewport,
-          pinZoneId: _selectedZone?.id,
-          maxScale: widget.maxHexScale,
         );
         if (!mounted || plan == null || request != _renderRequest) return;
         if (identity != _filterIdentity) return;
@@ -354,21 +542,34 @@ class _MapPageState extends State<MapPage> {
     final sameDraw = _renderReady && signature == _renderSignature;
     final sameView =
         _appliedViewport != null && _sameViewport(_appliedViewport!, viewport);
-    if (sameDraw && (widget.overviewCells.isEmpty || sameView)) return;
+    if (sameDraw && sameView) return;
     if (!sameDraw) {
       _renderReady = true;
       _renderSignature = signature;
       _drawnPolygons = plan.polygons;
-      _renderPolygons = _polygonsForDraw(plan.polygons);
+      _batchHexes = _batchHexesForDraw(plan.polygons);
     }
     _appliedViewport = viewport;
+    final onViewport = widget.onViewportHexes;
+    if (onViewport != null) {
+      unawaited(
+        onViewport(
+          south: viewport.south,
+          north: viewport.north,
+          west: viewport.west,
+          east: viewport.east,
+          force: false,
+        ),
+      );
+    }
+    final heavy = plan.polygons.length >= mapHeavyTrueSizeDrawCount
+        ? ' heavy=true'
+        : '';
     _debugLog.debug(
       'map_render',
-      'polygons=${_renderPolygons.length} dataset=${_datasetZones.length} '
+      'polygons=${_batchHexes.length} dataset=${_datasetZones.length} '
           'zoom=${viewport.zoom.toStringAsFixed(2)} '
-          'scale=${plan.scale} nominal=${plan.nominalScale} '
-          'backstop=${plan.usedEmergencyBackstop} '
-          'dropped=${plan.droppedChildren}',
+          'scale=${plan.scale}$heavy',
     );
     setState(() {});
   }
@@ -394,49 +595,36 @@ class _MapPageState extends State<MapPage> {
     return null;
   }
 
-  CoverageOverviewCell? _overviewCellForHit(String hit) {
-    if (!hit.startsWith(overviewHitPrefix)) return null;
-    final id = hit.substring(overviewHitPrefix.length);
-    for (final cell in widget.overviewCells) {
-      if (cell.id == id) return cell;
-    }
-    return null;
-  }
+  bool _hexDetailLoaded = false;
+  List<RawScan> _hexDetailScans = const <RawScan>[];
+  String? _hexDetailZoneId;
+  bool _hexDetailLoading = false;
 
-  MapRenderViewport _overviewViewport(MapCameraStart camera) {
-    final live = _appliedViewport;
-    if (live != null) return live;
-    final zoom = camera.zoom.isFinite ? camera.zoom : neutralMapZoom;
-    final width = 360 / pow(2, zoom) * 4;
-    final latSpan = width / 2;
-    return MapRenderViewport.fromCenterWidth(
-      south: camera.latitude - latSpan,
-      north: camera.latitude + latSpan,
-      longitudeCenter: camera.longitude,
-      longitudeWidth: width,
-      zoom: zoom,
-    );
-  }
-
-  void _handlePolygonTap() {
-    final hit = _polygonHitNotifier.value;
-    if (hit == null || hit.hitValues.isEmpty) {
-      _debugLog.debug('ui_click', 'Map polygon tap with no hit values');
+  void _loadHexDetail(CoverageZone zone) {
+    final fetch = widget.onFetchHexDetail;
+    if (fetch == null || parseHexDetailId(zone.id) == null) {
+      _hexDetailScans = const <RawScan>[];
+      _hexDetailZoneId = null;
+      _hexDetailLoading = false;
+      _hexDetailLoaded = false;
       return;
     }
-    final zoneId = hit.hitValues.first;
-    final overview = _overviewCellForHit(zoneId);
-    if (overview != null) {
-      _debugLog.info('ui_click', 'Map overview hex click');
+    _hexDetailScans = const <RawScan>[];
+    _hexDetailZoneId = zone.id;
+    _hexDetailLoading = true;
+    _hexDetailLoaded = false;
+    fetch(zone.id).then((scans) {
+      if (!mounted || _hexDetailZoneId != zone.id) return;
       setState(() {
-        _selectedOverviewId = overview.id;
-        _selectedZone = null;
-        _clusterPopup = null;
-        _legendExpanded = false;
+        _hexDetailScans = scans;
+        _hexDetailLoading = false;
+        _hexDetailLoaded = true;
         _lastPopupDebugSignature = null;
       });
-      return;
-    }
+    });
+  }
+
+  void _handleBatchHit(String zoneId) {
     _debugLog.info('ui_click', 'Map hex click zone=$zoneId');
     CoverageZone? zone;
     for (final z in widget.zones) {
@@ -446,15 +634,16 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (zone != null) {
+      _suppressHexFocus = true;
       _disableAutoCenter('popup open');
       final draw = _drawForZoneId(zoneId);
       setState(() {
         _selectedZone = zone;
-        _selectedOverviewId = null;
-        _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
+            _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
         _legendExpanded = false;
         _lastPopupDebugSignature = null;
       });
+      _loadHexDetail(zone);
       _focusZone(zone);
     }
   }
@@ -520,6 +709,7 @@ class _MapPageState extends State<MapPage> {
   }
 
   Future<void> _handleAutoCenterToggleFromControls() async {
+    _markOverlayInteraction();
     _debugLog.info('ui_click', 'Map controls auto-center toggle');
     final nextValue = !widget.autoCenter;
     await widget.onToggleAutoCenter(nextValue);
@@ -529,11 +719,8 @@ class _MapPageState extends State<MapPage> {
     final lng = widget.observerLng;
     if (lat == null || lng == null) return;
 
-    if (_selectedZone != null) {
-      setState(() {
-        _selectedZone = null;
-        _clusterPopup = null;
-      });
+    if (_hexPopupOpen) {
+      _dismissHexPopup();
     }
     final target = LatLng(lat, lng);
     _lastAutoCenterTarget = target;
@@ -552,7 +739,13 @@ class _MapPageState extends State<MapPage> {
   void _focusHexIfRequested() {
     if (_focusNodeIfRequested()) return;
     final hexId = widget.focusHexId;
-    if (hexId == null || hexId.isEmpty) return;
+    if (!shouldApplyMapHexFocus(
+      focusHexId: hexId,
+      appliedFocusHexId: _appliedFocusHexId,
+      suppressed: _suppressHexFocus,
+    )) {
+      return;
+    }
     CoverageZone? zone;
     for (final z in widget.zones) {
       if (z.id == hexId) {
@@ -561,12 +754,14 @@ class _MapPageState extends State<MapPage> {
       }
     }
     if (zone == null || !mounted) return;
+    _appliedFocusHexId = hexId;
     setState(() {
       _selectedZone = zone;
-      _clusterPopup = null;
+        _clusterPopup = null;
       _legendExpanded = false;
       _lastPopupDebugSignature = null;
     });
+    _loadHexDetail(zone);
     _focusZone(zone);
   }
 
@@ -705,6 +900,10 @@ class _MapPageState extends State<MapPage> {
   }
 
   Future<void> _openNodeFilterDialog() async {
+    // Close the hex popup before the route is pushed so the dialog does not
+    // stack on top of it.
+    _markOverlayInteraction();
+    _dismissHexPopup();
     // Respect Stats Radius so only nodes with scans inside the radius appear.
     final radiusScans = _filterScansByRadius(widget.scans);
     final options = _nodeFilterOptions(
@@ -916,49 +1115,9 @@ class _MapPageState extends State<MapPage> {
     final deadZonesLength = dataset.dead;
     final avgRssi = dataset.avgRssi;
     final avgSnr = dataset.avgSnr;
-    final overviewViewport = _overviewViewport(camera);
-    final overviewPlan = planOverviewLayer(
-      cells: widget.overviewCells,
-      zoom: overviewViewport.zoom,
-      detailedCenters: [
-        for (final zone in dataset.filtered)
-          (lat: zone.centerLat, lng: zone.centerLng),
-      ],
-      south: overviewViewport.south,
-      north: overviewViewport.north,
-      west: overviewViewport.west,
-      east: overviewViewport.east,
-      crossesAntimeridian: overviewViewport.crossesAntimeridian,
-      spansAllLongitudes: overviewViewport.spansAllLongitudes,
-      centerLat: camera.latitude,
-      centerLng: camera.longitude,
-    );
-    final mapPolygons = <Polygon<String>>[
-      for (final draw in overviewPlan.draws)
-        Polygon<String>(
-          points: draw.points,
-          hitValue: draw.hitId,
-          color: draw.fill,
-          borderColor: draw.border,
-          borderStrokeWidth: 1,
-        ),
-      ..._renderPolygons,
+    final batchHexes = <CoverageBatchHex>[
+      ..._batchHexes,
     ];
-    CoverageOverviewCell? selectedOverview;
-    if (_selectedOverviewId != null) {
-      for (final draw in overviewPlan.draws) {
-        if (draw.cell.id == _selectedOverviewId) {
-          selectedOverview = draw.cell;
-          break;
-        }
-      }
-    }
-    final overviewTip = selectedOverview == null
-        ? null
-        : overviewTooltipText(
-            strength: selectedOverview.strength,
-            recency: selectedOverview.recency,
-          );
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewWidth = constraints.hasBoundedWidth
@@ -1018,25 +1177,19 @@ class _MapPageState extends State<MapPage> {
                   },
                   onTap: (tapPosition, latLng) {
                     _disableAutoCenter('map tap');
-                    final hit = _polygonHitNotifier.value;
-                    if (hit != null && hit.hitValues.isNotEmpty) {
+                    final hitId = _hitCoverage(tapPosition, latLng, batchHexes);
+                    if (hitId == null) {
                       _debugLog.debug(
                         'ui_click',
-                        'Map tap ignored because polygon hit is active '
-                            '(hits=${hit.hitValues.length})',
+                        'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
                       );
+                      _dismissHexPopup();
                       return;
                     }
-                    _debugLog.debug(
-                      'ui_click',
-                      'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
-                    );
-                    setState(() {
-                      _selectedZone = null;
-                      _selectedOverviewId = null;
-                      _clusterPopup = null;
-                      _lastPopupDebugSignature = null;
-                    });
+                    // A layer/upload tap can still be delivered here after the
+                    // overlay rebuilds. That must not select a hex.
+                    if (_blockHexSelect) return;
+                    _handleBatchHit(hitId);
                   },
                 ),
                 children: [
@@ -1082,42 +1235,23 @@ class _MapPageState extends State<MapPage> {
                         ),
                       ],
                     ),
-                  if (mapPolygons.isNotEmpty)
-                    MouseRegion(
-                      hitTestBehavior: HitTestBehavior.deferToChild,
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: _handlePolygonTap,
-                        child: PolygonLayer<String>(
-                          hitNotifier: _polygonHitNotifier,
-                          polygons: mapPolygons,
-                        ),
-                      ),
-                    ),
+                  if (batchHexes.isNotEmpty)
+                    CoverageHexBatchLayer(hexes: batchHexes),
                 ],
               ),
             ),
-            if (overviewTip != null)
-              Positioned(
-                left: 12,
-                bottom: legendBottom,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: min(280.0, viewWidth - 80),
-                  ),
-                  child: Card(
-                    elevation: 1,
-                    child: InkWell(
-                      onTap: () {
-                        setState(() => _selectedOverviewId = null);
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.all(10),
-                        child: Text(overviewTip, softWrap: true),
-                      ),
-                    ),
-                  ),
+            // Above the map, under the controls. An empty-map tap dismisses
+            // the popup. Filter, layer, and upload stay tappable and close
+            // this popup before they open their own modal.
+            if (_selectedZone != null)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    _debugLog.info('ui_click', 'Popup scrim click close popup');
+                    _dismissHexPopup();
+                  },
+                  child: Container(color: Colors.black.withValues(alpha: 0.42)),
                 ),
               ),
             if (_legendExpanded)
@@ -1128,6 +1262,7 @@ class _MapPageState extends State<MapPage> {
                   elevation: 1,
                   child: InkWell(
                     onTap: () {
+                      _markOverlayInteraction();
                       _debugLog.info('ui_click', 'Legend collapse click');
                       setState(() => _legendExpanded = false);
                     },
@@ -1204,6 +1339,7 @@ class _MapPageState extends State<MapPage> {
                   elevation: 1,
                   child: InkWell(
                     onTap: () {
+                      _markOverlayInteraction();
                       _debugLog.info('ui_click', 'Legend expand click');
                       setState(() => _legendExpanded = true);
                     },
@@ -1256,6 +1392,7 @@ class _MapPageState extends State<MapPage> {
                               'ui_click',
                               'Map filter button click',
                             );
+                            _markOverlayInteraction();
                             _openNodeFilterDialog();
                           },
                           icon: const Icon(Icons.filter_alt),
@@ -1292,6 +1429,7 @@ class _MapPageState extends State<MapPage> {
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
                                   onPressed: () {
+                                    _markOverlayInteraction();
                                     setState(() {
                                       _baseLayer = BaseLayer.dark;
                                       _layerSelectorExpanded = false;
@@ -1308,6 +1446,7 @@ class _MapPageState extends State<MapPage> {
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
                                   onPressed: () {
+                                    _markOverlayInteraction();
                                     setState(() {
                                       _baseLayer = BaseLayer.standard;
                                       _layerSelectorExpanded = false;
@@ -1324,6 +1463,7 @@ class _MapPageState extends State<MapPage> {
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
                                   onPressed: () {
+                                    _markOverlayInteraction();
                                     setState(() {
                                       _baseLayer = BaseLayer.satellite;
                                       _layerSelectorExpanded = false;
@@ -1343,6 +1483,7 @@ class _MapPageState extends State<MapPage> {
                         : IconButton(
                             visualDensity: VisualDensity.compact,
                             onPressed: () {
+                              _markOverlayInteraction();
                               setState(() => _layerSelectorExpanded = true);
                             },
                             icon: Icon(switch (_baseLayer) {
@@ -1368,10 +1509,12 @@ class _MapPageState extends State<MapPage> {
                 bleScanning: widget.bleScanning,
                 bleUiEnabled: widget.bleUiEnabled,
                 onToggleScan: () {
+                  _markOverlayInteraction();
                   _debugLog.info('ui_click', 'Map controls scan toggle click');
                   widget.onBleToggleScan();
                 },
                 onForceScan: () {
+                  _markOverlayInteraction();
                   _debugLog.info('ui_click', 'Map controls force scan click');
                   widget.onBleNodeDiscover();
                 },
@@ -1383,9 +1526,11 @@ class _MapPageState extends State<MapPage> {
                           : widget.connectedRadioName!.trim())
                     : 'Disconnected',
                 onSync: () {
+                  _markOverlayInteraction();
                   _debugLog.info('ui_click', 'Map controls sync click');
                   widget.onRefresh();
                 },
+                onBeforeDialog: _dismissHexPopup,
               ),
             ),
             Positioned(
@@ -1419,21 +1564,6 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
             if (_selectedZone != null)
-              Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {
-                    _debugLog.info('ui_click', 'Popup scrim click close popup');
-                    setState(() {
-                      _selectedZone = null;
-                      _clusterPopup = null;
-                      _lastPopupDebugSignature = null;
-                    });
-                  },
-                  child: Container(color: Colors.black.withValues(alpha: 0.42)),
-                ),
-              ),
-            if (_selectedZone != null)
               Positioned(
                 left: popupLeft,
                 top: popupTop,
@@ -1449,7 +1579,12 @@ class _MapPageState extends State<MapPage> {
                       final latestRaw = latest == null
                           ? _latestRawScanForZone(
                               _selectedZone!,
-                              widget.rawScans,
+                              _hexDetailScans.isEmpty
+                                  ? widget.rawScans
+                                  : <RawScan>[
+                                      ...widget.rawScans,
+                                      ..._hexDetailScans,
+                                    ],
                               nodeIdFilters: effectiveNodeFilters,
                             )
                           : null;
@@ -1574,7 +1709,11 @@ class _MapPageState extends State<MapPage> {
                                       crossAxisAlignment:
                                           CrossAxisAlignment.start,
                                       children: [
-                                        const Text('Last Scan: unavailable'),
+                                        Text(
+                                          _hexDetailLoading
+                                              ? 'Loading scan details…'
+                                              : 'Last Scan: unavailable',
+                                        ),
                                         Row(
                                           children: [
                                             const Icon(
@@ -1584,7 +1723,9 @@ class _MapPageState extends State<MapPage> {
                                             const SizedBox(width: 4),
                                             Expanded(
                                               child: _mapPopupDetailText(
-                                                _selectedZone!.id,
+                                                _zoneLocationLabel(
+                                                  _selectedZone!,
+                                                ),
                                                 style: Theme.of(
                                                   context,
                                                 ).textTheme.bodyMedium,
@@ -1712,7 +1853,9 @@ class _MapPageState extends State<MapPage> {
                                             const SizedBox(width: 4),
                                             Expanded(
                                               child: _mapPopupDetailText(
-                                                _selectedZone!.id,
+                                                _zoneLocationLabel(
+                                                  _selectedZone!,
+                                                ),
                                                 style: Theme.of(
                                                   context,
                                                 ).textTheme.bodyMedium,
@@ -1727,7 +1870,7 @@ class _MapPageState extends State<MapPage> {
                                           ),
                                         if (showCoverageTitle)
                                           Text(
-                                            'Scans: ${_selectedZone!.scanCount}',
+                                            'Scans: ${_hexDetailLoaded ? _hexDetailScans.length : (_selectedZone!.scanCount > 0 ? _selectedZone!.scanCount : _hexDetailScans.length)}',
                                           ),
                                       ],
                                     )
@@ -1960,7 +2103,7 @@ class _MapPageState extends State<MapPage> {
                                       const Divider(height: 8, thickness: 0.6),
                                     if (showCoverageTitle)
                                       Text(
-                                        'Scans: ${_selectedZone!.scanCount}',
+                                        'Scans: ${_hexDetailLoaded ? _hexDetailScans.length : (_selectedZone!.scanCount > 0 ? _selectedZone!.scanCount : _hexDetailScans.length)}',
                                       ),
                                   ],
                                   const SizedBox(height: 6),
@@ -2244,12 +2387,18 @@ ScanResult? _latestScanForZone(
   return latest;
 }
 
+String _zoneLocationLabel(CoverageZone zone) {
+  if (parseHexDetailId(zone.id) == null) return zone.id;
+  return '${zone.centerLat.toStringAsFixed(5)}, ${zone.centerLng.toStringAsFixed(5)}';
+}
+
 RawScan? _latestRawScanForZone(
   CoverageZone zone,
   List<RawScan> scans, {
   Set<String> nodeIdFilters = const <String>{},
 }) {
   final zoneIdCenter = _parseHexKey(zone.id);
+  final tileCell = parseHexDetailId(zone.id);
   RawScan? latest;
   for (final scan in scans) {
     if (nodeIdFilters.isNotEmpty) {
@@ -2261,7 +2410,10 @@ RawScan? _latestRawScanForZone(
     }
     bool matches = false;
     final scanHex = hexKey(scan.latitude, scan.longitude);
-    if (zone.id == scanHex) {
+    if (tileCell != null) {
+      final c = hexCellAt(scan.latitude, scan.longitude);
+      matches = c.row == tileCell.row && c.col == tileCell.col;
+    } else if (zone.id == scanHex) {
       matches = true;
     } else {
       final snapped = snapToHexGrid(scan.latitude, scan.longitude);
@@ -2542,8 +2694,8 @@ BaseLayer _defaultBaseLayerForBrightness(Brightness brightness) {
   return brightness == Brightness.dark ? BaseLayer.dark : BaseLayer.standard;
 }
 
-List<Polygon<String>> _polygonsForDraw(List<MapDrawPolygon> drawn) {
-  final polygons = <Polygon<String>>[];
+List<CoverageBatchHex> _batchHexesForDraw(List<MapDrawPolygon> drawn) {
+  final hexes = <CoverageBatchHex>[];
   for (final draw in drawn) {
     if (draw.points.length < 3) continue;
     // Dead Zone color only when nothing was heard. Weak-but-heard cells use
@@ -2555,20 +2707,17 @@ List<Polygon<String>> _polygonsForDraw(List<MapDrawPolygon> drawn) {
             snr: draw.avgSnr,
             includeDeadZone: false,
           );
-    polygons.add(
-      Polygon<String>(
+    hexes.add(
+      CoverageBatchHex(
         points: draw.points,
-        hitValue: draw.hitZoneId,
-        color: color.withValues(alpha: draw.isDeadZone ? 0.15 : 0.45),
-        borderColor: draw.isDeadZone ? const Color(0xFFEF4444) : color,
-        borderStrokeWidth: 1,
-        pattern: draw.isDeadZone
-            ? StrokePattern.dashed(segments: const [6, 4])
-            : const StrokePattern.solid(),
+        hitId: draw.hitZoneId,
+        fill: color.withValues(alpha: draw.isDeadZone ? 0.15 : 0.45),
+        border: draw.isDeadZone ? const Color(0xFFEF4444) : color,
+        dashed: draw.isDeadZone,
       ),
     );
   }
-  return polygons;
+  return hexes;
 }
 
 List<CoverageZone> _filterZonesByRadius({

@@ -76,4 +76,21 @@ void main() {
       expect(d, closeTo(347.0, 10.0));
     });
   });
+
+  test('hexCellBounds contains only that cell center', () {
+    const lat = 40.89015;
+    const lng = -77.47827;
+    final cell = hexCellAt(lat, lng);
+    final bounds = hexCellBounds(cell.row, cell.col);
+    final center = hexCellCenter(cell.row, cell.col);
+    expect(center.lat, inInclusiveRange(bounds.south, bounds.north));
+    expect(center.lng, inInclusiveRange(bounds.west, bounds.east));
+    final east = hexCellAt(center.lat, center.lng + colSpacing);
+    expect(east.row == cell.row && east.col == cell.col, isFalse);
+    final eastCenter = hexCellCenter(east.row, east.col);
+    expect(
+      eastCenter.lng < bounds.west || eastCenter.lng > bounds.east,
+      isTrue,
+    );
+  });
 }

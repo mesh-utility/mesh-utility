@@ -24,6 +24,7 @@ class MapTopControls extends StatelessWidget {
     required this.forceOffline,
     required this.onSync,
     this.connectionLabel,
+    this.onBeforeDialog,
   });
 
   final bool autoCenter;
@@ -38,6 +39,10 @@ class MapTopControls extends StatelessWidget {
   final bool forceOffline;
   final VoidCallback onSync;
   final String? connectionLabel;
+
+  /// Called before a modal opened from these controls (the full usage tip).
+  /// The map dismisses its hex popup first so the dialog does not stack on it.
+  final VoidCallback? onBeforeDialog;
   static const double _iconSlotWidth = 40;
   static const double _spinnerSlotWidth = 34;
   static const double _contentPaddingX = 6;
@@ -65,8 +70,9 @@ class MapTopControls extends StatelessWidget {
     );
     final tipStrut = _mapUsageTipStrut(tipStyle);
     final tipHeight = _threeLineTipHeight(context, tipStyle, tipStrut);
-    final canForceScan =
-        bleUiEnabled && bleConnected && !bleBusy && bleScanning;
+    // Force is allowed whenever a radio is connected, including while the
+    // scan loop is running or a cycle is in flight (queued until idle).
+    final canForceScan = bleUiEnabled && bleConnected;
     final canToggleScan = bleUiEnabled && bleConnected;
     final iconCount = bleUiEnabled ? 4 : 2;
     final rowWidth =
@@ -172,6 +178,7 @@ class MapTopControls extends StatelessWidget {
                     enabled: bleUiEnabled,
                     style: tipStyle,
                     strutStyle: tipStrut,
+                    onBeforeDialog: onBeforeDialog,
                   ),
                 ),
               ),
@@ -236,12 +243,14 @@ class _RotatingUsageTip extends StatefulWidget {
     required this.enabled,
     this.style,
     this.strutStyle,
+    this.onBeforeDialog,
   });
 
   final List<String> tips;
   final bool enabled;
   final TextStyle? style;
   final StrutStyle? strutStyle;
+  final VoidCallback? onBeforeDialog;
 
   @override
   State<_RotatingUsageTip> createState() => _RotatingUsageTipState();
@@ -373,6 +382,7 @@ class _RotatingUsageTipState extends State<_RotatingUsageTip>
 
   void _showFullTip(String tip) {
     if (!mounted) return;
+    widget.onBeforeDialog?.call();
     unawaited(
       showDialog<void>(
         context: context,

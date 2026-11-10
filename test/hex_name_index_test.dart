@@ -60,16 +60,24 @@ void main() {
     );
   });
 
-  test('first advertised name keeps walk order inside a prefix group', () {
+  test('first advertised name keeps walk order for the same radio only', () {
+    final sameRadio = FirstAdvertisedNameIndex()
+      ..add(shortId, 'EarlierShort')
+      ..add(longId, 'ExactLong');
+    expect(sameRadio.lookup(longId), 'EarlierShort');
+    expect(sameRadio.lookup(shortId), 'EarlierShort');
+
     final index = FirstAdvertisedNameIndex()
       ..add(shortId, 'EarlierShort')
       ..add(longId, 'ExactLong')
       ..add('1052A93011111111', 'First')
       ..add('1052A93022222222', 'Second');
 
-    expect(index.lookup(longId), 'EarlierShort');
-    expect(index.lookup(shortId), 'EarlierShort');
-    expect(index.lookup('1052A93022222222'), 'EarlierShort');
+    // Full keys keep their own names. The 8-char prefix is ambiguous.
+    expect(index.lookup(longId), 'ExactLong');
+    expect(index.lookup(shortId), isNull);
+    expect(index.lookup('1052A93022222222'), 'Second');
+    expect(index.lookup('1052A93011111111'), 'First');
     expect(index.lookup('DEADBEEF'), isNull);
   });
 
@@ -84,13 +92,32 @@ void main() {
     expect(index.lookup('not-a-device'), isNull);
   });
 
-  test('first of two real names in one prefix group wins', () {
+  test('two contacts sharing an 8-char prefix do not guess a name', () {
     final index = FirstAdvertisedNameIndex()
       ..add('1052A93011111111', 'First')
       ..add('1052A93022222222', 'Second');
 
-    expect(index.lookup('1052A93022222222'), 'First');
-    expect(index.lookup(shortId), 'First');
+    expect(index.lookup('1052A93022222222'), 'Second');
+    expect(index.lookup('1052A93011111111'), 'First');
+    expect(index.lookup(shortId), isNull);
+
+    final contacts = LongestHexNameIndex.fromMap(<String, String>{
+      '1052A93011111111': 'First',
+      '1052A93022222222': 'Second',
+    });
+    expect(contacts.lookup(shortId), isNull);
+    expect(contacts.lookup('1052A93011111111'), 'First');
+    expect(contacts.lookup('1052A93022222222'), 'Second');
+    expect(
+      resolvedNameForNodeId(
+        <String, String>{
+          '1052A93011111111': 'First',
+          '1052A93022222222': 'Second',
+        },
+        shortId,
+      ),
+      isNull,
+    );
   });
 
   test('a short hash does not inherit an advertised name from another radio', () {
@@ -267,11 +294,13 @@ void main() {
     for (var i = 0; i < 4000; i++) {
       final id = i.isEven ? shortId : scans[i].nodeId!;
       final name = state.displayNameForNode(id);
-      if (i.isEven) expect(name, 'Beacon');
+      // shortId is ambiguous once a second full key is in history.
+      if (i.isEven) expect(name, shortId);
     }
     expect(watch.elapsedMilliseconds, lessThan(2000));
     expect(state.displayNameForNode(longId), 'Beacon');
-    expect(state.displayNameForNode('1052A93011223344'), 'Beacon');
+    expect(state.displayNameForNode('1052A93011223344'), 'Second');
+    expect(state.displayNameForNode(shortId), shortId);
 
     state.rawScans = <RawScan>[_raw(shortId, 'Replaced')];
     expect(state.displayNameForNode(longId), 'Replaced');
@@ -281,16 +310,15 @@ void main() {
 String? _bruteAdvertised(List<(String, String?)> rows, String query) {
   final target = normalizeHexId(query);
   if (target.isEmpty && query.trim().isEmpty) return null;
+  final allKeys = <String>[
+    for (final row in rows) normalizeHexId(row.$1),
+  ];
 
   bool matches(String candidate) {
     if (target.isEmpty) return candidate.trim() == query.trim();
     final hex = normalizeHexId(candidate);
     if (hex.isEmpty) return false;
-    if (hex == target || idsLikelySameDevice(hex, target)) return true;
-    if (hex.length >= 8 && target.length >= 8) {
-      return hex.substring(0, 8) == target.substring(0, 8);
-    }
-    return false;
+    return nameKeyAppliesTo(hex, target, allKnownKeys: allKeys);
   }
 
   String? usable(String? name, String id) {
@@ -299,12 +327,19 @@ String? _bruteAdvertised(List<(String, String?)> rows, String query) {
     return trimmed;
   }
 
-  for (final row in rows) {
+  final matched = <(String, String, int)>[];
+  for (var i = 0; i < rows.length; i++) {
+    final row = rows[i];
     if (!matches(row.$1)) continue;
     final name = usable(row.$2, row.$1);
-    if (name != null) return name;
+    if (name != null) {
+      matched.add((normalizeHexId(row.$1), name, i));
+    }
   }
-  return null;
+  if (matched.isEmpty) return null;
+  if (!hexIdsAreOneRadio(matched.map((m) => m.$1))) return null;
+  matched.sort((a, b) => a.$3.compareTo(b.$3));
+  return matched.first.$2;
 }
 
 String? _bruteContact(Map<String, String> contacts, String id) {
@@ -315,7 +350,7 @@ String? _bruteContact(Map<String, String> contacts, String id) {
   for (final entry in contacts.entries) {
     final prefix = normalizeHexId(entry.key);
     if (prefix.isEmpty) continue;
-    if (prefix != upper && !idsLikelySameDevice(prefix, upper)) continue;
+    if (!nameKeyAppliesTo(prefix, upper, allKnownKeys: contacts.keys)) continue;
     final name = entry.value.trim();
     if (name.isEmpty || isPlaceholderNodeName(name, upper)) continue;
     matched.add((prefix, name));

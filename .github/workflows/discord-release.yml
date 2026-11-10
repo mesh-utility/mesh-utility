@@ -1,40 +1,108 @@
 name: Announce Release on Discord
 
-# Posts a short announcement to the project Discord when a full release is
-# published. Prereleases and drafts are skipped. Webhook URL lives in the
-# DISCORD_RELEASE_WEBHOOK repository secret. To turn off, delete this file
-# or the secret.
+# Does not run on release: published. That posted before publish-release-assets
+# attached the APK. Release Artifacts announces after the APK is on the release.
+# This file is the manual re-announce, and a safety net when that job did not
+# succeed. The Windows build often fails the overall Release Artifacts run;
+# this still checks the release API for the APK instead of trusting that
+# conclusion. A second post is skipped when Announce on Discord already
+# succeeded for that run.
+
 on:
-  release:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to announce (for example Alpha-24)
+        required: true
+        type: string
+  workflow_run:
+    workflows: ["Release Artifacts"]
     types:
-      - published
+      - completed
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   announce:
     name: Post to Discord
-    if: ${{ !github.event.release.prerelease && !github.event.release.draft }}
     runs-on: ubuntu-latest
     steps:
-      - name: Send announcement
+      - name: Verify APK asset and announce
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
-          TAG: ${{ github.event.release.tag_name }}
-          NAME: ${{ github.event.release.name }}
-          URL: ${{ github.event.release.html_url }}
-          BODY: ${{ github.event.release.body }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+          RUN_EVENT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event || '' }}
+          RUN_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || '' }}
+          RUN_TITLE: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.display_title || '' }}
+          RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
         run: |
-          if [ -z "$WEBHOOK" ]; then
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "$EVENT_NAME" = "workflow_run" ]; then
+            if [ "$RUN_EVENT" = "release" ] && [ -n "$RUN_BRANCH" ]; then
+              TAG="$RUN_BRANCH"
+            elif [ -n "$RUN_TITLE" ]; then
+              TAG="$RUN_TITLE"
+            else
+              TAG="$RUN_BRANCH"
+            fi
+            if [ -n "${RUN_ID:-}" ]; then
+              jobs_json=$(gh api "/repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" 2>/dev/null || true)
+              announced=$(printf '%s' "$jobs_json" | jq -r '[.jobs[]? | select(.name == "Announce on Discord" and .conclusion == "success")] | length' 2>/dev/null || echo 0)
+              if [ "${announced:-0}" != "0" ]; then
+                echo "Release Artifacts job Announce on Discord already succeeded; skipping safety-net post."
+                exit 0
+              fi
+            fi
+          else
+            echo "Unsupported event ${EVENT_NAME}; skipping Discord announcement."
+            exit 0
+          fi
+          if [ -z "${TAG:-}" ]; then
+            echo "No release tag; skipping Discord announcement."
+            exit 0
+          fi
+          tag_path=$(printf '%s' "$TAG" | jq -sRr @uri)
+          set +e
+          release_json=$(gh api "/repos/${REPO}/releases/tags/${tag_path}" 2>/tmp/gh-release-err)
+          gh_status=$?
+          set -e
+          rm -f /tmp/gh-release-err
+          if [ "$gh_status" -ne 0 ] || [ -z "$release_json" ]; then
+            echo "Could not read GitHub release ${TAG}; skipping Discord announcement."
+            exit 0
+          fi
+          draft=$(printf '%s' "$release_json" | jq -r '.draft')
+          prerelease=$(printf '%s' "$release_json" | jq -r '.prerelease')
+          if [ "$draft" = "true" ] || [ "$prerelease" = "true" ]; then
+            echo "Release ${TAG} is draft or prerelease; skipping Discord announcement."
+            exit 0
+          fi
+          apk_name=$(printf '%s' "$release_json" | jq -r '[.assets[]?.name | select(startswith("mesh-utility-") and endswith("-android.apk"))] | first // empty')
+          if [ -z "$apk_name" ]; then
+            echo "Android APK asset not attached for ${TAG}; skipping Discord announcement."
+            exit 0
+          fi
+          echo "Found Android APK asset: ${apk_name}"
+          if [ -z "${WEBHOOK:-}" ]; then
             echo "DISCORD_RELEASE_WEBHOOK not set; skipping."
             exit 0
           fi
-          notes="$(printf '%s' "$BODY" | head -c 3000)"
-          if [ "${#BODY}" -gt 3000 ]; then notes="$notes"$'\n\n…full notes on GitHub.'; fi
-          apk="https://github.com/$REPO/releases/download/$TAG/mesh-utility-$TAG-android.apk"
-          payload="$(jq -n \
+          NAME=$(printf '%s' "$release_json" | jq -r '.name // empty')
+          URL=$(printf '%s' "$release_json" | jq -r '.html_url // empty')
+          BODY=$(printf '%s' "$release_json" | jq -r '.body // empty')
+          notes=$(printf '%s' "$BODY" | head -c 3000)
+          if [ "${#BODY}" -gt 3000 ]; then
+            notes="${notes}"$'\n\n…full notes on GitHub.'
+          fi
+          apk="https://github.com/${REPO}/releases/download/${TAG}/mesh-utility-${TAG}-android.apk"
+          payload=$(jq -n \
             --arg title "Mesh Utility ${NAME:-$TAG} is out" \
             --arg url "$URL" \
             --arg desc "$notes" \
@@ -42,6 +110,21 @@ jobs:
             --arg rel "$URL" \
             '{username:"Mesh Utility", allowed_mentions:{parse:[]},
               embeds:[{title:$title, url:$url, description:$desc, color:5763719,
-                fields:[{name:"Download", value:("[Android APK](" + $apk + ") · [All downloads](" + $rel + ")")}]}]}')"
-          curl -fsS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" >/dev/null
-          echo "Announced $TAG"
+                fields:[{name:"Download", value:("[Android APK](" + $apk + ") · [All downloads](" + $rel + ")")}]}]}')
+          set +e
+          http_code=$(curl -sS -o /tmp/discord-announce-body -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            --url "$WEBHOOK" 2>/tmp/discord-announce-err)
+          curl_status=$?
+          set -e
+          rm -f /tmp/discord-announce-body /tmp/discord-announce-err
+          case "${http_code:-}" in
+            200|201|202|204)
+              echo "Announced ${TAG}"
+              ;;
+            *)
+              echo "Discord webhook request failed (HTTP ${http_code:-none}, curl ${curl_status})."
+              exit 1
+              ;;
+          esac

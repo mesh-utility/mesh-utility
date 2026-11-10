@@ -1,11 +1,14 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/pages/scan_cache_area_section.dart';
 import 'package:mesh_utility/src/pages/settings_page.dart';
 import 'package:mesh_utility/src/services/boundary_catalog.dart';
+import 'package:mesh_utility/src/services/division_picker.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/history_pipeline.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
@@ -13,6 +16,54 @@ import 'package:mesh_utility/src/services/scan_cache_area.dart';
 import 'package:mesh_utility/src/services/scan_cache_service.dart';
 import 'package:mesh_utility/src/services/settings_store.dart';
 import 'package:reaxdb_dart/reaxdb_dart.dart';
+
+class _MemoryBundle extends CachingAssetBundle {
+  _MemoryBundle(this.files);
+
+  final Map<String, String> files;
+
+  @override
+  Future<ByteData> load(String key) async {
+    final text = files[key];
+    if (text == null) {
+      throw FlutterError('Missing asset $key');
+    }
+    return ByteData.sublistView(Uint8List.fromList(utf8.encode(text)));
+  }
+}
+
+const _admin1Fixture = '''
+{
+  "v": 1,
+  "source": "test",
+  "countries": [
+    {"c": "US", "n": "United States"},
+    {"c": "CA", "n": "Canada"}
+  ],
+  "divisions": [
+    {"i": "US:US-CA", "c": "US", "n": "California"},
+    {"i": "US:US-NV", "c": "US", "n": "Nevada"},
+    {"i": "CA:CA-ON", "c": "CA", "n": "Ontario"}
+  ]
+}
+''';
+
+const _admin2Fixture = '''
+{
+  "v": 1,
+  "source": "test United States only",
+  "countries": [{"c": "US", "n": "United States"}],
+  "states": [
+    {"c": "CA", "n": "California"},
+    {"c": "NV", "n": "Nevada"}
+  ],
+  "divisions": [
+    {"i": "CA:06037", "c": "CA", "n": "Los Angeles County", "s": "California"},
+    {"i": "CA:06075", "c": "CA", "n": "San Francisco County", "s": "California"},
+    {"i": "NV:32003", "c": "NV", "n": "Clark County", "s": "Nevada"}
+  ]
+}
+''';
 
 RawScan _scan({
   required double lat,
@@ -451,8 +502,38 @@ void main() {
         counties.divisions.map((division) => division.id),
         contains('CA:06075'),
       );
-      expect(counties.countries.map((country) => country.code), contains('CA'));
+      expect(counties.countries.map((country) => country.code), <String>['US']);
+      expect(counties.regions.map((region) => region.code), contains('CA'));
+      expect(
+        counties.regions
+            .firstWhere((region) => region.code == 'CA')
+            .countryCode,
+        'US',
+      );
+      expect(admin1.regions, isEmpty);
       expect(counties.source, contains('United States only'));
+
+      final states = buildDivisionPickerTree(admin1);
+      final unitedStates = states.singleWhere(
+        (node) => node.key == 'country:US',
+      );
+      expect(unitedStates.leafIds, contains('US:US-CA'));
+      expect(
+        unitedStates.children.map((node) => node.key),
+        contains('div:US:US-CA'),
+      );
+      expect(
+        states.every((node) => node.children.every((child) => child.isLeaf)),
+        isTrue,
+      );
+
+      final countyTree = buildDivisionPickerTree(counties);
+      expect(countyTree.map((node) => node.key), <String>['country:US']);
+      final california = countyTree.single.children.singleWhere(
+        (node) => node.key == 'region:US:CA',
+      );
+      expect(california.leafIds, contains('CA:06075'));
+      expect(countyTree.single.leafIds, contains('CA:06075'));
     },
   );
 
@@ -499,11 +580,78 @@ void main() {
     expect(find.text('Scan cache area'), findsOneWidget);
     expect(find.text('Sync Download Scope'), findsNothing);
     expect(find.text(scanCacheCloudNote), findsOneWidget);
-    expect(find.text('Download where I travel'), findsOneWidget);
     expect(find.text('50 miles'), findsOneWidget);
     expect(find.text(scanCacheStorageNote), findsOneWidget);
     expect(find.byType(ScanCacheAreaSection), findsOneWidget);
   });
+
+  testWidgets('Global download pack warns and requires confirm', (tester) async {
+    tester.view.physicalSize = const Size(900, 8000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var downloads = 0;
+    final globalSettings = AppSettings.defaults.copyWith(
+      scanCacheMode: scanCacheModeGlobal,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            settings: globalSettings,
+            onChanged: (_) async {},
+            onSync: () async {},
+            onDownloadCoveragePack: () async {
+              downloads += 1;
+            },
+            syncing: false,
+            localScanCount: 0,
+            uploadQueueCount: 0,
+            lastSyncAt: null,
+            lastSyncScanCount: 0,
+            periodicSyncEnabled: false,
+            periodicSyncWaitingForInternetTimeAnchor: false,
+            nextPeriodicSyncDueAtUtc: null,
+            bleConnected: false,
+            bleBusy: false,
+            debugLogs: const [],
+            onClearDebugLogs: () {},
+            onClearScanCache: () async {},
+            onDownloadOfflineTiles: () async => 0,
+            onClearOfflineTiles: () async {},
+            onDeleteRadioData: () async {},
+            deleteInProgress: false,
+            connectedRadioId: null,
+            darkMode: true,
+            onToggleTheme: () {},
+            currentVersionLabel: 'Alpha-25',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final downloadBtn = find.byKey(const Key('downloadCoveragePackButton'));
+    expect(downloadBtn, findsOneWidget);
+    await tester.ensureVisible(downloadBtn);
+    await tester.tap(downloadBtn);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Download entire worldwide pack?'), findsOneWidget);
+    expect(downloads, 0);
+
+    await tester.tap(find.byKey(const Key('downloadCoveragePackCancel')));
+    await tester.pumpAndSettle();
+    expect(downloads, 0);
+
+    await tester.tap(downloadBtn);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('downloadCoveragePackConfirm')));
+    await tester.pumpAndSettle();
+    expect(downloads, 1);
+  });
+
 
   testWidgets('county mode explains that only the United States is included', (
     tester,
@@ -527,13 +675,9 @@ void main() {
     await tester.pump();
     expect(find.text(scanCacheCountyNote), findsOneWidget);
     expect(find.text('Choose US counties (0)'), findsOneWidget);
-    expect(find.text('Download where I travel'), findsOneWidget);
-    expect(find.text(travelDownloadNote), findsOneWidget);
   });
 
   test('legacy sync radius migrates without shrinking the area', () {
-    expect(AppSettings.defaults.travelDownloadEnabled, isFalse);
-    expect(AppSettings.defaults.travelRadiusMiles, 25);
     expect(AppSettings.defaults.toJson()['syncRadiusMiles'], 50);
 
     AppSettings load(Map<String, dynamic> json) => AppSettings.fromJson(json);
@@ -768,150 +912,269 @@ void main() {
     expect(noFix.longitude, closeTo(boxCenterLng, 0.001));
   });
 
-  test(
-    'travel fetch triggers only outside the area, and retention keeps it',
-    () {
-      final now = DateTime.utc(2026, 6, 1, 12);
-      TravelFetchDecision decide({
-        bool enabled = true,
-        bool forceOffline = false,
-        bool networkAvailable = true,
-        bool syncInFlight = false,
-        String mode = scanCacheModeAdmin1,
-        bool outside = true,
-        double? deviceLat = 40.7,
-        double? deviceLng = -74.0,
-        double? lastLat,
-        double? lastLng,
-        DateTime? lastAt,
-        DateTime? at,
-      }) {
-        return decideTravelFetch(
-          enabled: enabled,
-          forceOffline: forceOffline,
-          networkAvailable: networkAvailable,
-          syncInFlight: syncInFlight,
-          mode: mode,
-          outsideCacheArea: outside,
-          deviceLat: deviceLat,
-          deviceLng: deviceLng,
-          lastFetchLat: lastLat,
-          lastFetchLng: lastLng,
-          lastFetchAt: lastAt,
-          now: at ?? now,
-        );
+
+  test('stored travel-download settings are ignored and not written back', () {
+    final loaded = AppSettings.fromJson(<String, dynamic>{
+      'travelDownloadEnabled': true,
+      'travelRadiusMiles': 50,
+      'travelAnchors': <Map<String, Object>>[
+        <String, Object>{
+          'latitude': 40.7,
+          'longitude': -74.0,
+          'radiusMiles': 25,
+          'fetchedAtMillis': 1,
+        },
+      ],
+    });
+    final json = loaded.toJson();
+    expect(json.containsKey('travelDownloadEnabled'), isFalse);
+    expect(json.containsKey('travelRadiusMiles'), isFalse);
+    expect(json.containsKey('travelAnchors'), isFalse);
+  });
+
+  group('division picker select all', () {
+    bool? checkValue(WidgetTester tester, String key) {
+      return tester
+          .widget<Checkbox>(find.byKey(Key('division-check-$key')))
+          .value;
+    }
+
+    String selectAllLabel(WidgetTester tester, String key) {
+      final button = tester.widget<TextButton>(
+        find.byKey(Key('division-select-all-$key')),
+      );
+      return (button.child! as Text).data ?? '';
+    }
+
+    Future<void> openPicker(WidgetTester tester, String button) async {
+      await tester.tap(find.text(button));
+      for (var i = 0; i < 40; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+        if (find.text('Done (0)').evaluate().isNotEmpty ||
+            find.textContaining('Done (').evaluate().isNotEmpty) {
+          if (find.byType(CircularProgressIndicator).evaluate().isEmpty) {
+            return;
+          }
+        }
       }
+      fail('Division picker did not open');
+    }
 
-      expect(decide().fetch, isTrue);
-      expect(decide().reason, 'first');
-      expect(decide(outside: false).reason, 'inside');
-      expect(decide(mode: scanCacheModeGlobal).reason, 'global');
-      expect(decide(forceOffline: true).reason, 'offline');
-      expect(decide(networkAvailable: false).reason, 'no-network');
-      expect(decide(enabled: false).reason, 'off');
-      expect(decide(syncInFlight: true).reason, 'sync-in-flight');
-
-      final recent = decide(
-        lastLat: 40.7,
-        lastLng: -74.0,
-        lastAt: now.subtract(const Duration(minutes: 2)),
-        deviceLat: 41.0,
-        deviceLng: -74.0,
-      );
-      expect(recent.reason, 'interval');
-
-      final held = decide(
-        lastLat: 40.7,
-        lastLng: -74.0,
-        lastAt: now.subtract(const Duration(minutes: 6)),
-      );
-      expect(held.reason, 'not-moved');
-
-      final moved = decide(
-        lastLat: 40.0,
-        lastLng: -74.0,
-        lastAt: now.subtract(const Duration(minutes: 6)),
-        deviceLat: 40.2,
-        deviceLng: -74.0,
-      );
-      expect(moved.reason, 'moved');
-
-      final newHex = decide(
-        lastLat: 40.700,
-        lastLng: -74.000,
-        lastAt: now.subtract(const Duration(minutes: 6)),
-        deviceLat: 40.702,
-        deviceLng: -74.000,
-      );
-      expect(hexKey(40.700, -74.000) == hexKey(40.702, -74.000), isFalse);
-      expect(newHex.reason, 'new-hex');
-
-      final home = _scan(lat: 34.05, lng: -118.24, nodeId: 'HOME0001');
-      final trip = _scan(lat: 40.71, lng: -74.01, nodeId: 'TRIP0001');
-      final elsewhere = _scan(lat: 0, lng: 0, nodeId: 'FAR00001');
-      final anchor = TravelAreaAnchor(
-        latitude: 40.71,
-        longitude: -74.01,
-        radiusMiles: 25,
-        fetchedAtMillis: now.millisecondsSinceEpoch,
-      );
-      final kept = pruneScansToCacheArea(
-        scans: <RawScan>[home, trip, elsewhere],
-        mode: scanCacheModeRadius,
-        radiusMiles: 50,
-        centerLat: 34.05,
-        centerLng: -118.24,
-        travelAreas: <TravelAreaAnchor>[anchor],
-      );
-      expect(kept.scans.map((scan) => scan.nodeId).toList(), <String?>[
-        'HOME0001',
-        'TRIP0001',
-      ]);
-      final dropped = pruneScansToCacheArea(
-        scans: <RawScan>[home, trip, elsewhere],
-        mode: scanCacheModeRadius,
-        radiusMiles: 50,
-        centerLat: 34.05,
-        centerLng: -118.24,
-      );
-      expect(dropped.scans.map((scan) => scan.nodeId).toList(), <String?>[
-        'HOME0001',
-      ]);
-
-      final anchors = <TravelAreaAnchor>[];
-      var recorded = anchors;
-      for (var i = 0; i < 9; i++) {
-        recorded = rememberTravelFetch(
-          anchors: recorded,
-          latitude: 10 + i.toDouble(),
-          longitude: -70,
-          radiusMiles: 25,
-          now: now.add(Duration(days: i)),
-        );
-      }
-      expect(recorded, hasLength(travelAnchorLimit));
-      expect(recorded.any((anchor) => anchor.latitude == 10), isFalse);
-      expect(recorded.first.latitude, 18);
-
-      final stale = rememberTravelFetch(
-        anchors: <TravelAreaAnchor>[
-          TravelAreaAnchor(
-            latitude: 1,
-            longitude: 1,
-            radiusMiles: 25,
-            fetchedAtMillis: now
-                .subtract(const Duration(days: 31))
-                .millisecondsSinceEpoch,
+    Future<void> pumpSection(
+      WidgetTester tester, {
+      required AppSettings settings,
+      required BoundaryCatalog catalog,
+      required Future<void> Function(AppSettings value) onChanged,
+    }) async {
+      tester.view.physicalSize = const Size(900, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ScanCacheAreaSection(
+              settings: settings,
+              onChanged: onChanged,
+              catalog: catalog,
+            ),
           ),
-        ],
-        latitude: 50,
-        longitude: 50,
-        radiusMiles: 10,
-        now: now,
+        ),
       );
-      expect(stale, hasLength(1));
-      expect(stale.single.latitude, 50);
-      expect(stale.single.radiusMiles, 10);
-    },
-  );
+      await tester.pump();
+    }
+
+    test('tri-state select all follows descendant leaves', () {
+      final index = boundaryIndexFromDecoded(jsonDecode(_admin1Fixture));
+      final roots = buildDivisionPickerTree(index);
+      final unitedStates = roots.singleWhere(
+        (node) => node.key == 'country:US',
+      );
+      final canada = roots.singleWhere((node) => node.key == 'country:CA');
+      final selected = <String>{};
+
+      expect(divisionSelectionState(selected, unitedStates.leafIds), isFalse);
+      toggleDivisionSelection(selected, unitedStates.leafIds);
+      expect(selected, <String>{'US:US-CA', 'US:US-NV'});
+      expect(divisionSelectionState(selected, unitedStates.leafIds), isTrue);
+      expect(divisionSelectionState(selected, canada.leafIds), isFalse);
+
+      selected.remove('US:US-NV');
+      expect(divisionSelectionState(selected, unitedStates.leafIds), isNull);
+      expect(
+        expandedKeysForPartialSelection(roots, selected),
+        contains('country:US'),
+      );
+
+      toggleDivisionSelection(selected, unitedStates.leafIds);
+      expect(selected, containsAll(<String>['US:US-CA', 'US:US-NV']));
+      toggleDivisionSelection(selected, unitedStates.leafIds);
+      expect(selected, isEmpty);
+
+      final counties = boundaryIndexFromDecoded(jsonDecode(_admin2Fixture));
+      expect(counties.countries.single.code, 'US');
+      expect(counties.regions.map((region) => region.code), contains('CA'));
+      final tree = buildDivisionPickerTree(counties);
+      expect(tree.single.key, 'country:US');
+      final california = tree.single.children.singleWhere(
+        (node) => node.key == 'region:US:CA',
+      );
+      final nevada = tree.single.children.singleWhere(
+        (node) => node.key == 'region:US:NV',
+      );
+      toggleDivisionSelection(selected, california.leafIds);
+      expect(selected, <String>{'CA:06037', 'CA:06075'});
+      expect(divisionSelectionState(selected, nevada.leafIds), isFalse);
+      expect(divisionSelectionState(selected, tree.single.leafIds), isNull);
+      selected.add('NV:32003');
+      expect(divisionSelectionState(selected, tree.single.leafIds), isTrue);
+    });
+
+    testWidgets('states list keeps siblings visible and persists ids', (
+      tester,
+    ) async {
+      final catalog = BoundaryCatalog(
+        bundle: _MemoryBundle(const <String, String>{
+          'assets/boundaries/admin1/index.json': _admin1Fixture,
+        }),
+      );
+      await tester.runAsync(catalog.loadAdmin1Index);
+      AppSettings settings = AppSettings.defaults.copyWith(
+        scanCacheMode: scanCacheModeAdmin1,
+      );
+      await pumpSection(
+        tester,
+        settings: settings,
+        catalog: catalog,
+        onChanged: (value) async {
+          settings = value;
+        },
+      );
+      await openPicker(tester, 'Choose states and provinces (0)');
+      expect(find.text('United States'), findsOneWidget);
+      expect(find.text('Canada'), findsOneWidget);
+      expect(find.text('California'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('division-expand-country:US')));
+      await tester.pump();
+      expect(find.text('California'), findsOneWidget);
+      expect(find.text('Nevada'), findsOneWidget);
+      expect(find.text('Canada'), findsOneWidget);
+      expect(checkValue(tester, 'country:US'), isFalse);
+
+      await tester.tap(find.byKey(const Key('division-select-all-country:US')));
+      await tester.pump();
+      expect(checkValue(tester, 'country:US'), isTrue);
+      expect(checkValue(tester, 'div:US:US-CA'), isTrue);
+      expect(checkValue(tester, 'div:US:US-NV'), isTrue);
+      expect(checkValue(tester, 'country:CA'), isFalse);
+      expect(selectAllLabel(tester, 'country:US'), 'Clear');
+
+      await tester.tap(find.byKey(const Key('division-select-all-country:US')));
+      await tester.pump();
+      expect(checkValue(tester, 'country:US'), isFalse);
+      expect(checkValue(tester, 'div:US:US-CA'), isFalse);
+      expect(checkValue(tester, 'div:US:US-NV'), isFalse);
+
+      await tester.tap(find.byKey(const Key('division-check-div:US:US-CA')));
+      await tester.pump();
+      expect(checkValue(tester, 'country:US'), isNull);
+      expect(checkValue(tester, 'div:US:US-CA'), isTrue);
+      expect(checkValue(tester, 'div:US:US-NV'), isFalse);
+      expect(selectAllLabel(tester, 'country:US'), 'Select all');
+
+      await tester.tap(find.text('Done (1)'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(settings.scanCacheAdmin1Ids, <String>['US:US-CA']);
+      expect(settings.scanCacheAdmin2Ids, isEmpty);
+      expect(settings.scanCacheMode, scanCacheModeAdmin1);
+
+      await pumpSection(
+        tester,
+        settings: settings,
+        catalog: catalog,
+        onChanged: (value) async {
+          settings = value;
+        },
+      );
+      await openPicker(tester, 'Choose states and provinces (1)');
+      expect(checkValue(tester, 'country:US'), isNull);
+      expect(find.text('California'), findsOneWidget);
+      expect(checkValue(tester, 'div:US:US-CA'), isTrue);
+      expect(checkValue(tester, 'div:US:US-NV'), isFalse);
+      expect(find.text('Canada'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'ontario');
+      await tester.pump();
+      expect(find.text('Ontario'), findsOneWidget);
+      expect(find.text('United States'), findsNothing);
+      expect(find.text('California'), findsNothing);
+    });
+
+    testWidgets('county select all is state then country and keeps saved ids', (
+      tester,
+    ) async {
+      final catalog = BoundaryCatalog(
+        bundle: _MemoryBundle(const <String, String>{
+          'assets/boundaries/admin2/us/index.json': _admin2Fixture,
+        }),
+      );
+      await tester.runAsync(catalog.loadAdmin2Index);
+      AppSettings settings = AppSettings.defaults.copyWith(
+        scanCacheMode: scanCacheModeAdmin2,
+        scanCacheAdmin2Ids: const <String>['NV:32003'],
+      );
+      await pumpSection(
+        tester,
+        settings: settings,
+        catalog: catalog,
+        onChanged: (value) async {
+          settings = value;
+        },
+      );
+      await openPicker(tester, 'Choose US counties (1)');
+      expect(find.text('United States'), findsOneWidget);
+      expect(find.text('California'), findsOneWidget);
+      expect(find.text('Nevada'), findsOneWidget);
+      expect(checkValue(tester, 'country:US'), isNull);
+      expect(checkValue(tester, 'region:US:CA'), isFalse);
+      expect(checkValue(tester, 'region:US:NV'), isTrue);
+
+      await tester.tap(find.byKey(const Key('division-expand-region:US:NV')));
+      await tester.pump();
+      expect(find.text('Clark County'), findsOneWidget);
+      expect(checkValue(tester, 'div:NV:32003'), isTrue);
+      expect(find.text('United States'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const Key('division-select-all-region:US:CA')),
+      );
+      await tester.pump();
+      expect(checkValue(tester, 'region:US:CA'), isTrue);
+      expect(checkValue(tester, 'country:US'), isTrue);
+      await tester.tap(find.byKey(const Key('division-expand-region:US:CA')));
+      await tester.pump();
+      expect(checkValue(tester, 'div:CA:06037'), isTrue);
+      expect(checkValue(tester, 'div:CA:06075'), isTrue);
+
+      await tester.tap(find.byKey(const Key('division-select-all-country:US')));
+      await tester.pump();
+      expect(checkValue(tester, 'country:US'), isFalse);
+      expect(checkValue(tester, 'region:US:CA'), isFalse);
+      expect(checkValue(tester, 'div:CA:06037'), isFalse);
+      expect(checkValue(tester, 'div:NV:32003'), isFalse);
+
+      await tester.tap(
+        find.byKey(const Key('division-select-all-region:US:CA')),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Done (2)'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(settings.scanCacheAdmin2Ids, <String>['CA:06037', 'CA:06075']);
+      expect(settings.scanCacheAdmin1Ids, isEmpty);
+      expect(settings.scanCacheMode, scanCacheModeAdmin2);
+    });
+  });
 }

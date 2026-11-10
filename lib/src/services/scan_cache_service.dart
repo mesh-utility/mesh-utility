@@ -45,7 +45,6 @@ class ScanCacheService {
     }
     final selected = _selectedIds(mode, settings);
     final geometry = await _geometry(mode: mode, selected: selected);
-    final travel = _travelPayload(settings, now ?? DateTime.now().toUtc());
     final result = await runOffUi(pruneScanCacheWorker, <String, Object?>{
       'scans': scans,
       'mode': mode,
@@ -55,7 +54,6 @@ class ScanCacheService {
       'selectedIds': selected,
       'geometry': geometry,
       'membership': Map<String, bool>.from(_hexMembership),
-      'travel': travel,
     }, force: true);
     _hexMembership
       ..clear()
@@ -110,30 +108,6 @@ class ScanCacheService {
     }, force: true);
   }
 
-  /// Downloaded scans outside the cache area that a travel circle still keeps.
-  Future<List<RawScan>> preservedTravelScans({
-    required List<RawScan> scans,
-    required AppSettings settings,
-    double? centerLat,
-    double? centerLng,
-    DateTime? now,
-  }) async {
-    final travel = _travelPayload(settings, now ?? DateTime.now().toUtc());
-    if (travel.isEmpty) return const <RawScan>[];
-    final mode = clampScanCacheMode(settings.scanCacheMode);
-    final selected = _selectedIds(mode, settings);
-    final geometry = await _geometry(mode: mode, selected: selected);
-    return runOffUi(travelPreserveWorker, <String, Object?>{
-      'scans': scans,
-      'mode': mode,
-      'radiusMiles': settings.scanCacheRadiusMiles,
-      'centerLat': centerLat,
-      'centerLng': centerLng,
-      'selectedIds': selected,
-      'geometry': geometry,
-      'travel': travel,
-    }, force: true);
-  }
 
   List<String> _selectedIds(String mode, AppSettings settings) {
     if (mode == scanCacheModeAdmin1) return settings.scanCacheAdmin1Ids;
@@ -154,11 +128,4 @@ class ScanCacheService {
     );
   }
 
-  List<Map<String, Object>> _travelPayload(AppSettings settings, DateTime now) {
-    if (!settings.travelDownloadEnabled) return const <Map<String, Object>>[];
-    return <Map<String, Object>>[
-      for (final anchor in activeTravelAnchors(settings.travelAnchors, now))
-        anchor.toJson(),
-    ];
-  }
 }

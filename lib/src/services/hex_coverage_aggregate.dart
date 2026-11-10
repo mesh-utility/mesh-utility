@@ -4,70 +4,23 @@ import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 
-/// Exact base cells are drawn at and above this zoom.
+/// Scale of the overview preload grid.
 ///
-/// Below it, coverage is drawn as parent hexes of [mapHexZoomBands]. The
-/// threshold is the zoom where a base cell is about 48px wide, so a phone
-/// or a 1024×768 tablet view of solid coverage stays under the polygon cap.
-const double mapDetailZoom = 15.5;
-
-/// Largest parent hex the coverage map draws.
-///
-/// Flat-to-flat width is the column spacing
+/// Detailed coverage hexes are never drawn at this size. They stay on the
+/// stored scale-1 cell. Flat-to-flat width is the column spacing
 /// `hexSize * sqrt(3) * lngScale * scale` degrees of longitude. At 40.7°N
 /// (State College–Lewistown, central Pennsylvania) [distanceMiles] makes
-/// scale 256 about 19.5 mi / 31.4 km wide. Scale 128 is about 9.8 mi /
-/// 15.7 km, under the 15–20 mi stop. Scale 512 is about 39 mi / 63 km,
-/// past it. 256 is the power-of-two parent in that range.
+/// scale 256 about 19.5 mi / 31.4 km wide.
 const int mapHexMaxScale = 256;
 
-/// Zoom where [mapHexMaxScale] starts. Lower zooms keep that parent, so the
-/// cell only renders smaller.
+/// Zoom where the overview layer hides when detailed coverage is in view.
+///
+/// Below this zoom the scale-256 preload stays up. It is not a paint size
+/// for [CoverageZone] hexes.
 const double mapHexMaxScaleZoom = 7.5;
 
-/// One zoom band. [minZoom] is inclusive; the next higher band wins above it.
-class HexZoomBand {
-  const HexZoomBand(this.minZoom, this.scale);
-
-  final double minZoom;
-
-  /// Linear parent size. 1 is the stored cell. 2, 4, 8, … are coarser hexes
-  /// on the same odd-row grid.
-  final int scale;
-}
-
-/// High zoom is exact. Each step down doubles the parent hex so a cluster
-/// stays on the order of 48–96px wide (column spacing) on a web-mercator map.
-///
-/// Doubling stops at [mapHexMaxScale]. [hexClusterScaleForZoom] uses the last
-/// band for every zoom below [mapHexMaxScaleZoom].
-const List<HexZoomBand> mapHexZoomBands = <HexZoomBand>[
-  HexZoomBand(mapDetailZoom, 1),
-  HexZoomBand(14.5, 2),
-  HexZoomBand(13.5, 4),
-  HexZoomBand(12.5, 8),
-  HexZoomBand(11.5, 16),
-  HexZoomBand(10.5, 32),
-  HexZoomBand(9.5, 64),
-  HexZoomBand(8.5, 128),
-  HexZoomBand(mapHexMaxScaleZoom, mapHexMaxScale),
-];
-
-/// Parent scales the map and the settings slider share, finest first.
-///
-/// [mapHexMaxScale] stays the hard ceiling. A stored max may pick any step
-/// at or below it.
-const List<int> mapHexScaleSteps = <int>[
-  1,
-  2,
-  4,
-  8,
-  16,
-  32,
-  64,
-  128,
-  mapHexMaxScale,
-];
+/// Stored-cell scale. Map paint of coverage zones uses only this size.
+const int mapTrueSizeScale = 1;
 
 /// Heard filtered cells ÷ all filtered cells in the cluster.
 ///
@@ -92,87 +45,8 @@ String formatCoverageFraction({
   return '$safeHeard/$filteredChildren heard ($percent%)';
 }
 
-/// Parent scale for [zoom].
-///
-/// [maxScale] is a tighter ceiling than [mapHexMaxScale]. The result is the
-/// band scale, or that ceiling when the band is coarser. Null keeps the hard
-/// ceiling only.
-int hexClusterScaleForZoom(double zoom, {int? maxScale}) {
-  final z = zoom.isFinite ? zoom : 0;
-  var scale = _cappedHexScale(mapHexZoomBands.last.scale);
-  for (final band in mapHexZoomBands) {
-    if (z >= band.minZoom) {
-      scale = _cappedHexScale(band.scale);
-      break;
-    }
-  }
-  final ceiling = clampMaxHexScale(maxScale);
-  return scale > ceiling ? ceiling : scale;
-}
-
-/// Next coarser parent, or null at the ceiling.
-///
-/// The ceiling is [maxScale] when set, otherwise [mapHexMaxScale]. The
-/// 700-polygon backstop uses this, so an over-full view cannot grow past
-/// the user's max or the central-Pennsylvania cell.
-int? coarserHexScale(int scale, {int? maxScale}) {
-  final ceiling = clampMaxHexScale(maxScale);
-  if (scale >= ceiling) return null;
-  final doubled = scale < 1 ? 1 : scale * 2;
-  if (doubled > ceiling) return null;
-  return doubled;
-}
-
-int _cappedHexScale(int scale) {
-  if (scale < 1) return 1;
-  if (scale > mapHexMaxScale) return mapHexMaxScale;
-  return scale;
-}
-
-/// Nearest [mapHexScaleSteps] entry.
-///
-/// Null keeps [mapHexMaxScale] so an older settings file stays on today's
-/// cap. A tie lands on the coarser step. Values outside the list land on
-/// the nearer end.
-int clampMaxHexScale(int? value) {
-  if (value == null) return mapHexMaxScale;
-  var best = mapHexScaleSteps.first;
-  var bestDistance = (value - best).abs();
-  for (var i = 1; i < mapHexScaleSteps.length; i++) {
-    final step = mapHexScaleSteps[i];
-    final distance = (value - step).abs();
-    if (distance <= bestDistance) {
-      best = step;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
-/// Flat-to-flat miles at ~40.7°N for one parent of [scale].
-double hexScaleWidthMiles(int scale) {
-  final safe = scale < 1 ? 1 : scale;
-  const lat = 40.7;
-  const lng = -77.7;
-  return distanceMiles(lat, lng, lat, lng + colSpacing * safe);
-}
-
-/// Slider text for one allowed parent scale.
-///
-/// Scale 1 names the stored cell. Every other step is the rounded
-/// flat-to-flat width in miles.
-String hexScaleMilesLabel(int scale) {
-  final safe = clampMaxHexScale(scale);
-  final miles = hexScaleWidthMiles(safe);
-  final text = miles >= 0.25
-      ? miles.toStringAsFixed(1)
-      : miles.toStringAsFixed(2);
-  if (safe == 1) return 'Actual cells (~$text mi)';
-  return '~$text mi';
-}
-
-/// Identity of a filtered zone list. Pan and zoom reuse a cache entry when
-/// this value and the hex scale are unchanged.
+/// Identity of a filtered zone list. Pan and zoom reuse the true-size cache
+/// when this value is unchanged.
 int coverageFilterIdentity(Iterable<CoverageZone> zones) {
   var hash = 0;
   var count = 0;
@@ -229,9 +103,11 @@ class HexCoverageCluster {
 
 /// Groups [zones] into parent hexes of [scale].
 ///
-/// Every finite zone is assigned to exactly one cluster. [scale] 1 keeps each
-/// zone's own polygon. The list order is the input order for scale 1, and
-/// parent row/column order otherwise. This does not cull or drop children.
+/// Map paint calls this only at [mapTrueSizeScale]. That path keeps each
+/// zone's stored polygon and does not merge. Larger scales remain for tests
+/// and off-UI checks. Every finite zone is assigned to exactly one cluster.
+/// The list order is the input order for scale 1, and parent row/column
+/// order otherwise. This does not cull or drop children.
 List<HexCoverageCluster> aggregateCoverageHexes(
   List<CoverageZone> zones, {
   required int scale,

@@ -132,30 +132,25 @@ void main() {
     expect(button.onPressed, isNull);
   });
 
-  testWidgets('Map & Display slider sets the max hex size', (tester) async {
-    AppSettings? saved;
-    await pumpSettings(
-      tester,
-      onChanged: (value) async {
-        saved = value;
-      },
-    );
+  testWidgets('Map & Display has no max hex size slider', (tester) async {
+    await pumpSettings(tester);
 
-    expect(find.text('Max hex size when zoomed out: ~19.5 mi'), findsOneWidget);
-    expect(find.textContaining('cells near the edges'), findsOneWidget);
-    final slider = tester.widget<Slider>(
-      find.byKey(const Key('maxHexScaleSlider')),
-    );
-    expect(slider.min, 0);
-    expect(slider.max, 8);
-    expect(slider.divisions, 8);
-    expect(slider.value, 8);
-    expect(slider.label, '~19.5 mi');
+    expect(find.byKey(const Key('maxHexScaleSlider')), findsNothing);
+    expect(find.textContaining('Max hex size'), findsNothing);
+    expect(find.textContaining('700 shapes'), findsNothing);
+    expect(find.textContaining('Stats Radius'), findsWidgets);
+  });
 
-    slider.onChanged!(0);
-    expect(saved, isNotNull);
-    expect(saved!.maxHexScale, 1);
-    slider.onChanged!(4);
-    expect(saved!.maxHexScale, 16);
+  test('stored maxHexScale is ignored and not written back', () {
+    final raw = AppSettings.defaults.toJson()..['maxHexScale'] = 8;
+    final restored = AppSettings.fromJson(raw);
+    expect(restored.toJson().containsKey('maxHexScale'), isFalse);
+    expect(restored.toJson(), AppSettings.defaults.toJson());
+    expect(
+      AppSettings.fromJson(<String, dynamic>{
+        'maxHexScale': 'nope',
+      }).toJson().containsKey('maxHexScale'),
+      isFalse,
+    );
   });
 }

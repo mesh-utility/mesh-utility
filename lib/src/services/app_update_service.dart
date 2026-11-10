@@ -70,22 +70,17 @@ class AppUpdateService extends ChangeNotifier {
         return null;
       }
       final skipped = await _loadSkipped();
-      final newer = isNewerAlphaRelease(
+      // Missing platform assets are not recorded as updates:skippedTag.
+      final decision = decideUpdateAvailability(
+        latest: latest,
         currentVersion: currentVersionLabel,
-        latestTag: latest.tagName,
+        skippedTag: skipped,
+        force: force,
+        platform: defaultTargetPlatform,
       );
-      if (!newer) {
-        available = null;
-        statusMessage = force ? 'Up to date (${latest.tagName}).' : null;
-        return null;
-      }
-      if (skipped != null && skipped == latest.tagName && !force) {
-        available = null;
-        return null;
-      }
-      available = latest;
-      statusMessage = 'Update available: ${latest.tagName}';
-      return latest;
+      available = decision.release;
+      statusMessage = decision.statusMessage;
+      return decision.release;
     } finally {
       checking = false;
       notifyListeners();
@@ -102,6 +97,7 @@ class AppUpdateService extends ChangeNotifier {
         statusMessage = s;
         notifyListeners();
       }
+
       if (defaultTargetPlatform == TargetPlatform.android) {
         return await installAndroidApk(release: rel, onStatus: status);
       }

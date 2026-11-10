@@ -154,3 +154,36 @@ List<ScanResult> convertToScanResults(List<RawScan> scans) {
   }
   return results;
 }
+
+/// Converts grouped hex-detail events for History, including deadzone rows
+/// that [convertToScanResults] would drop (empty nodeId / null RSSI).
+///
+/// The popup "Scans" count and Cell history header both use this list so
+/// they stay in agreement with unique scan events, not per-node NDJSON lines.
+List<ScanResult> scanResultsForHexHistory(List<RawScan> scans) {
+  final results = <ScanResult>[];
+  for (var i = 0; i < scans.length; i++) {
+    final scan = scans[i];
+    final nodeId = scan.nodeId ?? '';
+    results.add(
+      ScanResult(
+        id: 'hex-scan-$i',
+        observerId: scan.observerId ?? '',
+        nodeId: nodeId,
+        rssi: scan.rssi ?? 0,
+        snr: scan.snr,
+        snrIn: scan.snrIn,
+        latitude: scan.latitude,
+        longitude: scan.longitude,
+        altitude: scan.altitude,
+        timestamp: scan.effectiveTimestamp,
+        senderName: nodeId.isEmpty
+            ? (scan.senderName ?? '')
+            : _normalizedNodeName(scan.senderName, nodeId),
+        receiverName: scan.receiverName,
+        radioId: scan.radioId,
+      ),
+    );
+  }
+  return results;
+}

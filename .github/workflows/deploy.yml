@@ -23,7 +23,7 @@ env:
 
 jobs:
   deploy:
-    name: Deploy Worker and Pages
+    name: Deploy Pages
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -47,7 +47,11 @@ jobs:
         run: npm ci
         working-directory: worker
 
+      # Alpha-25 ships Pages only. Live Worker fca1aee8-2427-4d2a-b1ea-31cf1704b5de
+      # already holds the server changes. Do not redeploy the Worker until a later
+      # release is explicitly approved to ship Worker code.
       - name: Deploy Cloudflare Worker
+        if: false
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

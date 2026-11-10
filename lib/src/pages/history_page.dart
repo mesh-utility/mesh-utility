@@ -21,9 +21,11 @@ class HistoryPage extends StatefulWidget {
     this.connectedRadioName,
     this.connectedRadioMeshId,
     this.initialHexId,
+    this.onClearHexFilter,
     this.statsRadiusMiles = 0,
     this.observerLat,
     this.observerLng,
+    this.pinnedHexList = false,
   });
 
   final List<ScanResult> scans;
@@ -33,9 +35,15 @@ class HistoryPage extends StatefulWidget {
   final String? connectedRadioName;
   final String? connectedRadioMeshId;
   final String? initialHexId;
+  final VoidCallback? onClearHexFilter;
   final int statsRadiusMiles;
   final double? observerLat;
   final double? observerLng;
+
+  /// When true, [scans] is already the exact-cell grouped event list from
+  /// the map popup. Skip radius/hex re-filtering so the header count matches
+  /// the popup.
+  final bool pinnedHexList;
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
@@ -55,6 +63,7 @@ class _HistoryPageState extends State<HistoryPage> {
   late Map<String, String> _observerByRadio;
   List<ScanResult> _filteredScans = [];
   bool _filteringInProgress = false;
+  bool _filterQueued = false;
   bool _exportingCsv = false;
 
   @override
@@ -81,8 +90,7 @@ class _HistoryPageState extends State<HistoryPage> {
   void didUpdateWidget(covariant HistoryPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     bool shouldRefilter = false;
-    if (widget.initialHexId != oldWidget.initialHexId &&
-        widget.initialHexId != null) {
+    if (widget.initialHexId != oldWidget.initialHexId) {
       _selectedHexId = widget.initialHexId;
       shouldRefilter = true;
     }
@@ -102,7 +110,8 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   List<ScanResult> get _radiusFilteredScans {
-    if (widget.statsRadiusMiles == 0 ||
+    if (widget.pinnedHexList ||
+        widget.statsRadiusMiles == 0 ||
         widget.observerLat == null ||
         widget.observerLng == null) {
       return widget.scans;
@@ -146,9 +155,22 @@ class _HistoryPageState extends State<HistoryPage> {
     }
   }
 
+  void _clearHexFilter() {
+    if (_selectedHexId == null) return;
+    setState(() {
+      _selectedHexId = null;
+    });
+    widget.onClearHexFilter?.call();
+    _updateFilteredList();
+  }
+
   void _updateFilteredList() async {
-    if (_filteringInProgress) return;
+    if (_filteringInProgress) {
+      _filterQueued = true;
+      return;
+    }
     _filteringInProgress = true;
+    _filterQueued = false;
     // Keep existing rows visible during a background refresh. Only the first
     // empty load shows a spinner, so a live scan or history-day notify cannot
     // destroy the ListView and reset scroll.
@@ -165,7 +187,7 @@ class _HistoryPageState extends State<HistoryPage> {
       if (range != null) 'rangeEnd': range.end,
       'startHour': _startHour,
       'endHour': _endHour,
-      'selectedHexId': _selectedHexId,
+      'selectedHexId': widget.pinnedHexList ? null : _selectedHexId,
     };
     final filtered = scans.length < heavyScanCount
         ? filterHistoryScansOffUi(params)
@@ -189,6 +211,10 @@ class _HistoryPageState extends State<HistoryPage> {
       final max = _scrollController.position.maxScrollExtent;
       _scrollController.jumpTo(savedOffset.clamp(0.0, max));
     });
+    if (_filterQueued) {
+      _filterQueued = false;
+      _updateFilteredList();
+    }
   }
 
   String _selectedNodeSummary() {
@@ -324,6 +350,12 @@ class _HistoryPageState extends State<HistoryPage> {
                 children: [
                   Row(
                     children: [
+                      if (_selectedHexId != null && _selectedHexId!.isNotEmpty)
+                        IconButton(
+                          tooltip: 'Back to all scans in the cache area',
+                          onPressed: _clearHexFilter,
+                          icon: const Icon(Icons.arrow_back),
+                        ),
                       Expanded(
                         child: Text(
                           _selectedHexId == null || _selectedHexId!.isEmpty
@@ -530,10 +562,7 @@ class _HistoryPageState extends State<HistoryPage> {
                                 ),
                               ),
                               TextButton(
-                                onPressed: () => setState(() {
-                                  _selectedHexId = null;
-                                  _updateFilteredList();
-                                }),
+                                onPressed: _clearHexFilter,
                                 child: const Text('Clear'),
                               ),
                             ],

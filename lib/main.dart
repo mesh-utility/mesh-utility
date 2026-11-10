@@ -13,8 +13,12 @@ import 'package:mesh_utility/src/pages/map_page.dart';
 import 'package:mesh_utility/src/pages/not_found_page.dart';
 import 'package:mesh_utility/src/pages/nodes_page.dart';
 import 'package:mesh_utility/src/pages/privacy_page.dart';
+import 'package:mesh_utility/src/services/first_run_gate.dart';
 import 'package:mesh_utility/src/pages/settings_page.dart';
 import 'package:mesh_utility/src/pages/contacts_page.dart';
+import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/scan_aggregator.dart';
+import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/app_state.dart';
 import 'package:mesh_utility/src/services/battery_optimization.dart';
@@ -236,14 +240,36 @@ class _MeshHomePageState extends State<MeshHomePage>
   static const double _tabletShortestSideDp = 600.0;
   bool _startupNavResolved = false;
   bool _startupRoutedToConnections = false;
+  bool _pendingStartupConnectionsRoute = false;
   bool _previousBleConnected = false;
   String _appVersion = kAppVersionLabel;
 
   /// Navigate to a page index, auto-triggering a BLE scan when arriving at
   /// the Connections page (index 1) if not already connected.
+  void _clearHistoryHexPin() {
+    if (_historyHexFilter != null) {
+      setState(() => _historyHexFilter = null);
+    }
+    unawaited(_appState.clearPinnedHexDetail());
+  }
+
   void _navigateTo(int index) {
-    setState(() => _index = index);
-    if (index == 1 && !_appState.bleConnected && !_appState.bleConnecting) {
+    setState(() {
+      _index = index;
+      // Leaving the map drops the one-shot hex focus so the coverage popup
+      // is not waiting when the user comes back.
+      if (index != 0) _mapFocusHexId = null;
+    });
+    if (index == 2 || index == 3) {
+      unawaited(_appState.loadViewportDetail());
+    }
+    if (index == 1 &&
+        !_appState.bleConnected &&
+        !_appState.bleConnecting &&
+        canRequestStartupOsPermissions(
+          privacyAccepted: _appState.settings.privacyAccepted,
+          privacyDialogResolved: _initialPrivacyDismissedForSession,
+        )) {
       unawaited(_appState.scanBleDevices());
     }
   }
@@ -283,7 +309,8 @@ class _MeshHomePageState extends State<MeshHomePage>
     _appState.onLocationPermissionPrompt = _showLocationPermissionDialog;
     _appState.onBleUnavailablePrompt = _showBleUnavailableDialog;
     _appState.onBatteryOptimizationPrompt = _showBatteryOptimizationDialog;
-    unawaited(_initNotifications());
+    // Notification permission is requested after the first-run privacy
+    // dialog resolves (see _maybeStartStartupOsPermissions).
   }
 
   @override
@@ -558,12 +585,65 @@ class _MeshHomePageState extends State<MeshHomePage>
     return true;
   }
 
+  bool _notificationsInitStarted = false;
+  bool _startupOsPermissionsStarted = false;
+
+  /// After the first-run privacy dialog is done (or if privacy was already
+  /// accepted), request notification permission, then start location
+  /// tracking, so OS sheets never overlap the privacy dialog or each other.
+  void _maybeStartStartupOsPermissions() {
+    if (!canRequestStartupOsPermissions(
+      privacyAccepted: _appState.settings.privacyAccepted,
+      privacyDialogResolved: _initialPrivacyDismissedForSession,
+    )) {
+      return;
+    }
+    if (_startupOsPermissionsStarted) return;
+    _startupOsPermissionsStarted = true;
+    unawaited(_startStartupOsPermissions());
+  }
+
+  Future<void> _startStartupOsPermissions() async {
+    await _ensureNotificationsInitialized();
+    if (!mounted) return;
+    await _appState.ensureLocationTrackingStarted();
+    if (!mounted) return;
+    if (_pendingStartupConnectionsRoute &&
+        !_appState.bleConnected &&
+        !_appState.bleConnecting) {
+      _pendingStartupConnectionsRoute = false;
+      _startupRoutedToConnections = true;
+      _navigateTo(1);
+    }
+  }
+
+  Future<void> _ensureNotificationsInitialized() async {
+    if (_notificationsInitStarted) return;
+    _notificationsInitStarted = true;
+    await _initNotifications();
+  }
+
   void _onAppStateChanged() {
+    if (!_appState.loading) {
+      _maybeStartStartupOsPermissions();
+    }
     if (!_startupNavResolved && !_appState.loading) {
-      _startupNavResolved = true;
       if (!_appState.bleConnected && _index == 0) {
-        _startupRoutedToConnections = true;
-        _navigateTo(1);
+        if (canRequestStartupOsPermissions(
+          privacyAccepted: _appState.settings.privacyAccepted,
+          privacyDialogResolved: _initialPrivacyDismissedForSession,
+        )) {
+          _startupNavResolved = true;
+          _startupRoutedToConnections = true;
+          _navigateTo(1);
+        } else {
+          // Auto-scan on the Connections page would show the nearby-devices
+          // sheet under the first-run privacy dialog. Wait until it closes.
+          _startupNavResolved = true;
+          _pendingStartupConnectionsRoute = true;
+        }
+      } else {
+        _startupNavResolved = true;
       }
     }
     if (_startupRoutedToConnections && _appState.bleConnected) {
@@ -747,6 +827,11 @@ class _MeshHomePageState extends State<MeshHomePage>
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       if (state == AppLifecycleState.detached) {
+        // App swiped away / host going away: release the radio so another
+        // device can connect (best effort; the engine may be torn down).
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          unawaited(_appState.disconnectBle());
+        }
         _appState.markHostDetaching();
       }
       if (_appState.bleScanning) {
@@ -926,6 +1011,7 @@ class _MeshHomePageState extends State<MeshHomePage>
           setState(() {
             _initialPrivacyDismissedForSession = true;
           });
+          _maybeStartStartupOsPermissions();
           break;
         case _PrivacyDialogAction.readPolicy:
           _debugLog.info(
@@ -942,6 +1028,7 @@ class _MeshHomePageState extends State<MeshHomePage>
           setState(() {
             _initialPrivacyDismissedForSession = true;
           });
+          _maybeStartStartupOsPermissions();
           break;
       }
     });
@@ -967,6 +1054,10 @@ class _MeshHomePageState extends State<MeshHomePage>
         'privacy',
         'Privacy policy accepted; online mode unlocked',
       );
+      setState(() {
+        _initialPrivacyDismissedForSession = true;
+      });
+      _maybeStartStartupOsPermissions();
       return true;
     }
     if (action == _PrivacyDialogAction.readPolicy) {
@@ -1079,9 +1170,13 @@ class _MeshHomePageState extends State<MeshHomePage>
                 return historyLabel;
               }
               final sync = _appState.contactsSyncProgress;
-              // Keep an in-flight, incomplete, or disconnected contact sync
-              // on this pill. A completed book returns to the scan status.
-              if (sync.active || sync.incomplete || sync.disconnected) {
+              // Keep an in-flight, incomplete, stalled, or disconnected
+              // contact sync on this pill. A completed or cancelled pass
+              // returns to the scan status so force/loop can be seen.
+              if (sync.active ||
+                  sync.incomplete ||
+                  sync.disconnected ||
+                  sync.stalled) {
                 return sync.statusLabel;
               }
               if (!_appState.bleConnected) return 'Idle';
@@ -1215,6 +1310,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                             'ui_click',
                             'Sidebar select index=$i (drawer)',
                           );
+                          if (i == 3) _clearHistoryHexPin();
                           _navigateTo(i);
                           Navigator.of(context).pop();
                         },
@@ -1253,6 +1349,7 @@ class _MeshHomePageState extends State<MeshHomePage>
                             'ui_click',
                             'Sidebar select index=$i (desktop)',
                           );
+                          if (i == 3) _clearHistoryHexPin();
                           _navigateTo(i);
                         },
                         onDiscord: () =>
@@ -1409,8 +1506,9 @@ class _MeshHomePageState extends State<MeshHomePage>
     switch (index) {
       case 0:
         return MapPage(
-          zones: _appState.coverageZones,
-          overviewCells: _appState.coverageOverviewCells,
+          zones: _appState.mapCoverageZones,
+          onViewportHexes: _appState.refreshVisibleHexDetail,
+          onFetchHexDetail: _appState.fetchHexDetail,
           onRefresh: _appState.syncFromWorker,
           syncing: _appState.syncing,
           forceOffline: _appState.settings.forceOffline,
@@ -1435,8 +1533,15 @@ class _MeshHomePageState extends State<MeshHomePage>
           onBleToggleScan: _appState.toggleBleScan,
           onOpenHistoryFromZone: (zoneId) {
             _debugLog.info('ui_click', 'Map -> History from zone=$zoneId');
+            var filterId = zoneId;
+            final cell = parseHexDetailId(zoneId);
+            if (cell != null) {
+              final c = hexCellCenter(cell.row, cell.col);
+              filterId = hexKey(c.lat, c.lng);
+              unawaited(_appState.pinHexDetailForHistory(zoneId));
+            }
             setState(() {
-              _historyHexFilter = zoneId;
+              _historyHexFilter = filterId;
             });
             _navigateTo(3);
           },
@@ -1447,7 +1552,6 @@ class _MeshHomePageState extends State<MeshHomePage>
           rawScans: _appState.rawScans,
           nodesCount: _appState.nodes.length,
           statsRadiusMiles: _appState.settings.statsRadiusMiles,
-          maxHexScale: _appState.settings.maxHexScale,
           unitSystem: _appState.settings.unitSystem,
           tileCachingEnabled: _appState.settings.tileCachingEnabled,
           observerLat: observer?.$1,
@@ -1461,15 +1565,19 @@ class _MeshHomePageState extends State<MeshHomePage>
               _mapFocusNodeId = null;
             });
           },
+          onClearFocusHexId: () {
+            // Ignore a late clear from the page that just left if a new map
+            // visit is already showing.
+            if (!mounted || _index == 0 || _mapFocusHexId == null) return;
+            setState(() => _mapFocusHexId = null);
+          },
           onTapNodes: () {
             _debugLog.info('ui_click', 'Stats bar -> Nodes tab');
             _navigateTo(2);
           },
           onTapScans: () {
             _debugLog.info('ui_click', 'Stats bar -> History tab');
-            setState(() {
-              _historyHexFilter = null;
-            });
+            _clearHistoryHexPin();
             _navigateTo(3);
           },
         );
@@ -1510,8 +1618,14 @@ class _MeshHomePageState extends State<MeshHomePage>
       case 3:
         return HistoryPage(
           key: const ValueKey<String>('history-page'),
-          scans: _appState.scanResults,
+          scans: _historyHexFilter != null &&
+                  _appState.pinnedHexDetailScans.isNotEmpty
+              ? scanResultsForHexHistory(_appState.pinnedHexDetailScans)
+              : _appState.scanResults,
+          pinnedHexList: _historyHexFilter != null &&
+              _appState.pinnedHexDetailScans.isNotEmpty,
           initialHexId: _historyHexFilter,
+          onClearHexFilter: _clearHistoryHexPin,
           unitSystem: _appState.settings.unitSystem,
           resolvedNodeNames: resolvedNodeNames,
           connectedRadioName: _appState.connectedRadioDisplayName,
@@ -1584,6 +1698,7 @@ class _MeshHomePageState extends State<MeshHomePage>
             await _appState.updateSettings(value);
           },
           onSync: _appState.syncFromWorker,
+          onDownloadCoveragePack: _appState.downloadCoveragePack,
           // In-app install is Android/Linux only (same gate as contacts).
           onCheckForUpdates: localContactsSupported
               ? _checkForUpdatesFromSettings

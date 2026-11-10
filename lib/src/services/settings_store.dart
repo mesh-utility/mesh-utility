@@ -1,5 +1,4 @@
 import 'package:mesh_utility/src/config/app_config.dart';
-import 'package:mesh_utility/src/services/hex_coverage_aggregate.dart';
 import 'package:mesh_utility/src/services/reax_database.dart';
 import 'package:mesh_utility/src/services/scan_cache_area.dart';
 
@@ -31,10 +30,6 @@ class AppSettings {
     required this.scanCacheRadiusMiles,
     required this.scanCacheAdmin1Ids,
     required this.scanCacheAdmin2Ids,
-    required this.travelDownloadEnabled,
-    required this.travelRadiusMiles,
-    required this.travelAnchors,
-    required this.maxHexScale,
   });
 
   final String workerUrl;
@@ -68,20 +63,6 @@ class AppSettings {
   final List<String> scanCacheAdmin1Ids;
   final List<String> scanCacheAdmin2Ids;
 
-  /// When on, a device outside the cache area downloads a small bubble.
-  /// Global ignores this. Default is off.
-  final bool travelDownloadEnabled;
-
-  /// 10, 25, or 50 miles. Default is 25.
-  final int travelRadiusMiles;
-
-  /// Newest travel centers, each kept for 30 days, capped at 8.
-  final List<TravelAreaAnchor> travelAnchors;
-
-  /// Largest coverage parent when the map is zoomed out.
-  ///
-  /// One of [mapHexScaleSteps]. Default [mapHexMaxScale] keeps today's cap.
-  final int maxHexScale;
 
   static const defaults = AppSettings(
     workerUrl: AppConfig.deployedWorkerUrl,
@@ -110,10 +91,6 @@ class AppSettings {
     scanCacheRadiusMiles: defaultScanCacheRadiusMiles,
     scanCacheAdmin1Ids: <String>[],
     scanCacheAdmin2Ids: <String>[],
-    travelDownloadEnabled: false,
-    travelRadiusMiles: defaultTravelRadiusMiles,
-    travelAnchors: <TravelAreaAnchor>[],
-    maxHexScale: mapHexMaxScale,
   );
 
   AppSettings copyWith({
@@ -142,10 +119,6 @@ class AppSettings {
     int? scanCacheRadiusMiles,
     List<String>? scanCacheAdmin1Ids,
     List<String>? scanCacheAdmin2Ids,
-    bool? travelDownloadEnabled,
-    int? travelRadiusMiles,
-    List<TravelAreaAnchor>? travelAnchors,
-    int? maxHexScale,
   }) {
     final nextMode = clampScanCacheMode(scanCacheMode ?? this.scanCacheMode);
     final nextRadius = clampScanCacheRadiusMiles(
@@ -184,13 +157,6 @@ class AppSettings {
       scanCacheRadiusMiles: nextRadius,
       scanCacheAdmin1Ids: scanCacheAdmin1Ids ?? this.scanCacheAdmin1Ids,
       scanCacheAdmin2Ids: scanCacheAdmin2Ids ?? this.scanCacheAdmin2Ids,
-      travelDownloadEnabled:
-          travelDownloadEnabled ?? this.travelDownloadEnabled,
-      travelRadiusMiles: clampTravelRadiusMiles(
-        travelRadiusMiles ?? this.travelRadiusMiles,
-      ),
-      travelAnchors: travelAnchors ?? this.travelAnchors,
-      maxHexScale: clampMaxHexScale(maxHexScale ?? this.maxHexScale),
     );
   }
 
@@ -225,15 +191,11 @@ class AppSettings {
       'scanCacheRadiusMiles': scanCacheRadiusMiles,
       'scanCacheAdmin1Ids': scanCacheAdmin1Ids,
       'scanCacheAdmin2Ids': scanCacheAdmin2Ids,
-      'travelDownloadEnabled': travelDownloadEnabled,
-      'travelRadiusMiles': travelRadiusMiles,
-      'travelAnchors': <Map<String, Object>>[
-        for (final anchor in travelAnchors) anchor.toJson(),
-      ],
-      'maxHexScale': maxHexScale,
     };
   }
 
+  /// Older files may include `maxHexScale`. That key is ignored and is not
+  /// written back.
   static AppSettings fromJson(Map<String, dynamic> json) {
     final migrated = _cacheAreaFromJson(json);
     return AppSettings(
@@ -309,29 +271,8 @@ class AppSettings {
       scanCacheRadiusMiles: migrated.radiusMiles,
       scanCacheAdmin1Ids: _stringIdList(json['scanCacheAdmin1Ids']),
       scanCacheAdmin2Ids: _stringIdList(json['scanCacheAdmin2Ids']),
-      travelDownloadEnabled:
-          (json['travelDownloadEnabled'] as bool?) ??
-          defaults.travelDownloadEnabled,
-      travelRadiusMiles: clampTravelRadiusMiles(
-        (json['travelRadiusMiles'] as num?)?.toInt() ??
-            defaultTravelRadiusMiles,
-      ),
-      travelAnchors: _travelAnchors(json['travelAnchors']),
-      maxHexScale: _maxHexScaleFromJson(json['maxHexScale']),
+      // travelDownloadEnabled / travelRadiusMiles / travelAnchors are ignored.
     );
-  }
-
-  /// Missing or non-numeric values stay on [mapHexMaxScale]. Other numbers
-  /// snap to the nearest allowed step.
-  static int _maxHexScaleFromJson(Object? raw) {
-    if (raw is num && raw.isFinite) return clampMaxHexScale(raw.round());
-    if (raw is String) {
-      final parsed = num.tryParse(raw.trim());
-      if (parsed != null && parsed.isFinite) {
-        return clampMaxHexScale(parsed.round());
-      }
-    }
-    return mapHexMaxScale;
   }
 
   /// Scan-cache keys win. A file that only has `syncRadiusMiles` migrates:
@@ -364,15 +305,6 @@ class AppSettings {
     );
   }
 
-  static List<TravelAreaAnchor> _travelAnchors(Object? raw) {
-    if (raw is! List) return const <TravelAreaAnchor>[];
-    final anchors = <TravelAreaAnchor>[];
-    for (final item in raw) {
-      final anchor = TravelAreaAnchor.fromJson(item);
-      if (anchor != null) anchors.add(anchor);
-    }
-    return List<TravelAreaAnchor>.unmodifiable(anchors);
-  }
 
   static List<String> _stringIdList(Object? raw) {
     if (raw is! List) return const <String>[];

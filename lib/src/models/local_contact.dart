@@ -15,6 +15,7 @@ class LocalContact {
 
   final String publicKeyPrefix;
   final String name;
+
   /// MeshCore advert/contact type: chat=1, repeater=2, room=3, sensor=4.
   final int type;
   final DateTime lastHeard;
@@ -25,6 +26,7 @@ class LocalContact {
 
   /// Optional path / out-path hint from discover when known.
   final String? path;
+
   /// `sync`, `advert`, `discover`, or `push`.
   final String source;
 
@@ -49,21 +51,22 @@ class LocalContact {
   }
 
   Map<String, dynamic> toJson() => {
-        'publicKeyPrefix': publicKeyPrefix,
-        'name': name,
-        'type': type,
-        'lastHeard': lastHeard.toUtc().toIso8601String(),
-        'lastMod': lastMod,
-        'path': path,
-        'source': source,
-      };
+    'publicKeyPrefix': publicKeyPrefix,
+    'name': name,
+    'type': type,
+    'lastHeard': lastHeard.toUtc().toIso8601String(),
+    'lastMod': lastMod,
+    'path': path,
+    'source': source,
+  };
 
   factory LocalContact.fromJson(Map<String, dynamic> json) {
     return LocalContact(
       publicKeyPrefix: (json['publicKeyPrefix'] ?? '').toString().toUpperCase(),
       name: (json['name'] ?? '').toString(),
       type: (json['type'] as num?)?.toInt() ?? 0,
-      lastHeard: DateTime.tryParse(json['lastHeard']?.toString() ?? '') ??
+      lastHeard:
+          DateTime.tryParse(json['lastHeard']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
       lastMod: (json['lastMod'] as num?)?.toInt(),
       path: json['path']?.toString(),

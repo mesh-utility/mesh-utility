@@ -448,4 +448,76 @@ void main() {
       expect(find.byType(LinearProgressIndicator), findsNothing);
     },
   );
+
+
+  test('a quiet stall finishes so the caller can resume', () async {
+    final inbound = StreamController<Uint8List>();
+    final requests = <int?>[];
+    final progressEvents = <ContactSyncProgress>[];
+    final future = collectContactsFromInbound(
+      inbound: inbound.stream,
+      initialSince: null,
+      stallTimeout: const Duration(milliseconds: 80),
+      sendGetContacts: (since) async {
+        requests.add(since);
+        inbound.add(buildContactsStartFrame(940));
+        inbound.add(
+          buildSyntheticContactFrame(index: 1, name: 'Rep1', lastMod: 50),
+        );
+      },
+      onProgress: progressEvents.add,
+    );
+    final result = await future.timeout(const Duration(seconds: 2));
+    expect(requests, [null]);
+    expect(result.outcome, ContactSyncOutcome.stalled);
+    expect(result.contacts, hasLength(1));
+    expect(progressEvents.last.stalled, isTrue);
+    expect(progressEvents.last.active, isFalse);
+    expect(progressEvents.last.statusLabel, 'Contacts 1/940 stalled');
+    await inbound.close();
+  });
+
+  test('a later contact frame resets the stall timer', () async {
+    final inbound = StreamController<Uint8List>();
+    final future = collectContactsFromInbound(
+      inbound: inbound.stream,
+      stallTimeout: const Duration(milliseconds: 120),
+      sendGetContacts: (since) async {
+        inbound.add(buildContactsStartFrame(2));
+        inbound.add(
+          buildSyntheticContactFrame(index: 1, name: 'Rep1', lastMod: 1),
+        );
+      },
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 70));
+    inbound.add(
+      buildSyntheticContactFrame(index: 2, name: 'Rep2', lastMod: 2),
+    );
+    inbound.add(buildEndOfContactsFrame(lastmod: 2));
+    final result = await future.timeout(const Duration(seconds: 2));
+    expect(result.outcome, ContactSyncOutcome.completed);
+    expect(result.contacts, hasLength(2));
+    await inbound.close();
+  });
+
+  test('cancel aborts an in-flight pass so a scan can use the radio', () async {
+    final inbound = StreamController<Uint8List>();
+    final cancel = Completer<void>();
+    final future = collectContactsFromInbound(
+      inbound: inbound.stream,
+      cancel: cancel.future,
+      sendGetContacts: (since) async {
+        inbound.add(buildContactsStartFrame(940));
+        inbound.add(
+          buildSyntheticContactFrame(index: 1, name: 'Rep1', lastMod: 9),
+        );
+      },
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    cancel.complete();
+    final result = await future.timeout(const Duration(seconds: 2));
+    expect(result.outcome, ContactSyncOutcome.cancelled);
+    expect(result.contacts, hasLength(1));
+    await inbound.close();
+  });
 }
