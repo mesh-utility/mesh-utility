@@ -9,6 +9,7 @@ RawScan _scan({
   double? rssi = -80.0,
   double? snr,
   String? radioId,
+  String? observerId,
   String? senderName,
   DateTime? timestamp,
 }) {
@@ -19,6 +20,7 @@ RawScan _scan({
     rssi: rssi,
     snr: snr,
     radioId: radioId,
+    observerId: observerId,
     senderName: senderName,
     timestamp: timestamp ?? DateTime(2024, 1, 1),
   );
@@ -55,7 +57,6 @@ void main() {
       expect(zones.first.isDeadZone, isFalse);
       expect(zones.first.avgRssi, closeTo(-123.0, 0.01));
     });
-
 
     test('RSSI is averaged across scans in the same hex', () {
       final zones = aggregateScansToZones([
@@ -146,6 +147,25 @@ void main() {
         _scan(nodeId: 'abc', senderName: 'Unknown (abc)'),
       ]);
       expect(nodes.first.name, isNull);
+    });
+
+    test('ignores rows whose nodeId is the observer or radio id', () {
+      final nodes = extractNodes([
+        _scan(nodeId: 'ABCD1234', radioId: 'FB38B387', observerId: 'FB38B387'),
+        _scan(
+          nodeId: 'FB38B387',
+          radioId: 'FB38B387',
+          observerId: 'FB38B387',
+          senderName: 'KD3CGK TDeck',
+        ),
+        _scan(
+          nodeId: 'FB38B387ABCDEF',
+          observerId: 'FB38B387ABCDEF00',
+          senderName: 'KD3CGK TDeck',
+        ),
+      ]);
+      expect(nodes, hasLength(1));
+      expect(nodes.single.nodeId, 'ABCD1234');
     });
   });
 

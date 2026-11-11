@@ -3,6 +3,7 @@ import 'package:mesh_utility/src/models/mesh_node.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/services/radio_id_utils.dart';
 
 List<CoverageZone> aggregateScansToZones(List<RawScan> scans) {
   final hexMap = <String, List<RawScan>>{};
@@ -79,6 +80,9 @@ List<MeshNode> extractNodes(List<RawScan> scans) {
   for (final scan in scans) {
     final nodeId = scan.nodeId;
     if (nodeId == null || nodeId.isEmpty) {
+      continue;
+    }
+    if (_nodeIdIsObserverRadio(scan)) {
       continue;
     }
 
@@ -186,4 +190,19 @@ List<ScanResult> scanResultsForHexHistory(List<RawScan> scans) {
     );
   }
   return results;
+}
+
+/// True when this row's nodeId is the observing radio, not a heard mesh node.
+bool _nodeIdIsObserverRadio(RawScan scan) {
+  final nodeId = normalizeHexId(scan.nodeId ?? '');
+  if (nodeId.isEmpty) return false;
+  final observerId = normalizeHexId(scan.observerId ?? '');
+  if (observerId.isNotEmpty && idsLikelySameDevice(nodeId, observerId)) {
+    return true;
+  }
+  final radioId = normalizeHexId(scan.radioId ?? '');
+  if (radioId.isNotEmpty && idsLikelySameDevice(nodeId, radioId)) {
+    return true;
+  }
+  return false;
 }

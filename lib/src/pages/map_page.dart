@@ -285,9 +285,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  bool get _hexPopupOpen =>
-      _selectedZone != null ||
-      _clusterPopup != null;
+  bool get _hexPopupOpen => _selectedZone != null || _clusterPopup != null;
 
   void _clearHexPopupFields() {
     _suppressHexFocus = true;
@@ -642,7 +640,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       final draw = _drawForZoneId(zoneId);
       setState(() {
         _selectedZone = zone;
-            _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
+        _clusterPopup = draw != null && draw.scale > 1 ? draw : null;
         _legendExpanded = false;
         _lastPopupDebugSignature = null;
       });
@@ -760,7 +758,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _appliedFocusHexId = hexId;
     setState(() {
       _selectedZone = zone;
-        _clusterPopup = null;
+      _clusterPopup = null;
       _legendExpanded = false;
       _lastPopupDebugSignature = null;
     });
@@ -777,7 +775,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     final nodeHexes = <String>{};
     for (final scan in widget.scans) {
       if (_nodeFilterKey(scan.nodeId) == nodeKey) {
-        nodeHexes.add(hexKey(scan.latitude, scan.longitude));
+        nodeHexes.addAll(
+          coverageZoneIdsForPoint(scan.latitude, scan.longitude),
+        );
       }
     }
     if (nodeHexes.isEmpty) {
@@ -848,7 +848,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     for (final scan in widget.scans) {
       final key = _nodeFilterKey(scan.nodeId);
       if (key.isNotEmpty && nodeFilters.contains(key)) {
-        nodeHexes.add(hexKey(scan.latitude, scan.longitude));
+        nodeHexes.addAll(
+          coverageZoneIdsForPoint(scan.latitude, scan.longitude),
+        );
       }
     }
     if (nodeHexes.isEmpty) return;
@@ -990,7 +992,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             for (final scan in widget.scans) {
               final key = _nodeFilterKey(scan.nodeId);
               if (key.isNotEmpty && effectiveNodeFilters.contains(key)) {
-                nodeHexes.add(hexKey(scan.latitude, scan.longitude));
+                nodeHexes.addAll(
+                  coverageZoneIdsForPoint(scan.latitude, scan.longitude),
+                );
               }
             }
             return widget.zones
@@ -1023,7 +1027,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
           !effectiveNodeFilters.contains(nodeKey)) {
         continue;
       }
-      if (!filteredZoneIds.contains(hexKey(scan.latitude, scan.longitude))) {
+      if (filteredZoneIds
+          .intersection(coverageZoneIdsForPoint(scan.latitude, scan.longitude))
+          .isEmpty) {
         continue;
       }
       scopedNodeIds.add(nodeKey);
@@ -1118,9 +1124,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     final deadZonesLength = dataset.dead;
     final avgRssi = dataset.avgRssi;
     final avgSnr = dataset.avgSnr;
-    final batchHexes = <CoverageBatchHex>[
-      ..._batchHexes,
-    ];
+    final batchHexes = <CoverageBatchHex>[..._batchHexes];
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewWidth = constraints.hasBoundedWidth
@@ -2206,7 +2210,7 @@ bool _zoneMatchesNodeFilter({
   for (final scan in scans) {
     final key = _nodeFilterKey(scan.nodeId);
     if (key.isEmpty || !nodeIdFilters.contains(key)) continue;
-    if (hexKey(scan.latitude, scan.longitude) == zone.id) {
+    if (coverageZoneIdMatchesPoint(zone.id, scan.latitude, scan.longitude)) {
       return true;
     }
   }
@@ -2366,8 +2370,7 @@ ScanResult? _latestScanForZone(
       if (key.isEmpty || !nodeIdFilters.contains(key)) continue;
     }
     bool matches = false;
-    final scanHex = hexKey(scan.latitude, scan.longitude);
-    if (zone.id == scanHex) {
+    if (coverageZoneIdMatchesPoint(zone.id, scan.latitude, scan.longitude)) {
       matches = true;
     } else {
       final snapped = snapToHexGrid(scan.latitude, scan.longitude);

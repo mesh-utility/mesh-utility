@@ -102,6 +102,22 @@ String hexKey(double lat, double lng) {
   return '${snapped.snapLat.toStringAsFixed(6)}:${snapped.snapLng.toStringAsFixed(6)}';
 }
 
+/// Index id used by [coverageZonesFromHexDetails] (`hex:row:col`).
+String hexIndexId(double lat, double lng) {
+  final cell = hexCellAt(lat, lng);
+  return 'hex:${cell.row}:${cell.col}';
+}
+
+/// Both zone-id forms for a point: the hex index id and the older [hexKey].
+Set<String> coverageZoneIdsForPoint(double lat, double lng) {
+  return <String>{hexIndexId(lat, lng), hexKey(lat, lng)};
+}
+
+/// True when [zoneId] is either id form for this coordinate.
+bool coverageZoneIdMatchesPoint(String zoneId, double lat, double lng) {
+  return coverageZoneIdsForPoint(lat, lng).contains(zoneId);
+}
+
 /// Haversine distance between two points in miles.
 double distanceMiles(double lat1, double lng1, double lat2, double lng2) {
   const r = 3958.8;

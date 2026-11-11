@@ -42,7 +42,14 @@ void main() {
             'N1',
             'Millheim 1W',
             [
-              {'i': 'N1', 'n': 'Millheim 1W', 't': 1730000000000, 's': 12.0, 'r': -63.0, 'c': 3},
+              {
+                'i': 'N1',
+                'n': 'Millheim 1W',
+                't': 1730000000000,
+                's': 12.0,
+                'r': -63.0,
+                'c': 3,
+              },
             ],
           ],
         ],
@@ -227,48 +234,61 @@ void main() {
     expect(heard.senderName, 'Millheim 1W');
     expect(heard.receiverName, 'Truck Radio');
     expect(heard.radioId, 'FFFF0001');
-    final observer = scans.firstWhere((s) => s.nodeId == 'FFFF0001');
+    expect(heard.observerId, 'FFFF0001');
+    final observer = scans.firstWhere(
+      (s) =>
+          (s.nodeId == null || s.nodeId!.isEmpty) && s.observerId == 'FFFF0001',
+    );
     expect(observer.receiverName, 'Truck Radio');
+    expect(observer.radioId, 'FFFF0001');
+    expect(observer.nodeId, isNull);
   });
 
-  test('groupRawScansByEvent collapses per-node rows and keeps the best SNR', () {
-    final ts = DateTime.utc(2026, 11, 10, 12, 38);
-    RawScan row({required String nodeId, required double snr, String? receiver}) {
-      return RawScan(
-        nodeId: nodeId,
+  test(
+    'groupRawScansByEvent collapses per-node rows and keeps the best SNR',
+    () {
+      final ts = DateTime.utc(2026, 11, 10, 12, 38);
+      RawScan row({
+        required String nodeId,
+        required double snr,
+        String? receiver,
+      }) {
+        return RawScan(
+          nodeId: nodeId,
+          latitude: 40.89015,
+          longitude: -77.47827,
+          rssi: -80,
+          snr: snr,
+          timestamp: ts,
+          senderName: nodeId,
+          receiverName: receiver,
+          radioId: 'FB38B387',
+        );
+      }
+
+      final later = RawScan(
+        nodeId: 'EEEE5555',
         latitude: 40.89015,
         longitude: -77.47827,
-        rssi: -80,
-        snr: snr,
-        timestamp: ts,
-        senderName: nodeId,
-        receiverName: receiver,
+        rssi: -90,
+        snr: 2,
+        timestamp: ts.add(const Duration(minutes: 1)),
+        senderName: 'EEEE5555',
+        receiverName: 'KD3CGK TDeck',
         radioId: 'FB38B387',
       );
-    }
-
-    final later = RawScan(
-      nodeId: 'EEEE5555',
-      latitude: 40.89015,
-      longitude: -77.47827,
-      rssi: -90,
-      snr: 2,
-      timestamp: ts.add(const Duration(minutes: 1)),
-      senderName: 'EEEE5555',
-      receiverName: 'KD3CGK TDeck',
-      radioId: 'FB38B387',
-    );
-    final all = groupRawScansByEvent([
-      row(nodeId: 'AAAA1111', snr: 4, receiver: 'KD3CGK TDeck'),
-      row(nodeId: 'BBBB2222', snr: 12),
-      row(nodeId: 'CCCC3333', snr: 7, receiver: 'KD3CGK TDeck'),
-      later,
-    ]);
-    expect(all, hasLength(2));
-    expect(all.first.nodeId, 'EEEE5555'); // newest first
-    expect(all.last.nodeId, 'BBBB2222');
-    expect(all.last.receiverName, 'KD3CGK TDeck');
-  });
+      final all = groupRawScansByEvent([
+        row(nodeId: 'AAAA1111', snr: 4, receiver: 'KD3CGK TDeck'),
+        row(nodeId: 'BBBB2222', snr: 12),
+        row(nodeId: 'CCCC3333', snr: 7, receiver: 'KD3CGK TDeck'),
+        later,
+      ]);
+      expect(all, hasLength(2));
+      expect(all.first.nodeId, 'EEEE5555'); // newest first
+      expect(all.last.nodeId, 'BBBB2222');
+      expect(all.last.receiverName, 'KD3CGK TDeck');
+    },
+  );
 
   test('rawScansForHexCell drops neighbors and matches the cell count', () {
     final cell = hexCellAt(40.89015, -77.47827);
@@ -317,65 +337,65 @@ void main() {
     );
   });
 
-  test('popup and History counts agree with unique scan events, not index lines', () {
-    // Live Millheim-style shape: many per-node NDJSON lines (the coverage
-    // index scanCount) collapse to one event per timestamp|radio|lat|lng,
-    // including same-timestamp reingest duplicates of the same node.
-    final cell = hexCellAt(40.8912, -77.478997);
-    final ts = DateTime.utc(2026, 11, 10, 6, 50);
-    RawScan line({
-      required String nodeId,
-      required DateTime at,
-      String radioId = 'AAAA1111',
-      double lat = 40.8912,
-      double lng = -77.478997,
-      double? snr = 4,
-    }) {
-      return RawScan(
-        nodeId: nodeId,
-        latitude: lat,
-        longitude: lng,
-        rssi: -80,
-        snr: snr,
-        timestamp: at,
-        senderName: nodeId,
-        receiverName: 'KD3CGK TDeck',
-        radioId: radioId,
+  test(
+    'popup and History counts agree with unique scan events, not index lines',
+    () {
+      // Live Millheim-style shape: many per-node NDJSON lines (the coverage
+      // index scanCount) collapse to one event per timestamp|radio|lat|lng,
+      // including same-timestamp reingest duplicates of the same node.
+      final cell = hexCellAt(40.8912, -77.478997);
+      final ts = DateTime.utc(2026, 11, 10, 6, 50);
+      RawScan line({
+        required String nodeId,
+        required DateTime at,
+        String radioId = 'AAAA1111',
+        double lat = 40.8912,
+        double lng = -77.478997,
+        double? snr = 4,
+      }) {
+        return RawScan(
+          nodeId: nodeId,
+          latitude: lat,
+          longitude: lng,
+          rssi: -80,
+          snr: snr,
+          timestamp: at,
+          senderName: nodeId,
+          receiverName: 'KD3CGK TDeck',
+          radioId: radioId,
+        );
+      }
+
+      const uniqueEvents = 260;
+      final lines = <RawScan>[];
+      for (var i = 0; i < uniqueEvents; i++) {
+        final at = ts.subtract(Duration(minutes: i));
+        // ~3 node lines plus a same-node reingest duplicate on every event.
+        lines.add(line(nodeId: '463D3236', at: at, snr: 6));
+        lines.add(line(nodeId: '463D3236', at: at, snr: 3)); // dup
+        lines.add(line(nodeId: 'NODEAAAA', at: at, snr: 2));
+        lines.add(line(nodeId: 'NODEBBBB', at: at, snr: 1));
+      }
+      // One neighbor-cell line must not inflate the cell count.
+      lines.add(
+        line(nodeId: 'OUTSIDE', at: ts, lat: 40.8912 + 0.02, lng: -77.478997),
       );
-    }
 
-    const uniqueEvents = 260;
-    final lines = <RawScan>[];
-    for (var i = 0; i < uniqueEvents; i++) {
-      final at = ts.subtract(Duration(minutes: i));
-      // ~3 node lines plus a same-node reingest duplicate on every event.
-      lines.add(line(nodeId: '463D3236', at: at, snr: 6));
-      lines.add(line(nodeId: '463D3236', at: at, snr: 3)); // dup
-      lines.add(line(nodeId: 'NODEAAAA', at: at, snr: 2));
-      lines.add(line(nodeId: 'NODEBBBB', at: at, snr: 1));
-    }
-    // One neighbor-cell line must not inflate the cell count.
-    lines.add(line(
-      nodeId: 'OUTSIDE',
-      at: ts,
-      lat: 40.8912 + 0.02,
-      lng: -77.478997,
-    ));
-
-    expect(lines.length, greaterThan(uniqueEvents));
-    final inCell = rawScansForHexCell(
-      scans: lines,
-      row: cell.row,
-      col: cell.col,
-    );
-    expect(inCell, hasLength(uniqueEvents));
-    // Strongest SNR row kept, so the same-timestamp node is not listed twice.
-    expect(inCell.every((s) => s.nodeId == '463D3236'), isTrue);
-    final keys = inCell.map(rawScanEventKey).toSet();
-    expect(keys, hasLength(uniqueEvents));
-    final history = scanResultsForHexHistory(inCell);
-    expect(history, hasLength(uniqueEvents));
-  });
+      expect(lines.length, greaterThan(uniqueEvents));
+      final inCell = rawScansForHexCell(
+        scans: lines,
+        row: cell.row,
+        col: cell.col,
+      );
+      expect(inCell, hasLength(uniqueEvents));
+      // Strongest SNR row kept, so the same-timestamp node is not listed twice.
+      expect(inCell.every((s) => s.nodeId == '463D3236'), isTrue);
+      final keys = inCell.map(rawScanEventKey).toSet();
+      expect(keys, hasLength(uniqueEvents));
+      final history = scanResultsForHexHistory(inCell);
+      expect(history, hasLength(uniqueEvents));
+    },
+  );
 
   test('unnamed hex node does not inherit another node lastNodeName', () {
     final cell = hexCellAt(lockHavenLat, lockHavenLng);
@@ -395,12 +415,7 @@ void main() {
             lastTs: 50,
             count: 37,
           ),
-          HexDetailNode(
-            id: 'E73FA387',
-            role: 'repeater',
-            lastTs: 40,
-            count: 2,
-          ),
+          HexDetailNode(id: 'E73FA387', role: 'repeater', lastTs: 40, count: 2),
           HexDetailNode(
             id: '718D349F',
             name: 'CCLRN Millheim',
@@ -422,4 +437,113 @@ void main() {
     final unnamed = scans.firstWhere((s) => s.nodeId == 'E73FA387');
     expect(unnamed.senderName, isNull);
   });
+
+  test(
+    'observers are excluded from Nodes, repeaters stay, History still lists observers',
+    () {
+      final heardCell = hexCellAt(lockHavenLat, lockHavenLng);
+      final deadCell = hexCellAt(lockHavenLat + 0.05, lockHavenLng + 0.05);
+      final details = [
+        HexDetail(
+          row: heardCell.row,
+          col: heardCell.col,
+          scanCount: 3,
+          lastTs: 50,
+          lastNodeId: 'ABCD1234',
+          lastNodeName: 'Millheim 1W',
+          lastRssi: -70,
+          lastSnr: 8,
+          bestRssi: -70,
+          bestSnr: 8,
+          nodes: const [
+            HexDetailNode(
+              id: 'ABCD1234',
+              name: 'Millheim 1W',
+              role: 'repeater',
+              senderName: 'Millheim 1W',
+              receiverName: 'KD3CGK TDeck',
+              lastTs: 50,
+              lastRssi: -70,
+              lastSnr: 8,
+              bestSnr: 8,
+              bestRssi: -70,
+              count: 3,
+            ),
+            HexDetailNode(
+              id: 'FB38B387',
+              name: 'KD3CGK TDeck',
+              role: 'observer',
+              receiverName: 'KD3CGK TDeck',
+              lastTs: 50,
+              count: 3,
+            ),
+          ],
+        ),
+        HexDetail(
+          row: deadCell.row,
+          col: deadCell.col,
+          scanCount: 2,
+          lastTs: 40,
+          lastNodeId: 'FB38B387',
+          lastNodeName: 'KD3CGK TDeck',
+          nodes: const [
+            HexDetailNode(
+              id: 'FB38B387',
+              name: 'KD3CGK TDeck',
+              role: 'observer',
+              receiverName: 'KD3CGK TDeck',
+              lastTs: 40,
+              count: 2,
+            ),
+          ],
+        ),
+      ];
+
+      final scans = rawScansFromHexDetails(details);
+      final nodes = extractNodes(scans);
+      expect(nodes, hasLength(1));
+      expect(nodes.single.nodeId, 'ABCD1234');
+      expect(nodes.single.name, 'Millheim 1W');
+      expect(nodes.map((n) => n.nodeId), isNot(contains('FB38B387')));
+
+      // Per-node filter/zoom still has the repeater's last position.
+      final heardCenter = hexDetailCenter(details[0]);
+      expect(nodes.single.latitude, closeTo(heardCenter.lat, 0.0001));
+      expect(nodes.single.longitude, closeTo(heardCenter.lng, 0.0001));
+
+      final heardHistory = scanResultsForHexHistory(
+        scans
+            .where(
+              (s) =>
+                  hexCellAt(s.latitude, s.longitude).row == heardCell.row &&
+                  hexCellAt(s.latitude, s.longitude).col == heardCell.col,
+            )
+            .toList(),
+      );
+      expect(heardHistory.any((r) => r.receiverName == 'KD3CGK TDeck'), isTrue);
+      expect(heardHistory.any((r) => r.nodeId == 'ABCD1234'), isTrue);
+
+      final deadHistory = scanResultsForHexHistory(
+        scans
+            .where(
+              (s) =>
+                  hexCellAt(s.latitude, s.longitude).row == deadCell.row &&
+                  hexCellAt(s.latitude, s.longitude).col == deadCell.col,
+            )
+            .toList(),
+      );
+      expect(deadHistory, isNotEmpty);
+      expect(deadHistory.every((r) => r.nodeId.isEmpty), isTrue);
+      expect(deadHistory.any((r) => r.receiverName == 'KD3CGK TDeck'), isTrue);
+
+      final zones = coverageZonesFromHexDetails(details);
+      expect(zones, hasLength(2));
+      final heardZone = zones.firstWhere((z) => z.id == details[0].zoneId);
+      final deadZone = zones.firstWhere((z) => z.id == details[1].zoneId);
+      expect(heardZone.isDeadZone, isFalse);
+      expect(heardZone.scanCount, 3);
+      expect(deadZone.isDeadZone, isTrue);
+      expect(deadZone.scanCount, 2);
+    },
+  );
 }

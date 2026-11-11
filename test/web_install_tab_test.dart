@@ -239,12 +239,10 @@ void main() {
 
     expect(find.byKey(whatsNewLoadingKey), findsNothing);
     expect(find.byKey(whatsNewFallbackKey), findsOneWidget);
-    expect(find.text("What's new in Alpha-25.1"), findsOneWidget);
+    expect(find.text("What's new in Alpha-25.2"), findsOneWidget);
     expect(find.text('Other changes'), findsOneWidget);
     expect(
-      find.textContaining(
-        'Coverage hexes stay on the fixed grid',
-      ),
+      find.textContaining('Coverage hexes stay on the fixed grid'),
       findsOneWidget,
     );
     expect(find.text('Fixes'), findsOneWidget);

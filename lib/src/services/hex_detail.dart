@@ -115,10 +115,9 @@ List<HexDetailNode> _nodes(Object? raw) {
         name: (entry['n'] ?? entry['name'])?.toString(),
         role: (entry['role'] ?? entry['type'])?.toString(),
         senderName: (entry['sn'] ?? entry['senderName'])?.toString(),
-        receiverName: (entry['rn'] ??
-                entry['receiverName'] ??
-                entry['observerName'])
-            ?.toString(),
+        receiverName:
+            (entry['rn'] ?? entry['receiverName'] ?? entry['observerName'])
+                ?.toString(),
         lastTs: _int(entry['t'] ?? entry['lastTs']),
         bestSnr: _num(entry['s'] ?? entry['snr'] ?? entry['bestSnr']),
         bestRssi: _num(entry['r'] ?? entry['rssi'] ?? entry['bestRssi']),
@@ -250,14 +249,15 @@ List<CoverageZone> coverageZonesFromHexDetails(Iterable<HexDetail> details) {
   return out;
 }
 
-
 /// A node's own advertised/index name, never another node's lastNodeName.
 String? _nameForHexNode(HexDetailNode node, HexDetail detail) {
   final own = (node.senderName ?? node.name)?.trim();
   if (own != null && own.isNotEmpty) return own;
   final nodeId = normalizeHexId(node.id);
   final lastId = normalizeHexId(detail.lastNodeId ?? '');
-  if (nodeId.isNotEmpty && lastId.isNotEmpty && idsLikelySameDevice(nodeId, lastId)) {
+  if (nodeId.isNotEmpty &&
+      lastId.isNotEmpty &&
+      idsLikelySameDevice(nodeId, lastId)) {
     final lastName = (detail.lastNodeName ?? '').trim();
     return lastName.isEmpty ? null : lastName;
   }
@@ -303,11 +303,14 @@ List<RawScan> rawScansFromHexDetails(Iterable<HexDetail> details) {
                   )
                 : null);
       if (node.isObserver) {
+        // Observer radios must never appear as heard mesh nodes in the Nodes
+        // list. Keep observerId / radioId / receiverName so History and hex
+        // popups can still show who scanned the cell.
         out.add(
           RawScan(
             observerId: node.id,
             radioId: node.id,
-            nodeId: node.id,
+            nodeId: null,
             latitude: center.lat,
             longitude: center.lng,
             rssi: node.lastRssi ?? node.bestRssi,
@@ -327,12 +330,17 @@ List<RawScan> rawScansFromHexDetails(Iterable<HexDetail> details) {
           nodeId: node.id,
           latitude: center.lat,
           longitude: center.lng,
-          rssi: node.lastRssi ?? node.bestRssi ?? detail.lastRssi ?? detail.bestRssi,
+          rssi:
+              node.lastRssi ??
+              node.bestRssi ??
+              detail.lastRssi ??
+              detail.bestRssi,
           snr: node.lastSnr ?? node.bestSnr ?? detail.lastSnr ?? detail.bestSnr,
           altitude: detail.altitude,
           timestamp: when,
           senderName: _nameForHexNode(node, detail),
-          receiverName: node.receiverName ?? observer?.name ?? observer?.receiverName,
+          receiverName:
+              node.receiverName ?? observer?.name ?? observer?.receiverName,
           downloadedFromWorker: true,
         ),
       );

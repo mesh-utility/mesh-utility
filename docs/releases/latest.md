@@ -1,7 +1,9 @@
-# Mesh Utility Alpha-25.1
+# Mesh Utility Alpha-25.2
 
 ## Fixes
 
+- The Nodes list now shows only mesh nodes that were heard. Observer radios no longer appear there. History and hex popups still show who observed a cell.
+- Tapping a node in the Nodes list again zooms to and filters that node’s coverage hexes.
 - Hexes now stay locked to their map location while zooming and rotating.
 - Coverage hexes stay on the fixed grid. Cells are not resized, merged, or moved when you zoom, and the max hex size slider has been removed.
 - Every Cloud History day range works with the on-demand coverage index. Zooming all the way out on Global shows the full map.

@@ -93,4 +93,32 @@ void main() {
       isTrue,
     );
   });
+
+  group('coverage zone ids', () {
+    test('index id and hexKey both match the same point', () {
+      const lat = 41.137;
+      const lng = -77.446;
+      final cell = hexCellAt(lat, lng);
+      expect(hexIndexId(lat, lng), 'hex:${cell.row}:${cell.col}');
+      final ids = coverageZoneIdsForPoint(lat, lng);
+      expect(ids, contains('hex:${cell.row}:${cell.col}'));
+      expect(ids, contains(hexKey(lat, lng)));
+      expect(
+        coverageZoneIdMatchesPoint('hex:${cell.row}:${cell.col}', lat, lng),
+        isTrue,
+      );
+      expect(coverageZoneIdMatchesPoint(hexKey(lat, lng), lat, lng), isTrue);
+      expect(coverageZoneIdMatchesPoint('hex:0:0', lat, lng), isFalse);
+    });
+
+    test('node filter can match hex-index zones from a scan point', () {
+      const lat = 40.89015;
+      const lng = -77.47827;
+      final zoneId = hexIndexId(lat, lng);
+      final nodeHexes = coverageZoneIdsForPoint(lat, lng);
+      expect(nodeHexes.contains(zoneId), isTrue);
+      expect(zoneId.startsWith('hex:'), isTrue);
+      expect(nodeHexes.contains(hexKey(lat, lng)), isTrue);
+    });
+  });
 }
