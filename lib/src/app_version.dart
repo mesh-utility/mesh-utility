@@ -12,7 +12,7 @@ const String kAppVersionFromEnvironment = String.fromEnvironment('APP_VERSION');
 ///
 /// Native builds prefer [PackageInfo]. Web builds prefer [kAppVersionFromEnvironment].
 /// `test/app_version_test.dart` fails if this drifts from pubspec.yaml.
-const String kGeneratedAppVersion = '1.0.0-alpha.25+25';
+const String kGeneratedAppVersion = '1.0.0-alpha.25.1+26';
 
 /// Version known at startup, before [loadAppVersion] finishes.
 String get kAppVersionLabel {
@@ -102,10 +102,15 @@ String? versionLabelFromPackageInfo({
 
   final trimmed = version.trim();
   if (versionReal && parseAlphaNumber(trimmed) == n) {
-    if (buildReal &&
-        !trimmed.contains('+') &&
-        int.tryParse(buildNumber.trim()) == n) {
-      return '$trimmed+$n';
+    if (buildReal && !trimmed.contains('+')) {
+      final build = int.parse(buildNumber.trim());
+      final pubspecStyle = RegExp(
+        r'^\d+\.\d+\.\d+-alpha',
+        caseSensitive: false,
+      ).hasMatch(trimmed);
+      if (build == n || pubspecStyle) {
+        return '$trimmed+$build';
+      }
     }
     return trimmed;
   }
@@ -126,8 +131,15 @@ int? alphaNumberFrom({required String version, String? buildNumber}) {
   return n;
 }
 
-/// `Alpha-N` when [version] encodes a release number, otherwise the raw text.
+/// `Alpha-N` or `Alpha-N.M` when [version] encodes a release number,
+/// otherwise the raw text.
 String alphaReleaseLabel(String version) {
+  final parsed = parseAlphaVersion(version);
+  if (parsed != null) {
+    return parsed.hotfix > 0
+        ? 'Alpha-${parsed.number}.${parsed.hotfix}'
+        : 'Alpha-${parsed.number}';
+  }
   final n = alphaNumberFrom(version: version);
   if (n == null) {
     final trimmed = version.trim();
@@ -140,15 +152,44 @@ String alphaReleaseLabel(String version) {
 String meshUtilityFooterLabel(String version) =>
     'Mesh Utility ${alphaReleaseLabel(version)}';
 
-/// Extract N from `Alpha-17`, `alpha-17`, `vAlpha-17`, or `1.0.0-alpha.17+17`.
-int? parseAlphaNumber(String tagOrVersion) {
+/// Major and optional hotfix from an Alpha tag or pubspec version.
+///
+/// `Alpha-25` and `1.0.0-alpha.25+25` are `(25, 0)`.
+/// `Alpha-25.1` and `1.0.0-alpha.25.1+26` are `(25, 1)`.
+class AlphaVersion {
+  const AlphaVersion(this.number, [this.hotfix = 0]);
+
+  final int number;
+  final int hotfix;
+
+  /// Negative if this is older than [other], zero if equal, positive if newer.
+  int compareTo(AlphaVersion other) {
+    final major = number.compareTo(other.number);
+    if (major != 0) return major;
+    return hotfix.compareTo(other.hotfix);
+  }
+}
+
+/// Parse `Alpha-25`, `Alpha-25.1`, `1.0.0-alpha.25+25`, or
+/// `1.0.0-alpha.25.1+26`. The `+build` suffix is not a hotfix.
+AlphaVersion? parseAlphaVersion(String tagOrVersion) {
   final m = RegExp(
-    r'alpha[^\d]*(\d+)',
+    r'alpha[^\d]*(\d+)(?:\.(\d+))?',
     caseSensitive: false,
   ).firstMatch(tagOrVersion.trim());
   if (m == null) return null;
-  return int.tryParse(m.group(1)!);
+  final number = int.tryParse(m.group(1)!);
+  if (number == null) return null;
+  final hotfixRaw = m.group(2);
+  final hotfix = hotfixRaw == null ? 0 : int.tryParse(hotfixRaw);
+  if (hotfix == null) return null;
+  return AlphaVersion(number, hotfix);
 }
+
+/// Extract N from `Alpha-17`, `alpha-17`, `vAlpha-17`, or `1.0.0-alpha.17+17`.
+/// For a hotfix tag such as `Alpha-25.1` this is the major number `25`.
+int? parseAlphaNumber(String tagOrVersion) =>
+    parseAlphaVersion(tagOrVersion)?.number;
 
 bool _isPlaceholderVersion(String version) {
   final v = version.trim().toLowerCase();

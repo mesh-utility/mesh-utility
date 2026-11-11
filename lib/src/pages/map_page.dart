@@ -334,10 +334,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   /// Prefer the painted hex under the finger.
   ///
-  /// Map taps are converted to lat/lng by a different path than the one that
-  /// paints the rings. After an overlay rebuild that conversion can land
-  /// inside a hex the finger is not on. A geographic hit counts only when
-  /// the painted ring is actually next to the finger.
+  /// Taps are in screen space; the rings are painted in unrotated layer
+  /// space ([coverageHexLayerOffset]). After converting the tap into that
+  /// space, a geographic hit counts only when the painted ring is actually
+  /// next to the finger. An overlay rebuild can otherwise land a lat/lng
+  /// conversion inside a hex the finger is not on.
   String? _hitCoverage(
     TapPosition tapPosition,
     LatLng latLng,
@@ -346,16 +347,18 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     final relative = tapPosition.relative;
     if (relative != null) {
       try {
-        final project = _mapController.camera.latLngToScreenOffset;
+        final camera = _mapController.camera;
+        Offset project(LatLng point) => coverageHexLayerOffset(camera, point);
+        final layerPoint = coverageHexScreenToLayer(camera, relative);
         final visual = hitTestCoverageBatchHexesOnScreen(
-          relative,
+          layerPoint,
           hexes,
           project,
         );
         if (visual != null) return visual;
         final geographic = hitTestCoverageBatchHexes(latLng, hexes);
         if (geographic == null) return null;
-        if (_screenPointNearHex(relative, geographic, hexes, project)) {
+        if (_screenPointNearHex(layerPoint, geographic, hexes, project)) {
           return geographic;
         }
         return null;

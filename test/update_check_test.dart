@@ -74,6 +74,44 @@ void main() {
         isFalse,
       );
     });
+
+    test('treats Alpha-25.1 as newer than Alpha-25', () {
+      expect(
+        isNewerAlphaRelease(
+          currentVersion: '1.0.0-alpha.25+25',
+          latestTag: 'Alpha-25.1',
+        ),
+        isTrue,
+      );
+      expect(
+        isNewerAlphaRelease(
+          currentVersion: 'Alpha-25',
+          latestTag: '1.0.0-alpha.25.1+26',
+        ),
+        isTrue,
+      );
+      expect(
+        isNewerAlphaRelease(
+          currentVersion: '1.0.0-alpha.25.1+26',
+          latestTag: 'Alpha-25',
+        ),
+        isFalse,
+      );
+      expect(
+        isNewerAlphaRelease(
+          currentVersion: 'Alpha-25.1',
+          latestTag: 'Alpha-25.1',
+        ),
+        isFalse,
+      );
+      expect(
+        isNewerAlphaRelease(
+          currentVersion: 'Alpha-25.1',
+          latestTag: 'Alpha-26',
+        ),
+        isTrue,
+      );
+    });
   });
 
   group('sha256ForAsset', () {

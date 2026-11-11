@@ -104,10 +104,10 @@ bool isNewerAlphaRelease({
   required String currentVersion,
   required String latestTag,
 }) {
-  final current = parseAlphaNumber(currentVersion);
-  final latest = parseAlphaNumber(latestTag);
+  final current = parseAlphaVersion(currentVersion);
+  final latest = parseAlphaVersion(latestTag);
   if (current == null || latest == null) return false;
-  return latest > current;
+  return latest.compareTo(current) > 0;
 }
 
 /// Fetches `/releases/latest` unauthenticated. Returns null on any failure.

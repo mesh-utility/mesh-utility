@@ -46,6 +46,7 @@ void main() {
 
   test('tagFromReleaseMarkdown reads the first Alpha-N token', () {
     expect(tagFromReleaseMarkdown('# Mesh Utility alpha-22'), 'Alpha-22');
+    expect(tagFromReleaseMarkdown('# Mesh Utility Alpha-25.1'), 'Alpha-25.1');
     expect(tagFromReleaseMarkdown('no tag here'), isNull);
   });
 

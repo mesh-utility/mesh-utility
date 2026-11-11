@@ -13,10 +13,10 @@ void main() {
     ).firstMatch(pubspec);
     expect(match, isNotNull);
     expect(kGeneratedAppVersion, match!.group(1));
-    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-25');
+    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-25.1');
     expect(
       meshUtilityFooterLabel(kGeneratedAppVersion),
-      'Mesh Utility Alpha-25',
+      'Mesh Utility Alpha-25.1',
     );
   });
 
@@ -65,6 +65,33 @@ void main() {
     expect(
       isNewerAlphaRelease(currentVersion: 'Alpha-18', latestTag: 'Alpha-18'),
       isFalse,
+    );
+  });
+
+  test('hotfix versions parse and label as Alpha-N.M', () {
+    expect(parseAlphaVersion('Alpha-25.1')!.number, 25);
+    expect(parseAlphaVersion('Alpha-25.1')!.hotfix, 1);
+    expect(parseAlphaVersion('1.0.0-alpha.25.1+26')!.hotfix, 1);
+    expect(parseAlphaVersion('1.0.0-alpha.25+25')!.hotfix, 0);
+    expect(parseAlphaNumber('Alpha-25.1'), 25);
+    expect(alphaReleaseLabel('1.0.0-alpha.25.1+26'), 'Alpha-25.1');
+    expect(
+      meshUtilityFooterLabel('1.0.0-alpha.25.1+26'),
+      'Mesh Utility Alpha-25.1',
+    );
+    expect(
+      versionLabelFromPackageInfo(
+        version: '1.0.0-alpha.25.1',
+        buildNumber: '26',
+      ),
+      '1.0.0-alpha.25.1+26',
+    );
+    expect(
+      isNewerAlphaRelease(
+        currentVersion: '1.0.0-alpha.25+25',
+        latestTag: 'Alpha-25.1',
+      ),
+      isTrue,
     );
   });
 

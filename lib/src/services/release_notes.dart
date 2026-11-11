@@ -158,7 +158,7 @@ ParsedReleaseNotes parseReleaseNotes(String body) {
 /// First `Alpha-N` token in bundled markdown, used when GitHub is unreachable.
 String? tagFromReleaseMarkdown(String? body) {
   if (body == null || body.isEmpty) return null;
-  final match = RegExp(r'Alpha-\d+', caseSensitive: false).firstMatch(body);
+  final match = RegExp(r'Alpha-\d+(?:\.\d+)?', caseSensitive: false).firstMatch(body);
   if (match == null) return null;
   final raw = match.group(0)!;
   return 'Alpha-${raw.substring(raw.indexOf('-') + 1)}';

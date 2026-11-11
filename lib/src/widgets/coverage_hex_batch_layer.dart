@@ -42,6 +42,32 @@ class CoverageHexBatchLayer extends StatelessWidget {
   }
 }
 
+/// Unrotated layer-space offset of [point], matching flutter_map's
+/// [PolygonLayer] and tiles: `projectAtZoom(point) - pixelOrigin`
+/// (same as [MapCamera.getOffsetFromOrigin]).
+///
+/// [MapCamera.latLngToScreenOffset] already applies rotation and uses
+/// [MapCamera.nonRotatedSize] for its origin. Painting that result inside
+/// [MobileLayerTransformer] (which rotates again) makes hexes drift off the
+/// basemap during pinch-zoom/rotate. This helper stays in layer space so the
+/// transformer applies rotation once. Tiles use the unrounded
+/// [MapCamera.pixelOrigin] getter, not the rounded [MapCamera.getNewPixelOrigin].
+Offset coverageHexLayerOffset(MapCamera camera, LatLng point) {
+  return camera.getOffsetFromOrigin(point);
+}
+
+/// Maps a screen-space offset such as [TapPosition.relative] into the same
+/// unrotated layer space [coverageHexLayerOffset] uses, by inverting
+/// [MobileLayerTransformer]'s rotation about [MapCamera.size]'s center.
+Offset coverageHexScreenToLayer(MapCamera camera, Offset screen) {
+  if (camera.rotation == 0.0) return screen;
+  return camera.rotatePoint(
+    camera.size.center(Offset.zero),
+    screen,
+    counterRotation: true,
+  );
+}
+
 /// Reverse-order point-in-polygon so the last-drawn (top) hex wins.
 ///
 /// A miss is always null. Callers must not treat a miss as the previously
@@ -59,11 +85,12 @@ String? hitTestCoverageBatchHexes(LatLng point, List<CoverageBatchHex> hexes) {
 
 /// Hit-test in the same pixel space [CoverageHexBatchLayer] paints.
 ///
-/// [project] must be the camera projection used to draw the rings
-/// (`MapCamera.latLngToScreenOffset`). Map taps are reported through a
-/// different conversion than that painter, and an overlay rebuild can move
-/// the camera before a delayed tap is delivered. A finger on empty pixels
-/// misses even if that converted lat/lng falls inside a ring.
+/// [project] must be the same layer-space projection used to draw the rings
+/// ([coverageHexLayerOffset]). Convert screen taps with
+/// [coverageHexScreenToLayer] first. Map taps are reported in screen space,
+/// and an overlay rebuild can move the camera before a delayed tap is
+/// delivered. A finger on empty pixels misses even if that converted lat/lng
+/// falls inside a ring.
 String? hitTestCoverageBatchHexesOnScreen(
   Offset screenPoint,
   List<CoverageBatchHex> hexes,
@@ -162,10 +189,10 @@ class _CoverageHexBatchPainter extends CustomPainter {
     for (final hex in hexes) {
       if (hex.points.length < 3) continue;
       final path = Path();
-      final first = camera.latLngToScreenOffset(hex.points.first);
+      final first = coverageHexLayerOffset(camera, hex.points.first);
       path.moveTo(first.dx, first.dy);
       for (var i = 1; i < hex.points.length; i++) {
-        final o = camera.latLngToScreenOffset(hex.points[i]);
+        final o = coverageHexLayerOffset(camera, hex.points[i]);
         path.lineTo(o.dx, o.dy);
       }
       path.close();
@@ -207,10 +234,10 @@ class _CoverageHexBatchPainter extends CustomPainter {
     // Dashed borders (dead zones) — still one path per hex, not merged cells.
     for (final hex in dashed) {
       final path = Path();
-      final first = camera.latLngToScreenOffset(hex.points.first);
+      final first = coverageHexLayerOffset(camera, hex.points.first);
       path.moveTo(first.dx, first.dy);
       for (var i = 1; i < hex.points.length; i++) {
-        final o = camera.latLngToScreenOffset(hex.points[i]);
+        final o = coverageHexLayerOffset(camera, hex.points[i]);
         path.lineTo(o.dx, o.dy);
       }
       path.close();
