@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_utility/src/pages/contacts_page.dart';
 import 'package:mesh_utility/transport/ble_frame_assembler.dart';

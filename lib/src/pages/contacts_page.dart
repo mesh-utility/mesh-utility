@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:mesh_utility/src/models/local_contact.dart';
 import 'package:mesh_utility/src/platform/local_contacts_supported.dart';
 import 'package:mesh_utility/transport/contact_sync.dart';

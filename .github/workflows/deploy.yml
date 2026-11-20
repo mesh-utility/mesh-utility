@@ -37,12 +37,21 @@ jobs:
           cache: npm
           cache-dependency-path: worker/package-lock.json
 
+      - name: Read Flutter version
+        id: flutter-version
+        run: |
+          if [ -f .flutter-version ]; then
+            echo "version=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=3.47.9" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          # Pinned: Flutter 3.50 needs Gradle 9.3.1 and flags material.dart; bump with that migration.
-          flutter-version: 3.47.9
+          # .flutter-version if present, else 3.47.9 for older tags.
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
           cache: true
 
       - name: Install worker dependencies

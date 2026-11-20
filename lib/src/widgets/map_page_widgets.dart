@@ -1,7 +1,7 @@
 import 'dart:math';
 import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// Fill opacity of heard coverage hexes on the map (border is solid).
 const double legendSignalFillOpacity = 0.45;

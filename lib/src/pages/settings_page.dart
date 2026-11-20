@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:mesh_utility/src/pages/scan_cache_area_section.dart';
 import 'package:mesh_utility/src/services/scan_cache_area.dart';
