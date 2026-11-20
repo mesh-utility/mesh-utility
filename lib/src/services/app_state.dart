@@ -890,8 +890,20 @@ class AppState extends ChangeNotifier {
   /// IDs from hexKey (lat:lng) and hex:row:col are the same cell after snap.
   List<CoverageZone> get mapCoverageZones {
     if (tileCoverageZones.isEmpty) return coverageZones;
-    return dedupeCoverageZonesByCell(tileCoverageZones, coverageZones);
+    final tiles = tileCoverageZones, local = coverageZones;
+    final memo = _mapZonesMemo;
+    if (memo != null &&
+        identical(memo.$1, tiles) &&
+        identical(memo.$2, local)) {
+      return memo.$3;
+    }
+    final merged = dedupeCoverageZonesByCell(tiles, local);
+    _mapZonesMemo = (tiles, local, merged);
+    return merged;
   }
+
+  (List<CoverageZone>, List<CoverageZone>, List<CoverageZone>)? _mapZonesMemo;
+  List<HexDetail>? _tileZonesSource;
 
   /// Indexed hex cells for the current map / cache area (not a bulk pack).
   List<CoverageZone> tileCoverageZones = const [];
@@ -1813,13 +1825,25 @@ class AppState extends ChangeNotifier {
             : _lastViewport,
       );
       if (details == null) return;
-      tileCoverageZones = coverageZonesFromHexDetails(details);
-      notifyListeners();
+      applyHexIndexToTiles(details);
     } catch (error) {
       _debugLog.warn('hex_detail', 'Hex index refresh failed: $error');
     } finally {
       _hexFetchRunning = false;
     }
+  }
+
+  /// Rebuilds [tileCoverageZones] from [details] and notifies listeners.
+  /// The cached index comes back as the same list for every new viewport;
+  /// rebuilding ~14k zones and repainting for it froze the web map, so an
+  /// identical list is skipped. Returns whether the zones were rebuilt.
+  @visibleForTesting
+  bool applyHexIndexToTiles(List<HexDetail> details) {
+    if (identical(details, _tileZonesSource)) return false;
+    _tileZonesSource = details;
+    tileCoverageZones = coverageZonesFromHexDetails(details);
+    notifyListeners();
+    return true;
   }
 
   /// Explicit bulk pack download for the selected cache area (not used by Sync).

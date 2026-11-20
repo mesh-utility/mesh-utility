@@ -13,10 +13,10 @@ void main() {
     ).firstMatch(pubspec);
     expect(match, isNotNull);
     expect(kGeneratedAppVersion, match!.group(1));
-    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-26');
+    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-26.1');
     expect(
       meshUtilityFooterLabel(kGeneratedAppVersion),
-      'Mesh Utility Alpha-26',
+      'Mesh Utility Alpha-26.1',
     );
   });
 
@@ -123,6 +123,28 @@ void main() {
       isNewerAlphaRelease(
         currentVersion: '1.0.0-alpha.26+28',
         latestTag: 'Alpha-25.2',
+      ),
+      isFalse,
+    );
+    expect(alphaReleaseLabel('1.0.0-alpha.26.1+29'), 'Alpha-26.1');
+    expect(
+      isNewerAlphaRelease(
+        currentVersion: '1.0.0-alpha.26+28',
+        latestTag: 'Alpha-26.1',
+      ),
+      isTrue,
+    );
+    expect(
+      isNewerAlphaRelease(
+        currentVersion: '1.0.0-alpha.26.1+29',
+        latestTag: 'Alpha-26',
+      ),
+      isFalse,
+    );
+    expect(
+      isNewerAlphaRelease(
+        currentVersion: '1.0.0-alpha.26.1+29',
+        latestTag: 'Alpha-26.1',
       ),
       isFalse,
     );

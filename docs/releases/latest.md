@@ -1,7 +1,8 @@
-# Mesh Utility Alpha-26
+# Mesh Utility Alpha-26.1
 
 ## Fixes
 
+- The web map no longer freezes when you pan or zoom with lots of coverage on screen.
 - The map pans and zooms more smoothly, even with thousands of hexes on screen.
 - Map tiles load reliably at every zoom level. Zooming in past the most detailed tiles now enlarges them instead of showing a blank map.
 - Tapping a node in the Nodes list no longer zooms past the map tiles and leaves a blank map.

@@ -170,6 +170,10 @@ bbb mesh-utility-Alpha-17-linux-x64.tar.gz
         androidApkAssetName('Alpha-26'),
         'mesh-utility-Alpha-26-android.apk',
       );
+      expect(
+        androidApkAssetName('Alpha-26.1'),
+        'mesh-utility-Alpha-26.1-android.apk',
+      );
     });
 
     test('published asset name wins, tag name is the fallback', () {
