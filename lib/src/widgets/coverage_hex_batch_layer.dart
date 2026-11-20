@@ -9,18 +9,39 @@ import 'package:latlong2/latlong.dart' hide Path;
 /// Hexes are never merged, dropped, resized, or moved — each keeps its
 /// own ring on the fixed grid.
 class CoverageBatchHex {
-  const CoverageBatchHex({
+  CoverageBatchHex({
     required this.points,
     required this.hitId,
     required this.fill,
     required this.border,
-  });
+    LatLng? center,
+  }) : center = center ?? _centroidOf(points);
 
   final List<LatLng> points;
+
+  /// Geographic center used for nearby-tap hit testing.
+  final LatLng center;
   final String hitId;
   final Color fill;
   final Color border;
 }
+
+LatLng _centroidOf(List<LatLng> points) {
+  if (points.isEmpty) return const LatLng(0, 0);
+  var lat = 0.0;
+  var lng = 0.0;
+  for (final point in points) {
+    lat += point.latitude;
+    lng += point.longitude;
+  }
+  return LatLng(lat / points.length, lng / points.length);
+}
+
+/// Finger or unknown-pointer slop around a hex center, in logical pixels.
+const double kHexTapRadiusTouch = 24.0;
+
+/// Mouse, stylus, or trackpad slop around a hex center, in logical pixels.
+const double kHexTapRadiusMouse = 10.0;
 
 /// Batched coverage paint for flutter_map. One [CustomPainter] draws every
 /// hex fill/border; hit-testing is done by the map page via
@@ -172,6 +193,60 @@ String? hitTestCoverageBatchHexesOnScreen(
     if (pointInOffsetRing(screenPoint, ring)) return hex.hitId;
   }
   return null;
+}
+
+/// Hit-test with a pixel slop around each hex center.
+///
+/// An exact ring hit still wins (top-most). If the tap is outside every
+/// ring, the nearest center within [radius] wins. Centers are projected
+/// once; the exact ring test runs only on hexes whose center is within
+/// [radius] plus a generous ring-size bound of the tap.
+String? hitTestCoverageBatchHexesNearest(
+  Offset layerPoint,
+  List<CoverageBatchHex> hexes,
+  Offset Function(LatLng point) project, {
+  required double radius,
+}) {
+  if (!layerPoint.dx.isFinite || !layerPoint.dy.isFinite) return null;
+
+  var ringBound = 0.0;
+  for (final hex in hexes) {
+    if (hex.points.isEmpty) continue;
+    final origin = hex.center;
+    if (!origin.latitude.isFinite || !origin.longitude.isFinite) continue;
+    final center = project(origin);
+    if (!center.dx.isFinite || !center.dy.isFinite) continue;
+    final vertex = project(hex.points.first);
+    if (!vertex.dx.isFinite || !vertex.dy.isFinite) continue;
+    ringBound = (center - vertex).distance * 2;
+    break;
+  }
+
+  final limit = radius + ringBound;
+  final nearby = <CoverageBatchHex>[];
+  final nearbyCenters = <Offset>[];
+  for (final hex in hexes) {
+    final origin = hex.center;
+    if (!origin.latitude.isFinite || !origin.longitude.isFinite) continue;
+    final center = project(origin);
+    if (!center.dx.isFinite || !center.dy.isFinite) continue;
+    if ((center - layerPoint).distance > limit) continue;
+    nearby.add(hex);
+    nearbyCenters.add(center);
+  }
+
+  final exact = hitTestCoverageBatchHexesOnScreen(layerPoint, nearby, project);
+  if (exact != null) return exact;
+
+  String? nearestId;
+  var nearestDist = radius;
+  for (var i = 0; i < nearby.length; i++) {
+    final d = (nearbyCenters[i] - layerPoint).distance;
+    if (d > nearestDist) continue;
+    nearestId = nearby[i].hitId;
+    nearestDist = d;
+  }
+  return nearestId;
 }
 
 /// Ray-cast point-in-polygon for a simple ring (no holes).

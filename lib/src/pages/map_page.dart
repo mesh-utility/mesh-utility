@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PointerDeviceKind;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:intl/intl.dart';
@@ -174,6 +175,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   /// Map taps that arrive while this is in the future must not select a hex.
   DateTime? _blockHexSelectUntil;
+
+  /// Last pointer kind seen on the map, used to pick hex tap slop.
+  PointerDeviceKind _hexTapKind = PointerDeviceKind.touch;
   bool _modalDismissQueued = false;
   String? _lastNodeFilterDebugSignature;
   String? _lastPopupDebugSignature;
@@ -390,13 +394,12 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     });
   }
 
-  /// Prefer the painted hex under the finger.
+  /// Prefer the painted hex under the finger, then the nearest center
+  /// within the pointer's tap radius.
   ///
   /// Taps are in screen space; the rings are painted in unrotated layer
-  /// space ([coverageHexLayerOffset]). After converting the tap into that
-  /// space, a geographic hit counts only when the painted ring is actually
-  /// next to the finger. An overlay rebuild can otherwise land a lat/lng
-  /// conversion inside a hex the finger is not on.
+  /// space ([coverageHexLayerOffset]). Convert the tap into that space
+  /// before hit-testing so rotation matches the painted hexes.
   String? _hitCoverage(
     TapPosition tapPosition,
     LatLng latLng,
@@ -408,55 +411,25 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         final camera = _mapController.camera;
         Offset project(LatLng point) => coverageHexLayerOffset(camera, point);
         final layerPoint = coverageHexScreenToLayer(camera, relative);
-        final visual = hitTestCoverageBatchHexesOnScreen(
+        final radius = switch (_hexTapKind) {
+          PointerDeviceKind.touch ||
+          PointerDeviceKind.unknown => kHexTapRadiusTouch,
+          PointerDeviceKind.mouse ||
+          PointerDeviceKind.stylus ||
+          PointerDeviceKind.invertedStylus ||
+          PointerDeviceKind.trackpad => kHexTapRadiusMouse,
+        };
+        return hitTestCoverageBatchHexesNearest(
           layerPoint,
           hexes,
           project,
+          radius: radius,
         );
-        if (visual != null) return visual;
-        final geographic = hitTestCoverageBatchHexes(latLng, hexes);
-        if (geographic == null) return null;
-        if (_screenPointNearHex(layerPoint, geographic, hexes, project)) {
-          return geographic;
-        }
-        return null;
       } catch (_) {
         // Camera is not ready yet. Fall through to the geographic test.
       }
     }
     return hitTestCoverageBatchHexes(latLng, hexes);
-  }
-
-  bool _screenPointNearHex(
-    Offset screen,
-    String hitId,
-    List<CoverageBatchHex> hexes,
-    Offset Function(LatLng point) project,
-  ) {
-    const slop = 8.0;
-    for (final hex in hexes) {
-      if (hex.hitId != hitId) continue;
-      var minX = double.infinity;
-      var minY = double.infinity;
-      var maxX = double.negativeInfinity;
-      var maxY = double.negativeInfinity;
-      for (final point in hex.points) {
-        final projected = project(point);
-        if (!projected.dx.isFinite || !projected.dy.isFinite) return true;
-        if (projected.dx < minX) minX = projected.dx;
-        if (projected.dy < minY) minY = projected.dy;
-        if (projected.dx > maxX) maxX = projected.dx;
-        if (projected.dy > maxY) maxY = projected.dy;
-      }
-      if (minX == double.infinity) return true;
-      if (screen.dx >= minX - slop &&
-          screen.dx <= maxX + slop &&
-          screen.dy >= minY - slop &&
-          screen.dy <= maxY + slop) {
-        return true;
-      }
-    }
-    return false;
   }
 
   void _noteDataset(List<CoverageZone> zones, int identity) {
@@ -1273,98 +1246,108 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         return Stack(
           children: [
             Positioned.fill(
-              child: FlutterMap(
-                mapController: _mapController,
-                options: MapOptions(
-                  initialCenter: center,
-                  initialZoom: camera.zoom,
-                  maxZoom: mapMaxZoom,
-                  // Behind tiles that are still loading. The dark basemap
-                  // keeps a dark backdrop instead of flashing light gray.
-                  backgroundColor: _baseLayer == BaseLayer.dark
-                      ? darkBasemapBackground
-                      : const Color(0xFFE0E0E0),
-                  interactionOptions: const InteractionOptions(
-                    flags: InteractiveFlag.all,
-                  ),
-                  onPositionChanged: (_, hasGesture) {
-                    if (hasGesture) {
-                      _disableAutoCenter('map gesture');
-                    }
-                  },
-                  onMapReady: _handleMapReady,
-                  onMapEvent: (event) {
-                    if (event is MapEventNonRotatedSizeChange) {
-                      _scheduleViewportRender(immediate: true);
-                    } else if (event is MapEventWithMove) {
-                      _scheduleViewportRender();
-                    }
-                  },
-                  onTap: (tapPosition, latLng) {
-                    _disableAutoCenter('map tap');
-                    final hitId = _hitCoverage(
-                      tapPosition,
-                      latLng,
-                      _batchHexes,
-                    );
-                    if (hitId == null) {
-                      _debugLog.debug(
-                        'ui_click',
-                        'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
+              child: Listener(
+                behavior: HitTestBehavior.translucent,
+                onPointerDown: (event) {
+                  _hexTapKind = event.kind;
+                },
+                child: FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter: center,
+                    initialZoom: camera.zoom,
+                    maxZoom: mapMaxZoom,
+                    // Behind tiles that are still loading. The dark basemap
+                    // keeps a dark backdrop instead of flashing light gray.
+                    backgroundColor: _baseLayer == BaseLayer.dark
+                        ? darkBasemapBackground
+                        : const Color(0xFFE0E0E0),
+                    interactionOptions: const InteractionOptions(
+                      flags: InteractiveFlag.all,
+                    ),
+                    onPositionChanged: (_, hasGesture) {
+                      if (hasGesture) {
+                        _disableAutoCenter('map gesture');
+                      }
+                    },
+                    onMapReady: _handleMapReady,
+                    onMapEvent: (event) {
+                      if (event is MapEventNonRotatedSizeChange) {
+                        _scheduleViewportRender(immediate: true);
+                      } else if (event is MapEventWithMove) {
+                        _scheduleViewportRender();
+                      }
+                    },
+                    onTap: (tapPosition, latLng) {
+                      _disableAutoCenter('map tap');
+                      final hitId = _hitCoverage(
+                        tapPosition,
+                        latLng,
+                        _batchHexes,
                       );
-                      _dismissHexPopup('empty map tap');
-                      return;
-                    }
-                    // A layer/upload tap can still be delivered here after the
-                    // overlay rebuilds. That must not select a hex.
-                    if (_blockHexSelect) return;
-                    _handleBatchHit(hitId);
-                  },
-                ),
-                children: [
-                  _baseTileLayer(),
-                  if (widget.observerLat != null && widget.observerLng != null)
-                    MarkerLayer(
-                      markers: [
-                        Marker(
-                          point: LatLng(
-                            widget.observerLat!,
-                            widget.observerLng!,
-                          ),
-                          width: 28,
-                          height: 28,
-                          child: const IgnorePointer(
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: Color(0x663B82F6),
-                              ),
-                              child: Center(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: Color(0xFF3B82F6),
-                                    border: Border.fromBorderSide(
-                                      BorderSide(color: Colors.white, width: 2),
+                      if (hitId == null) {
+                        _debugLog.debug(
+                          'ui_click',
+                          'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
+                        );
+                        _dismissHexPopup('empty map tap');
+                        return;
+                      }
+                      // A layer/upload tap can still be delivered here after the
+                      // overlay rebuilds. That must not select a hex.
+                      if (_blockHexSelect) return;
+                      _handleBatchHit(hitId);
+                    },
+                  ),
+                  children: [
+                    _baseTileLayer(),
+                    if (widget.observerLat != null &&
+                        widget.observerLng != null)
+                      MarkerLayer(
+                        markers: [
+                          Marker(
+                            point: LatLng(
+                              widget.observerLat!,
+                              widget.observerLng!,
+                            ),
+                            width: 28,
+                            height: 28,
+                            child: const IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Color(0x663B82F6),
+                                ),
+                                child: Center(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: Color(0xFF3B82F6),
+                                      border: Border.fromBorderSide(
+                                        BorderSide(
+                                          color: Colors.white,
+                                          width: 2,
+                                        ),
+                                      ),
                                     ),
+                                    child: SizedBox(width: 12, height: 12),
                                   ),
-                                  child: SizedBox(width: 12, height: 12),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
+                    // [_batchHexes] is only ever replaced, never mutated, so
+                    // the layer can reuse its projected geometry by identity.
+                    ValueListenableBuilder<List<CoverageBatchHex>>(
+                      valueListenable: _batchHexesView,
+                      builder: (context, hexes, _) => hexes.isEmpty
+                          ? const SizedBox.shrink()
+                          : CoverageHexBatchLayer(hexes: hexes),
                     ),
-                  // [_batchHexes] is only ever replaced, never mutated, so
-                  // the layer can reuse its projected geometry by identity.
-                  ValueListenableBuilder<List<CoverageBatchHex>>(
-                    valueListenable: _batchHexesView,
-                    builder: (context, hexes, _) => hexes.isEmpty
-                        ? const SizedBox.shrink()
-                        : CoverageHexBatchLayer(hexes: hexes),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
             // Above the map, under the controls. An empty-map tap dismisses
@@ -2970,6 +2953,13 @@ List<CoverageBatchHex> _batchHexesForDraw(
 }
 
 CoverageBatchHex _batchHexForDraw(MapDrawPolygon draw) {
+  var lat = 0.0;
+  var lng = 0.0;
+  for (final point in draw.points) {
+    lat += point.latitude;
+    lng += point.longitude;
+  }
+  final center = LatLng(lat / draw.points.length, lng / draw.points.length);
   if (draw.isDeadZone) {
     // Dead Zone only when nothing was heard: solid gray 1 px border (same
     // width as every other hex) over a very faint gray fill.
@@ -2978,6 +2968,7 @@ CoverageBatchHex _batchHexForDraw(MapDrawPolygon draw) {
       hitId: draw.hitZoneId,
       fill: deadZoneMapColor.withValues(alpha: legendDeadZoneFillOpacity),
       border: deadZoneMapColor,
+      center: center,
     );
   }
   // Weak-but-heard cells use Poor/Noisy/etc. via RSSI/SNR classification.
@@ -2991,6 +2982,7 @@ CoverageBatchHex _batchHexForDraw(MapDrawPolygon draw) {
     hitId: draw.hitZoneId,
     fill: color.withValues(alpha: legendSignalFillOpacity),
     border: color,
+    center: center,
   );
 }
 
