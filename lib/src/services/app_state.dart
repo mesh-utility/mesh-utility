@@ -14,6 +14,7 @@ import 'package:mesh_utility/src/services/scan_foreground_mode.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/scan_data_utils.dart';
 import 'package:mesh_utility/src/services/location_service.dart';
+import 'package:mesh_utility/src/services/cooperative.dart';
 import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/sync_service.dart';
@@ -907,6 +908,17 @@ class AppState extends ChangeNotifier {
 
   /// Indexed hex cells for the current map / cache area (not a bulk pack).
   List<CoverageZone> tileCoverageZones = const [];
+
+  /// True while a map hex-index fetch or the tile-zone build is running.
+  final ValueNotifier<bool> mapLoading = ValueNotifier(false);
+
+  int _tileZonesGeneration = 0;
+  bool _tileZonesBuilding = false;
+  Future<void> _tileZonesSettled = Future<void>.value();
+
+  /// Completes when the latest [applyHexIndexToTiles] build finishes.
+  Future<void> get tileZonesSettled => _tileZonesSettled;
+
   bool _hexFetchRunning = false;
   List<HexDetail> _hexIndex = const <HexDetail>[];
   String? _hexIndexKey;
@@ -1812,6 +1824,7 @@ class AppState extends ChangeNotifier {
       if (!force) return;
     }
     _hexFetchRunning = true;
+    mapLoading.value = true;
     try {
       if (force) {
         _hexIndex = const <HexDetail>[];
@@ -1830,20 +1843,53 @@ class AppState extends ChangeNotifier {
       _debugLog.warn('hex_detail', 'Hex index refresh failed: $error');
     } finally {
       _hexFetchRunning = false;
+      if (!_tileZonesBuilding) mapLoading.value = false;
     }
   }
 
   /// Rebuilds [tileCoverageZones] from [details] and notifies listeners.
   /// The cached index comes back as the same list for every new viewport;
   /// rebuilding ~14k zones and repainting for it froze the web map, so an
-  /// identical list is skipped. Returns whether the zones were rebuilt.
+  /// identical list is skipped. Returns whether a rebuild was started.
+  ///
+  /// The build is time-sliced. A newer call cancels the older one, and
+  /// listeners are notified once, when the winning build finishes.
+  /// [tileZonesSettled] completes at that point. [budget] is for tests.
   @visibleForTesting
-  bool applyHexIndexToTiles(List<HexDetail> details) {
+  bool applyHexIndexToTiles(List<HexDetail> details, {FrameBudget? budget}) {
     if (identical(details, _tileZonesSource)) return false;
     _tileZonesSource = details;
-    tileCoverageZones = coverageZonesFromHexDetails(details);
-    notifyListeners();
+    final generation = ++_tileZonesGeneration;
+    _tileZonesBuilding = true;
+    mapLoading.value = true;
+    _tileZonesSettled = _buildTileZones(details, generation, budget);
     return true;
+  }
+
+  Future<void> _buildTileZones(
+    List<HexDetail> details,
+    int generation,
+    FrameBudget? budget,
+  ) async {
+    try {
+      final zones = await coverageZonesFromHexDetailsAsync(
+        details,
+        cancelled: () => generation != _tileZonesGeneration,
+        budget: budget,
+      );
+      if (zones == null || generation != _tileZonesGeneration) return;
+      tileCoverageZones = zones;
+      notifyListeners();
+    } catch (error) {
+      if (generation == _tileZonesGeneration) {
+        _debugLog.warn('hex_detail', 'Tile zone build failed: $error');
+      }
+    } finally {
+      if (generation == _tileZonesGeneration) {
+        _tileZonesBuilding = false;
+        if (!_hexFetchRunning) mapLoading.value = false;
+      }
+    }
   }
 
   /// Explicit bulk pack download for the selected cache area (not used by Sync).
@@ -3452,9 +3498,7 @@ class AppState extends ChangeNotifier {
 
   Future<Uint8List> _awaitSelfInfoFrame() async {
     final frameFuture = _transport.inbound
-        .firstWhere(
-          (frame) => frame.isNotEmpty && frame[0] == respCodeSelfInfo,
-        )
+        .firstWhere((frame) => frame.isNotEmpty && frame[0] == respCodeSelfInfo)
         .timeout(const Duration(seconds: 3));
     await _bleProtocol.run(_protocol.appStart());
     return frameFuture;
@@ -4003,7 +4047,8 @@ class AppState extends ChangeNotifier {
     for (final raw in keys) {
       final key = normalizeHexId(raw);
       if (key.isEmpty) continue;
-      final same = (pub.isNotEmpty && idsLikelySameDevice(key, pub)) ||
+      final same =
+          (pub.isNotEmpty && idsLikelySameDevice(key, pub)) ||
           (mesh.isNotEmpty && idsLikelySameDevice(key, mesh));
       if (!same) continue;
       contacts.remove(raw);
@@ -4817,6 +4862,7 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _tileZonesGeneration++;
     _debugLog.info('app_state', 'Disposing app state');
     _scanLoopWanted = false;
     _cancelScanLoopReconnect('dispose');
@@ -4839,6 +4885,7 @@ class AppState extends ChangeNotifier {
     } else {
       unawaited(_transport.dispose());
     }
+    mapLoading.dispose();
     super.dispose();
   }
 

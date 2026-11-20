@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
+
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:intl/intl.dart';
@@ -18,6 +20,7 @@ import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 import 'package:mesh_utility/src/widgets/coverage_hex_batch_layer.dart';
+import 'package:mesh_utility/src/widgets/map_loading_pill.dart';
 import 'package:mesh_utility/src/widgets/map_top_controls.dart';
 import 'dart:math';
 
@@ -88,9 +91,14 @@ class MapPage extends StatefulWidget {
     this.onTapScans,
     this.onClearFocusNodeId,
     this.onClearFocusHexId,
+    this.mapLoading,
   });
 
   final List<CoverageZone> zones;
+
+  /// Hex-index fetch or tile-zone build. Combined with the page's own
+  /// first-render flag for the loading pill.
+  final ValueListenable<bool>? mapLoading;
   final Future<void> Function({
     double? south,
     double? north,
@@ -200,6 +208,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   /// whole map page (stats, legend, popup) mid-gesture.
   final ValueNotifier<List<CoverageBatchHex>> _batchHexesView =
       ValueNotifier<List<CoverageBatchHex>>(const []);
+
+  /// True while the first aggregate and plan for a new dataset is running.
+  final ValueNotifier<bool> _mapRenderLoading = ValueNotifier(false);
+  bool _mapClosed = false;
 
   /// Batch hexes by zone id, reused across in-view refreshes so the layer
   /// keeps their projected outlines. Cleared with the dataset.
@@ -339,10 +351,12 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _mapClosed = true;
     WidgetsBinding.instance.removeObserver(this);
     _viewportRenderTimer?.cancel();
     _tileProvider.dispose();
     _batchHexesView.dispose();
+    _mapRenderLoading.dispose();
     super.dispose();
   }
 
@@ -527,6 +541,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     }
     final request = ++_renderRequest;
     final identity = _filterIdentity!;
+    if (!_renderReady) _mapRenderLoading.value = true;
     unawaited(_finishViewportRender(request: request, identity: identity));
   }
 
@@ -539,6 +554,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     final announce = zones >= 250;
     if (announce) meshStageStart('viewport_render', count: zones);
     var drawn = -1;
+    var applied = false;
     try {
       MapRenderViewport? pending = _readViewport();
       for (var pass = 0; pass < 4; pass++) {
@@ -561,11 +577,15 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         if (_sameViewport(latest, viewport)) {
           drawn = plan.polygons.length;
           _applyPlan(plan, viewport);
+          applied = true;
           return;
         }
         pending = latest;
       }
     } finally {
+      if (!applied && !_mapClosed && mounted && request == _renderRequest) {
+        _mapRenderLoading.value = false;
+      }
       final elapsed = watch.elapsedMilliseconds;
       if (announce || elapsed >= 50) {
         meshStageEnd('viewport_render', count: zones, ms: elapsed, n2: drawn);
@@ -574,6 +594,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   void _applyPlan(MapRenderPlan plan, MapRenderViewport viewport) {
+    if (!_mapClosed) _mapRenderLoading.value = false;
     final signature = mapDrawSignature(plan.polygons);
     final sameDraw = _renderReady && signature == _renderSignature;
     final sameView =
@@ -1646,6 +1667,17 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   widget.onRefresh();
                 },
                 onBeforeDialog: _dismissHexPopup,
+              ),
+            ),
+            Positioned(
+              top: overlayTop + 132,
+              left: 0,
+              right: 0,
+              child: MapLoadingPill(
+                busy: <ValueListenable<bool>>[
+                  if (widget.mapLoading != null) widget.mapLoading!,
+                  _mapRenderLoading,
+                ],
               ),
             ),
             Positioned(

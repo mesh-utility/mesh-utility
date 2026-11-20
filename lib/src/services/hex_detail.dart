@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
+import 'package:mesh_utility/src/services/cooperative.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
@@ -236,31 +237,59 @@ List<CoverageZone> coverageZonesFromHexDetails(Iterable<HexDetail> details) {
   final seen = <String>{};
   for (final detail in details) {
     if (!seen.add(detail.zoneId)) continue;
-    final center = hexDetailCenter(detail);
-    final points = hexVertices(center.lat, center.lng);
-    if (points.length < 3) continue;
-    final rssi = detail.bestRssi ?? detail.lastRssi;
-    final snr = detail.bestSnr ?? detail.lastSnr;
-    final last = detail.lastTs > 0
-        ? DateTime.fromMillisecondsSinceEpoch(detail.lastTs, isUtc: true)
-        : DateTime.now().toUtc();
-    out.add(
-      CoverageZone(
-        id: detail.zoneId,
-        centerLat: center.lat,
-        centerLng: center.lng,
-        radiusMeters: 100,
-        avgRssi: rssi,
-        avgSnr: snr,
-        scanCount: detail.scanCount,
-        lastScanned: last,
-        isDeadZone: deadZoneFromMetrics(avgRssi: rssi, avgSnr: snr),
-        polygon: points,
-        nodeIds: heardNodeIdsForHexDetail(detail),
-      ),
-    );
+    final zone = _zoneForHexDetail(detail);
+    if (zone != null) out.add(zone);
   }
   return out;
+}
+
+/// Same zones as [coverageZonesFromHexDetails], in slices that let the
+/// browser paint. Returns null when [cancelled] is true.
+Future<List<CoverageZone>?> coverageZonesFromHexDetailsAsync(
+  Iterable<HexDetail> details, {
+  bool Function()? cancelled,
+  FrameBudget? budget,
+}) async {
+  final out = <CoverageZone>[];
+  final seen = <String>{};
+  final frame = budget ?? FrameBudget();
+  for (final detail in details) {
+    if (cancelled?.call() == true) return null;
+    if (seen.add(detail.zoneId)) {
+      final zone = _zoneForHexDetail(detail);
+      if (zone != null) out.add(zone);
+    }
+    final pause = frame.maybeYield();
+    if (!identical(pause, FrameBudget.idle)) {
+      await pause;
+      if (cancelled?.call() == true) return null;
+    }
+  }
+  return out;
+}
+
+CoverageZone? _zoneForHexDetail(HexDetail detail) {
+  final center = hexDetailCenter(detail);
+  final points = hexVertices(center.lat, center.lng);
+  if (points.length < 3) return null;
+  final rssi = detail.bestRssi ?? detail.lastRssi;
+  final snr = detail.bestSnr ?? detail.lastSnr;
+  final last = detail.lastTs > 0
+      ? DateTime.fromMillisecondsSinceEpoch(detail.lastTs, isUtc: true)
+      : DateTime.now().toUtc();
+  return CoverageZone(
+    id: detail.zoneId,
+    centerLat: center.lat,
+    centerLng: center.lng,
+    radiusMeters: 100,
+    avgRssi: rssi,
+    avgSnr: snr,
+    scanCount: detail.scanCount,
+    lastScanned: last,
+    isDeadZone: deadZoneFromMetrics(avgRssi: rssi, avgSnr: snr),
+    polygon: points,
+    nodeIds: heardNodeIdsForHexDetail(detail),
+  );
 }
 
 /// Heard (non-observer) node keys in one indexed cell: the first 8 hex

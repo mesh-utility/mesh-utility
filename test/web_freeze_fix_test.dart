@@ -48,13 +48,14 @@ List<HexDetail> _details(double lat, double lng, {int cells = 3}) {
 
 void main() {
   group('hex index refresh for a new viewport', () {
-    test('same cached index list skips the rebuild and the notify', () {
+    test('same cached index list skips the rebuild and the notify', () async {
       final state = _state();
       var notifies = 0;
       state.addListener(() => notifies++);
       final index = _details(41.1, -77.4);
 
       expect(state.applyHexIndexToTiles(index), isTrue);
+      await state.tileZonesSettled;
       expect(notifies, 1);
       final zones = state.tileCoverageZones;
       expect(zones, hasLength(3));
@@ -66,22 +67,25 @@ void main() {
       expect(identical(state.tileCoverageZones, zones), isTrue);
     });
 
-    test('a newly fetched index list still rebuilds and notifies', () {
+    test('a newly fetched index list still rebuilds and notifies', () async {
       final state = _state();
       var notifies = 0;
       state.addListener(() => notifies++);
       final first = _details(41.1, -77.4);
-      state.applyHexIndexToTiles(first);
+      expect(state.applyHexIndexToTiles(first), isTrue);
+      await state.tileZonesSettled;
       final before = state.tileCoverageZones;
 
       // Same content but a new fetch (new list) must not be skipped.
       final refetched = List<HexDetail>.of(first);
       expect(state.applyHexIndexToTiles(refetched), isTrue);
+      await state.tileZonesSettled;
       expect(notifies, 2);
       expect(identical(state.tileCoverageZones, before), isFalse);
 
       final other = _details(40.0, -75.0, cells: 5);
       expect(state.applyHexIndexToTiles(other), isTrue);
+      await state.tileZonesSettled;
       expect(notifies, 3);
       expect(state.tileCoverageZones, hasLength(5));
     });

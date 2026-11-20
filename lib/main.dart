@@ -1541,6 +1541,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       case 0:
         return MapPage(
           zones: _appState.mapCoverageZones,
+          mapLoading: _appState.mapLoading,
           onViewportHexes: _appState.refreshVisibleHexDetail,
           onFetchHexDetail: _appState.fetchHexDetail,
           onRefresh: _appState.syncFromWorker,

@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:mesh_utility/src/models/coverage_zone.dart';
+import 'package:mesh_utility/src/services/cooperative.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/off_ui.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
@@ -162,16 +164,68 @@ List<CoverageZone> _zonesArg(Object? raw) {
 }
 
 /// Same grouping as [aggregateCoverageHexes], off the UI isolate.
+///
+/// Web has no isolate, so the loop is time-sliced instead of one long task.
+/// Native still uses [runOffUi].
 Future<List<HexCoverageCluster>> aggregateCoverageHexesOffUi(
   List<CoverageZone> zones, {
   required int scale,
 }) {
+  if (kIsWeb) return aggregateCoverageHexesSliced(zones, scale: scale);
   return runOffUi(
     aggregateCoverageHexesWorker,
     <String, Object?>{'zones': zones, 'scale': scale},
     force: true,
     weight: zones.length,
   );
+}
+
+/// Same clusters and order as [aggregateCoverageHexes], yielding when
+/// [budget] elapses so the web main thread can paint.
+Future<List<HexCoverageCluster>> aggregateCoverageHexesSliced(
+  List<CoverageZone> zones, {
+  required int scale,
+  FrameBudget? budget,
+}) async {
+  final frame = budget ?? FrameBudget();
+  final safeScale = scale < 1 ? 1 : scale;
+  if (safeScale == 1) {
+    final exact = <HexCoverageCluster>[];
+    for (final zone in zones) {
+      if (!zone.centerLat.isFinite || !zone.centerLng.isFinite) continue;
+      exact.add(_clusterFromZones(safeScale, <CoverageZone>[zone]));
+      final pause = frame.maybeYield();
+      if (!identical(pause, FrameBudget.idle)) await pause;
+    }
+    return exact;
+  }
+
+  final groups = <String, List<CoverageZone>>{};
+  final rows = <String, int>{};
+  final cols = <String, int>{};
+  for (final zone in zones) {
+    if (!zone.centerLat.isFinite || !zone.centerLng.isFinite) continue;
+    final cell = hexCellAt(zone.centerLat, zone.centerLng, scale: safeScale);
+    final key = '${cell.row}:${cell.col}';
+    groups.putIfAbsent(key, () => <CoverageZone>[]).add(zone);
+    rows[key] = cell.row;
+    cols[key] = cell.col;
+    final pause = frame.maybeYield();
+    if (!identical(pause, FrameBudget.idle)) await pause;
+  }
+  final keys = groups.keys.toList()
+    ..sort((a, b) {
+      final byRow = rows[a]!.compareTo(rows[b]!);
+      if (byRow != 0) return byRow;
+      return cols[a]!.compareTo(cols[b]!);
+    });
+  final out = <HexCoverageCluster>[];
+  for (final key in keys) {
+    out.add(_clusterFromZones(safeScale, groups[key]!));
+    final pause = frame.maybeYield();
+    if (!identical(pause, FrameBudget.idle)) await pause;
+  }
+  return out;
 }
 
 HexCoverageCluster _clusterFromZones(int scale, List<CoverageZone> zones) {
