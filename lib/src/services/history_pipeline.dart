@@ -299,6 +299,7 @@ CoverageZone _sanitizeZoneRadio(CoverageZone zone, String? connected) {
     isDeadZone: zone.isDeadZone,
     polygon: zone.polygon,
     radioId: null,
+    nodeIds: zone.nodeIds,
   );
 }
 

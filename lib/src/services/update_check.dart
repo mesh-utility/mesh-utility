@@ -20,6 +20,8 @@ class AppReleaseInfo {
     this.androidApkUrl,
     this.sha256SumsUrl,
     this.linuxArchiveUrl,
+    this.androidApkName,
+    this.linuxArchiveName,
   });
 
   final String tagName;
@@ -30,6 +32,11 @@ class AppReleaseInfo {
   final String? androidApkUrl;
   final String? sha256SumsUrl;
   final String? linuxArchiveUrl;
+
+  /// Asset file names as published on the release, e.g.
+  /// `mesh-utility-Alpha-25.2-android.apk`. SHA256SUMS.txt lists these.
+  final String? androidApkName;
+  final String? linuxArchiveName;
 }
 
 bool _assetPresent(String? value) => value != null && value.trim().isNotEmpty;
@@ -142,6 +149,8 @@ Future<AppReleaseInfo?> fetchLatestRelease({
     String? apkUrl;
     String? sumsUrl;
     String? linuxUrl;
+    String? apkName;
+    String? linuxName;
     final assets = json['assets'];
     if (assets is List) {
       for (final a in assets) {
@@ -150,9 +159,11 @@ Future<AppReleaseInfo?> fetchLatestRelease({
         final url = (a['browser_download_url'] ?? '').toString();
         if (name.endsWith('-android.apk') && name.startsWith('mesh-utility-')) {
           apkUrl = url;
+          apkName = name;
         } else if (name.endsWith('-linux-x64.tar.gz') &&
             name.startsWith('mesh-utility-')) {
           linuxUrl = url;
+          linuxName = name;
         } else if (name == 'SHA256SUMS.txt') {
           sumsUrl = url;
         }
@@ -167,6 +178,8 @@ Future<AppReleaseInfo?> fetchLatestRelease({
       androidApkUrl: apkUrl,
       sha256SumsUrl: sumsUrl,
       linuxArchiveUrl: linuxUrl,
+      androidApkName: apkName,
+      linuxArchiveName: linuxName,
     );
   } catch (_) {
     return null;
@@ -191,9 +204,36 @@ String? sha256ForAsset(String sumsBody, String assetName) {
   return null;
 }
 
-/// Filename helpers for release assets (stable naming).
-String androidApkAssetName(int alphaN) =>
-    'mesh-utility-Alpha-$alphaN-android.apk';
+/// Release asset file names, built from the full release tag the release
+/// workflow uses (`mesh-utility-<tag>-android.apk`). A hotfix tag such as
+/// `Alpha-25.2` keeps its `.2`; building the name from the major number alone
+/// looked up `mesh-utility-Alpha-25-android.apk`, which a hotfix release does
+/// not list in SHA256SUMS.txt.
+String androidApkAssetName(String releaseTag) =>
+    'mesh-utility-${releaseTag.trim()}-android.apk';
 
-String linuxArchiveAssetName(int alphaN) =>
-    'mesh-utility-Alpha-$alphaN-linux-x64.tar.gz';
+String linuxArchiveAssetName(String releaseTag) =>
+    'mesh-utility-${releaseTag.trim()}-linux-x64.tar.gz';
+
+/// The file name to verify and save for [release]'s Android APK: the
+/// published asset name when known, else the name built from the tag.
+String androidApkAssetNameFor(AppReleaseInfo release) =>
+    _safeAssetName(release.androidApkName) ??
+    androidApkAssetName(release.tagName);
+
+/// Same as [androidApkAssetNameFor] for the Linux archive.
+String linuxArchiveAssetNameFor(AppReleaseInfo release) =>
+    _safeAssetName(release.linuxArchiveName) ??
+    linuxArchiveAssetName(release.tagName);
+
+/// [name] when it is a plain file name (it is also used as a local path).
+String? _safeAssetName(String? name) {
+  final trimmed = name?.trim();
+  if (trimmed == null || trimmed.isEmpty) return null;
+  if (trimmed.contains('/') ||
+      trimmed.contains(r'\') ||
+      trimmed.contains('..')) {
+    return null;
+  }
+  return trimmed;
+}

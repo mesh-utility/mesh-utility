@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
+import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/scan_aggregator.dart';
@@ -546,4 +547,172 @@ void main() {
       expect(deadZone.scanCount, 2);
     },
   );
+
+  test('raw scans from hex details include inbound snrIn', () {
+    final cell = hexCellAt(lockHavenLat, lockHavenLng);
+    final scans = rawScansFromHexDetails([
+      HexDetail(
+        row: cell.row,
+        col: cell.col,
+        scanCount: 1,
+        lastTs: 1794230863516,
+        nodes: const [
+          HexDetailNode(
+            id: 'D61F4F45',
+            name: 'CPAMe.sh RtlSnk Ovrlk',
+            role: 'repeater',
+            senderName: 'CPAMe.sh RtlSnk Ovrlk',
+            receiverName: 'Truck Radio',
+            lastTs: 1794230863516,
+            lastSnr: -4.5,
+            bestSnr: -4.5,
+            lastRssi: -80,
+            lastSnrIn: -5.75,
+            bestSnrIn: -5.75,
+            count: 1,
+          ),
+          HexDetailNode(
+            id: '72A1AC8A',
+            name: 'Truck Radio',
+            role: 'observer',
+            receiverName: 'Truck Radio',
+            lastTs: 1794230863516,
+            lastSnrIn: -5.75,
+            bestSnrIn: -5.75,
+            count: 1,
+          ),
+        ],
+      ),
+    ]);
+    final heard = scans.firstWhere((s) => s.nodeId == 'D61F4F45');
+    expect(heard.snr, closeTo(-4.5, 0.001));
+    expect(heard.snrIn, closeTo(-5.75, 0.001));
+    final observer = scans.firstWhere(
+      (s) =>
+          s.observerId == '72A1AC8A' && (s.nodeId == null || s.nodeId!.isEmpty),
+    );
+    expect(observer.snrIn, closeTo(-5.75, 0.001));
+  });
+
+  group('enrichScanWithHexDetail (popup matches Cell History)', () {
+    final at = DateTime.utc(2026, 11, 11, 17, 20, 58);
+    ScanResult cached({
+      String observerId = '',
+      String? receiverName,
+      double? snrIn,
+    }) => ScanResult(
+      id: 'scan-1',
+      observerId: observerId,
+      nodeId: 'F3C072D5',
+      rssi: -120,
+      snr: -4.25,
+      snrIn: snrIn,
+      latitude: 40.7967,
+      longitude: -77.8747,
+      altitude: 342.4,
+      timestamp: at,
+      senderName: null,
+      receiverName: receiverName,
+      radioId: null,
+    );
+    RawScan detail({
+      required String node,
+      required DateTime when,
+      double? snrIn,
+      String? receiver = 'KD3CGK Mesh-Utility.org',
+    }) => RawScan(
+      observerId: '72A1AC8A',
+      radioId: '72A1AC8A',
+      nodeId: node,
+      latitude: 40.7967,
+      longitude: -77.8747,
+      rssi: -120,
+      snr: -4.25,
+      snrIn: snrIn,
+      timestamp: when,
+      receiverName: receiver,
+      downloadedFromWorker: true,
+    );
+
+    test('fills a missing observer name and SNR in from the detail row', () {
+      final out = enrichScanWithHexDetail(cached(), [
+        detail(node: 'A000A79A', when: at, snrIn: -3.75),
+        detail(
+          node: 'F3C072D5',
+          when: at.add(const Duration(seconds: 1)),
+          snrIn: -5.5,
+        ),
+      ]);
+      expect(out.receiverName, 'KD3CGK Mesh-Utility.org');
+      expect(out.observerId, '72A1AC8A');
+      expect(out.radioId, '72A1AC8A');
+      // Same heard node wins over a nearer row for another node.
+      expect(out.snrIn, -5.5);
+      // Values the cached scan already has are untouched.
+      expect(out.rssi, -120);
+      expect(out.snr, -4.25);
+      expect(out.nodeId, 'F3C072D5');
+      expect(out.timestamp, at);
+    });
+
+    test('never replaces values the cached scan already has', () {
+      final scan = cached(
+        observerId: 'AD864DC7',
+        receiverName: 'Base',
+        snrIn: 1.5,
+      );
+      final out = enrichScanWithHexDetail(scan, [
+        detail(node: 'F3C072D5', when: at, snrIn: -5.5),
+      ]);
+      expect(identical(out, scan), isTrue);
+    });
+
+    test('keeps the observer but fills a missing SNR in', () {
+      final out = enrichScanWithHexDetail(
+        cached(observerId: 'AD864DC7', receiverName: 'Base'),
+        [detail(node: 'F3C072D5', when: at, snrIn: -5.5)],
+      );
+      expect(out.receiverName, 'Base');
+      expect(out.observerId, 'AD864DC7');
+      expect(out.snrIn, -5.5);
+    });
+
+    test('ignores detail rows from other times and empty detail', () {
+      final scan = cached();
+      expect(identical(enrichScanWithHexDetail(scan, const []), scan), isTrue);
+      final far = enrichScanWithHexDetail(scan, [
+        detail(
+          node: 'F3C072D5',
+          when: at.add(const Duration(minutes: 10)),
+          snrIn: -5.5,
+        ),
+      ]);
+      expect(identical(far, scan), isTrue);
+    });
+  });
+
+  test('heard node ids skip observers and fall back to the last node', () {
+    const withNodes = HexDetail(
+      row: 1,
+      col: 2,
+      scanCount: 3,
+      lastTs: 1,
+      nodes: <HexDetailNode>[
+        HexDetailNode(id: 'f3c072d5', role: 'repeater', lastTs: 1),
+        HexDetailNode(id: '72A1AC8A', role: 'observer', lastTs: 1),
+      ],
+    );
+    expect(heardNodeIdsForHexDetail(withNodes), {'F3C072D5'});
+    const compact = HexDetail(
+      row: 1,
+      col: 2,
+      scanCount: 3,
+      lastTs: 1,
+      lastNodeId: 'aabbccdd',
+    );
+    expect(heardNodeIdsForHexDetail(compact), {'AABBCCDD'});
+    expect(coverageZonesFromHexDetails(<HexDetail>[withNodes]).single.nodeIds, {
+      'F3C072D5',
+    });
+  });
 }

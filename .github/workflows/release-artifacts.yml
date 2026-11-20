@@ -356,6 +356,24 @@ jobs:
         run: |
           cd dist
           sha256sum * > SHA256SUMS.txt
+          # App builds up to Alpha-25.2 look up a hotfix asset by the major
+          # number only (mesh-utility-Alpha-25-android.apk for Alpha-25.2).
+          # Add alias lines with the same hash so in-app updates from those
+          # builds still verify. Only alias lines are added; no files.
+          if [[ "$RELEASE_TAG" =~ ^v?[Aa]lpha-([0-9]+)\.[0-9]+$ ]]; then
+            major="Alpha-${BASH_REMATCH[1]}"
+            prefix="mesh-utility-${RELEASE_TAG}-"
+            aliases=""
+            while read -r hash name; do
+              case "$name" in
+                "$prefix"*)
+                  aliases+="${hash}  mesh-utility-${major}-${name#"$prefix"}"$'\n'
+                  ;;
+              esac
+            done < SHA256SUMS.txt
+            printf '%s' "$aliases" >> SHA256SUMS.txt
+          fi
+          cat SHA256SUMS.txt
 
       - name: Attach artifacts to GitHub Release
         uses: softprops/action-gh-release@v2

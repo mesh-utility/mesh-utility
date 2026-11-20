@@ -31,14 +31,14 @@ const List<int> scanCacheRadiusMileChoices = <int>[
 const double kmPerMile = 1.609344;
 
 const String scanCacheStorageNote =
-    'A larger area, more selections, or Global uses more storage and can slow startup.';
+    'A bigger area uses more storage and can make the app start slower.';
 
 const String scanCacheCountyNote =
     'Counties cover the United States only. Other countries are not included.';
 
 /// Shown under the cache-area control. The same choice limits the worker fetch.
 const String scanCacheCloudNote =
-    'This also limits cloud downloads. States, counties, and areas larger than 250 miles are sent as map bounds. An older server still returns at most 250 miles around a point. This device then keeps only the area you selected.';
+    'Choose the area the map shows coverage for. Scans outside it are not kept on this device.';
 
 /// `worker/src/index.ts` `parseRadiusMiles` uses `Math.min(parsed, 250)`.
 /// Requests above this still prune locally to the real cache area.

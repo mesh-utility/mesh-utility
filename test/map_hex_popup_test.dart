@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
 import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/pages/map_page.dart';
 import 'package:mesh_utility/src/services/grid.dart';
+import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 
-CoverageZone _zone() {
+CoverageZone _zone({Set<String> nodeIds = const <String>{}}) {
   const lat = 40.79;
   const lng = -77.86;
   return CoverageZone(
@@ -20,6 +22,7 @@ CoverageZone _zone() {
     lastScanned: DateTime.utc(2026, 1, 1),
     isDeadZone: false,
     polygon: getHexVertices(lat, lng),
+    nodeIds: nodeIds,
   );
 }
 
@@ -28,6 +31,8 @@ Widget _map({
   List<CoverageZone>? zones,
   VoidCallback? onClearFocusHexId,
   bool syncing = false,
+  List<ScanResult> scans = const <ScanResult>[],
+  Future<List<RawScan>> Function(String zoneId)? onFetchHexDetail,
 }) {
   return MapPage(
     zones: zones ?? <CoverageZone>[_zone()],
@@ -53,8 +58,9 @@ Widget _map({
     onOpenHistoryFromZone: (_) {},
     focusHexId: focusHexId,
     onClearFocusHexId: onClearFocusHexId,
-    scans: const <ScanResult>[],
+    scans: scans,
     rawScans: const <RawScan>[],
+    onFetchHexDetail: onFetchHexDetail,
     nodesCount: 0,
     statsRadiusMiles: 0,
     unitSystem: 'imperial',
@@ -266,6 +272,181 @@ void main() {
 
     expect(find.text('Filter Nodes'), findsOneWidget);
     expect(find.text('Coverage Zone'), findsNothing);
+  });
+  test('automatic fits never zoom past the basemap native tiles', () {
+    expect(basemapMaxNativeZoom, 19);
+    expect(capFocusZoom(16.4), 16.4);
+    expect(capFocusZoom(19), 19);
+    expect(capFocusZoom(21.5), basemapMaxNativeZoom);
+    expect(capFocusZoom(double.infinity), basemapMaxNativeZoom);
+    expect(capFocusZoom(double.nan), basemapMaxNativeZoom);
+  });
+
+  testWidgets('popup shows the observer and SNR in from the cell detail', (
+    tester,
+  ) async {
+    const lat = 40.7967;
+    const lng = -77.8747;
+    final cell = hexCellAt(lat, lng);
+    final id = 'hex:${cell.row}:${cell.col}';
+    final when = DateTime.utc(2026, 11, 11, 17, 20, 58);
+    final zone = CoverageZone(
+      id: id,
+      centerLat: lat,
+      centerLng: lng,
+      radiusMeters: 100,
+      avgRssi: -104,
+      avgSnr: 9.3,
+      scanCount: 6,
+      lastScanned: when,
+      isDeadZone: false,
+      polygon: getHexVertices(lat, lng),
+    );
+    // Cached map scan without observer identity or SNR in (as loaded from
+    // the area history), and the grouped detail row History shows.
+    final cached = ScanResult(
+      id: 'scan-1',
+      observerId: '',
+      nodeId: 'F3C072D5',
+      rssi: -120,
+      snr: -4.25,
+      snrIn: null,
+      latitude: lat,
+      longitude: lng,
+      altitude: 342.4,
+      timestamp: when,
+      senderName: null,
+      receiverName: null,
+      radioId: null,
+    );
+    final detail = RawScan(
+      observerId: '72A1AC8A',
+      radioId: '72A1AC8A',
+      nodeId: 'F3C072D5',
+      latitude: lat,
+      longitude: lng,
+      rssi: -120,
+      snr: -4.25,
+      snrIn: -5.5,
+      timestamp: when,
+      receiverName: 'KD3CGK Mesh-Utility.org',
+      downloadedFromWorker: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: _map(
+            focusHexId: id,
+            zones: <CoverageZone>[zone],
+            scans: <ScanResult>[cached],
+            onFetchHexDetail: (_) async => <RawScan>[detail],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('Coverage Zone'), findsOneWidget);
+    expect(find.textContaining('KD3CGK Mesh-Utility.org'), findsOneWidget);
+    expect(find.text('SNR -5.5 dB'), findsOneWidget);
+    expect(find.textContaining('unknown'), findsNothing);
+  });
+
+  testWidgets('basemap overzooms native tiles instead of going blank', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app());
+    await tester.pump();
+    final tiles = tester.widget<TileLayer>(find.byType(TileLayer));
+    expect(tiles.maxNativeZoom, basemapMaxNativeZoom.toInt());
+    // TileLayer renders nothing once zoom rounds above its maxZoom, so it
+    // must cover every zoom the map allows.
+    expect(tiles.maxZoom, greaterThanOrEqualTo(mapMaxZoom));
+    expect(mapMaxZoom, greaterThan(basemapMaxNativeZoom));
+    expect(
+      tiles.evictErrorTileStrategy,
+      EvictErrorTileStrategy.notVisibleRespectMargin,
+    );
+    final map = tester.widget<FlutterMap>(find.byType(FlutterMap));
+    expect(map.options.maxZoom, mapMaxZoom);
+  });
+
+  testWidgets('legend matches the drawn hexes', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: _map())));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tap(find.byIcon(Icons.chevron_left));
+    await tester.pump();
+    final dead = tester.widget<LegendRow>(
+      find.widgetWithText(LegendRow, 'Dead Zone'),
+    );
+    expect(dead.color, deadZoneMapColor);
+    expect(dead.fillOpacity, legendDeadZoneFillOpacity);
+    final swatch = tester.widget<LegendHexSwatch>(
+      find.descendant(
+        of: find.widgetWithText(LegendRow, 'Dead Zone'),
+        matching: find.byType(LegendHexSwatch),
+      ),
+    );
+    expect(swatch.fillOpacity, legendDeadZoneFillOpacity);
+    final good = tester.widget<LegendRow>(
+      find.widgetWithText(LegendRow, 'Good'),
+    );
+    expect(good.fillOpacity, legendSignalFillOpacity);
+    // Nothing on the map draws the old faint "General / Before Sync" hexes.
+    expect(find.text('Before Sync'), findsNothing);
+    expect(find.widgetWithText(LegendRow, 'You'), findsOneWidget);
+  });
+
+  test('node stat counts heard nodes from the hex index, honoring filters', () {
+    final zones = <CoverageZone>[
+      _zone(nodeIds: {'F3C072D5AABB', 'aabbccdd'}),
+    ];
+    expect(scopedNodeKeysFromZones(zones, const <String>{}), {
+      'F3C072D5',
+      'AABBCCDD',
+    });
+    expect(scopedNodeKeysFromZones(zones, {'F3C072D5'}), {'F3C072D5'});
+    expect(scopedNodeKeysFromZones(zones, {'11223344'}), isEmpty);
+  });
+
+  testWidgets('Nodes stat uses indexed cells without raw scans and shows '
+      'the radio icon', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: _map(
+            zones: <CoverageZone>[
+              _zone(nodeIds: {'F3C072D5AABB', 'AABBCCDD'}),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+    final nodesLabel = find.text('Nodes');
+    expect(nodesLabel, findsWidgets);
+    final card = find.ancestor(
+      of: nodesLabel.first,
+      matching: find.byType(Card),
+    );
+    expect(
+      find.descendant(of: card.first, matching: find.text('2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: card.first, matching: find.text('Offline')),
+      findsNothing,
+    );
+    expect(find.byIcon(Icons.bluetooth_disabled), findsOneWidget);
+    expect(find.byTooltip('No radio'), findsOneWidget);
+    final semantics = tester.ensureSemantics();
+    await tester.pump();
+    expect(find.bySemanticsLabel(RegExp('No radio')), findsWidgets);
+    semantics.dispose();
   });
 }
 

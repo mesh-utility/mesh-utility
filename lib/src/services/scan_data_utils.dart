@@ -117,6 +117,7 @@ List<CoverageZone> sanitizeDeadzoneZoneRadioIds(
           isDeadZone: zone.isDeadZone,
           polygon: zone.polygon,
           radioId: null,
+          nodeIds: zone.nodeIds,
         );
       })
       .toList(growable: false);

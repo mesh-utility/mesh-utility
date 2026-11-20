@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:mesh_utility/src/models/coverage_zone.dart';
 import 'package:mesh_utility/src/models/raw_scan.dart';
+import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
@@ -18,6 +19,8 @@ class HexDetailNode {
     this.bestRssi,
     this.lastSnr,
     this.lastRssi,
+    this.bestSnrIn,
+    this.lastSnrIn,
     this.count = 1,
   });
 
@@ -31,6 +34,8 @@ class HexDetailNode {
   final double? bestRssi;
   final double? lastSnr;
   final double? lastRssi;
+  final double? bestSnrIn;
+  final double? lastSnrIn;
   final int count;
 
   bool get isObserver => role == 'observer';
@@ -123,6 +128,14 @@ List<HexDetailNode> _nodes(Object? raw) {
         bestRssi: _num(entry['r'] ?? entry['rssi'] ?? entry['bestRssi']),
         lastSnr: _num(entry['ls'] ?? entry['lastSnr']),
         lastRssi: _num(entry['lr'] ?? entry['lastRssi']),
+        bestSnrIn: _num(entry['si'] ?? entry['bestSnrIn'] ?? entry['snrIn']),
+        lastSnrIn: _num(
+          entry['lsi'] ??
+              entry['lastSnrIn'] ??
+              entry['snrIn'] ??
+              entry['si'] ??
+              entry['bestSnrIn'],
+        ),
         count: _int(entry['c'] ?? entry['count'], 1),
       ),
     );
@@ -243,10 +256,49 @@ List<CoverageZone> coverageZonesFromHexDetails(Iterable<HexDetail> details) {
         lastScanned: last,
         isDeadZone: deadZoneFromMetrics(avgRssi: rssi, avgSnr: snr),
         polygon: points,
+        nodeIds: heardNodeIdsForHexDetail(detail),
       ),
     );
   }
   return out;
+}
+
+/// Heard (non-observer) node keys in one indexed cell: the first 8 hex
+/// digits, upper case (the node filter key). Compact rows without node lists
+/// fall back to the cell's last heard node. Keys are made here once so the
+/// map stats never normalize IDs while panning.
+Set<String> heardNodeIdsForHexDetail(HexDetail detail) {
+  final out = <String>{};
+  for (final node in detail.nodes) {
+    if (node.isObserver) continue;
+    final key = hexNodeKey(node.id);
+    if (key.isNotEmpty) out.add(key);
+  }
+  if (out.isEmpty) {
+    final last = hexNodeKey(detail.lastNodeId ?? '');
+    if (last.isNotEmpty) out.add(last);
+  }
+  return out;
+}
+
+/// First 8 hex digits of [raw], upper case, without a RegExp.
+String hexNodeKey(String raw) {
+  final buf = StringBuffer();
+  var n = 0;
+  for (final c in raw.codeUnits) {
+    int? u;
+    if (c >= 48 && c <= 57) {
+      u = c;
+    } else if (c >= 65 && c <= 70) {
+      u = c;
+    } else if (c >= 97 && c <= 102) {
+      u = c - 32;
+    }
+    if (u == null) continue;
+    buf.writeCharCode(u);
+    if (++n == 8) break;
+  }
+  return buf.toString();
 }
 
 /// A node's own advertised/index name, never another node's lastNodeName.
@@ -315,6 +367,7 @@ List<RawScan> rawScansFromHexDetails(Iterable<HexDetail> details) {
             longitude: center.lng,
             rssi: node.lastRssi ?? node.bestRssi,
             snr: node.lastSnr ?? node.bestSnr,
+            snrIn: node.lastSnrIn ?? node.bestSnrIn,
             altitude: detail.altitude,
             timestamp: when,
             receiverName: node.name ?? node.receiverName,
@@ -336,6 +389,7 @@ List<RawScan> rawScansFromHexDetails(Iterable<HexDetail> details) {
               detail.lastRssi ??
               detail.bestRssi,
           snr: node.lastSnr ?? node.bestSnr ?? detail.lastSnr ?? detail.bestSnr,
+          snrIn: node.lastSnrIn ?? node.bestSnrIn,
           altitude: detail.altitude,
           timestamp: when,
           senderName: _nameForHexNode(node, detail),
@@ -477,4 +531,83 @@ List<RawScan> rawScansForHexCell({
       ))
         scan,
   ]);
+}
+
+String _scanIdKey(String? value) {
+  final hex = (value ?? '').trim().toUpperCase().replaceAll(
+    RegExp(r'[^0-9A-F]'),
+    '',
+  );
+  return hex.length > 8 ? hex.substring(0, 8) : hex;
+}
+
+/// Fills a cached map scan's missing observer identity and SNR in from the
+/// tapped cell's detail rows (the same grouped list Cell History shows).
+///
+/// Map scans built from the cached history can lack the observer name and
+/// `snrIn`, while the hex detail fetched on tap has both. The popup used to
+/// show "unknown / SNR N/A" for a scan whose History row showed the observer
+/// and SNR in. Only fields the cached scan is missing are filled; values it
+/// already has are never replaced. A detail row matches when it is within
+/// [tolerance] of the scan time, preferring the same heard node, then the
+/// nearest time.
+ScanResult enrichScanWithHexDetail(
+  ScanResult scan,
+  List<RawScan> detail, {
+  Duration tolerance = const Duration(minutes: 2),
+}) {
+  if (detail.isEmpty) return scan;
+  final needsObserver =
+      (scan.receiverName ?? '').trim().isEmpty &&
+      (scan.radioId ?? '').trim().isEmpty &&
+      scan.observerId.trim().isEmpty;
+  if (!needsObserver && scan.snrIn != null) return scan;
+  final nodeKey = _scanIdKey(scan.nodeId);
+  final scanMs = scan.timestamp.toUtc().millisecondsSinceEpoch;
+  RawScan? best;
+  var bestSameNode = false;
+  var bestDelta = 0;
+  for (final raw in detail) {
+    final when = raw.timestamp ?? raw.receivedAt;
+    if (when == null) continue;
+    final delta = (when.toUtc().millisecondsSinceEpoch - scanMs).abs();
+    if (delta > tolerance.inMilliseconds) continue;
+    final sameNode = nodeKey.isNotEmpty && _scanIdKey(raw.nodeId) == nodeKey;
+    final better =
+        best == null ||
+        (sameNode && !bestSameNode) ||
+        (sameNode == bestSameNode && delta < bestDelta);
+    if (!better) continue;
+    best = raw;
+    bestSameNode = sameNode;
+    bestDelta = delta;
+  }
+  if (best == null) return scan;
+  final observerName = (best.receiverName ?? '').trim();
+  final observerId = (best.observerId ?? '').trim();
+  final radioId = (best.radioId ?? '').trim();
+  final fillObserver =
+      needsObserver &&
+      (observerName.isNotEmpty || observerId.isNotEmpty || radioId.isNotEmpty);
+  final snrIn = scan.snrIn ?? best.snrIn;
+  if (!fillObserver && snrIn == scan.snrIn) return scan;
+  return ScanResult(
+    id: scan.id,
+    observerId: fillObserver && observerId.isNotEmpty
+        ? observerId
+        : scan.observerId,
+    nodeId: scan.nodeId,
+    rssi: scan.rssi,
+    snr: scan.snr,
+    snrIn: snrIn,
+    latitude: scan.latitude,
+    longitude: scan.longitude,
+    altitude: scan.altitude,
+    timestamp: scan.timestamp,
+    senderName: scan.senderName,
+    receiverName: fillObserver && observerName.isNotEmpty
+        ? observerName
+        : scan.receiverName,
+    radioId: fillObserver && radioId.isNotEmpty ? radioId : scan.radioId,
+  );
 }

@@ -156,6 +156,109 @@ bbb mesh-utility-Alpha-17-linux-x64.tar.gz
     });
   });
 
+  group('release asset names', () {
+    test('hotfix tags keep the full version in asset names', () {
+      expect(
+        androidApkAssetName('Alpha-25.2'),
+        'mesh-utility-Alpha-25.2-android.apk',
+      );
+      expect(
+        linuxArchiveAssetName('Alpha-25.2'),
+        'mesh-utility-Alpha-25.2-linux-x64.tar.gz',
+      );
+      expect(
+        androidApkAssetName('Alpha-26'),
+        'mesh-utility-Alpha-26-android.apk',
+      );
+    });
+
+    test('published asset name wins, tag name is the fallback', () {
+      const withNames = AppReleaseInfo(
+        tagName: 'Alpha-25.2',
+        name: 'Alpha-25.2',
+        htmlUrl: '',
+        body: '',
+        alphaNumber: 25,
+        androidApkName: 'mesh-utility-Alpha-25.2-android.apk',
+        linuxArchiveName: 'mesh-utility-Alpha-25.2-linux-x64.tar.gz',
+      );
+      expect(
+        androidApkAssetNameFor(withNames),
+        'mesh-utility-Alpha-25.2-android.apk',
+      );
+      expect(
+        linuxArchiveAssetNameFor(withNames),
+        'mesh-utility-Alpha-25.2-linux-x64.tar.gz',
+      );
+      const noNames = AppReleaseInfo(
+        tagName: 'Alpha-25.3',
+        name: 'Alpha-25.3',
+        htmlUrl: '',
+        body: '',
+        alphaNumber: 25,
+      );
+      expect(
+        androidApkAssetNameFor(noNames),
+        'mesh-utility-Alpha-25.3-android.apk',
+      );
+      expect(
+        linuxArchiveAssetNameFor(noNames),
+        'mesh-utility-Alpha-25.3-linux-x64.tar.gz',
+      );
+    });
+
+    test('a published name with a path is not used as a file name', () {
+      const unsafe = AppReleaseInfo(
+        tagName: 'Alpha-25.2',
+        name: 'Alpha-25.2',
+        htmlUrl: '',
+        body: '',
+        alphaNumber: 25,
+        androidApkName: '../mesh-utility-x-android.apk',
+      );
+      expect(
+        androidApkAssetNameFor(unsafe),
+        'mesh-utility-Alpha-25.2-android.apk',
+      );
+    });
+
+    test('hotfix sums with alias lines verify new and old clients', () {
+      // SHA256SUMS.txt as the release workflow writes it for Alpha-25.2.
+      const body = '''
+f595  mesh-utility-Alpha-25.2-android.apk
+c44c  mesh-utility-Alpha-25.2-linux-x64.tar.gz
+f595  mesh-utility-Alpha-25-android.apk
+c44c  mesh-utility-Alpha-25-linux-x64.tar.gz
+''';
+      expect(sha256ForAsset(body, androidApkAssetName('Alpha-25.2')), 'f595');
+      expect(sha256ForAsset(body, linuxArchiveAssetName('Alpha-25.2')), 'c44c');
+      // Name older builds compute from the major number only.
+      expect(sha256ForAsset(body, 'mesh-utility-Alpha-25-android.apk'), 'f595');
+    });
+
+    test('fetchLatestRelease keeps the published asset names', () async {
+      final release = await _fetch(const <Map<String, String>>[
+        <String, String>{
+          'name': 'mesh-utility-Alpha-25-android.apk',
+          'url': 'https://example.test/app.apk',
+        },
+        <String, String>{
+          'name': 'mesh-utility-Alpha-25-linux-x64.tar.gz',
+          'url': 'https://example.test/app.tar.gz',
+        },
+        <String, String>{
+          'name': 'SHA256SUMS.txt',
+          'url': 'https://example.test/SHA256SUMS.txt',
+        },
+      ]);
+      expect(release!.androidApkName, 'mesh-utility-Alpha-25-android.apk');
+      expect(
+        release.linuxArchiveName,
+        'mesh-utility-Alpha-25-linux-x64.tar.gz',
+      );
+    });
+  });
+
   group('fetchLatestRelease assets', () {
     test('release with no assets is not installable', () async {
       final release = await _fetch(const <Map<String, String>>[]);

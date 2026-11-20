@@ -90,11 +90,7 @@ class ScanCacheAreaSection extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'Chooses the area for an optional Download coverage pack. The live map still loads tiles for the view. '
-            'Choices above 250 miles also send a bounding box so a current server can return the full area. '
-            'An older server still returns only 250 miles. '
-            'Rows already on the device are kept out to the distance you picked. '
-            'With no location yet, cloud history is not downloaded.',
+            'Shows coverage within this distance of where you are.',
             style: noteStyle,
           ),
         ],
@@ -116,7 +112,7 @@ class ScanCacheAreaSection extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            'The download uses the bounding box of those outlines. This device then keeps only the outlines. An older server still caps the request at 250 miles around the center.',
+            'Shows coverage inside the places you pick.',
             style: noteStyle,
           ),
           const SizedBox(height: 4),
@@ -130,7 +126,7 @@ class ScanCacheAreaSection extends StatelessWidget {
               .isEmpty) ...[
             const SizedBox(height: 4),
             Text(
-              'No divisions selected. Cloud history is not downloaded, and downloaded scans are removed until you select at least one.',
+              'Nothing is selected yet. Pick at least one place.',
               style: noteStyle,
             ),
           ],
@@ -138,7 +134,7 @@ class ScanCacheAreaSection extends StatelessWidget {
         if (mode == scanCacheModeGlobal) ...[
           const SizedBox(height: 6),
           Text(
-            'Global means you can pan anywhere; the map loads true-size tiles for the view. Use Download coverage pack only if you want an offline copy of a chosen area.',
+            'Shows coverage everywhere. Pan anywhere on the map.',
             style: noteStyle,
           ),
         ],

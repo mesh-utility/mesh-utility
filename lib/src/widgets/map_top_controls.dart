@@ -57,8 +57,8 @@ class MapTopControls extends StatelessWidget {
     'Tip: Dragging The Map Disables Auto-Center Until You Re-Enable It.',
     'Tip: Smart Scan Can Skip Recently Covered Zones To Reduce Network Congestion.',
     'Tip: Open Nodes To Review Discovered Repeaters And Short IDs.',
-    'Tip: In Scan History, tap the download icon to export filtered data to CSV.',
-    'Tip: Use Sync To Upload Local Scans Manually And Refresh Cloud Data.',
+    'Tip: In Scan History, tap the export icon to save your scans as a CSV file.',
+    'Tip: Tap Sync To Share Your Scans And Refresh The Map.',
   ];
 
   @override

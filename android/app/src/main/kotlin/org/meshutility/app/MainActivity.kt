@@ -18,6 +18,28 @@ class MainActivity : FlutterActivity() {
         setIntent(intent)
     }
 
+    // Back on the first screen used to finish the activity. Flutter then
+    // reported "detached" and the app released the radio and restarted on
+    // the next open. Leave the app running in the background instead (like
+    // Home). Only swiping it away from recents closes it and frees the radio.
+    override fun popSystemNavigator(): Boolean {
+        moveTaskToBack(true)
+        return true
+    }
+
+    // Swiping the app away from recents finishes this activity, but Android
+    // can keep the process (and its Bluetooth link) alive, so the radio stayed
+    // held. Back no longer finishes the activity (see popSystemNavigator and
+    // the Dart PopScope), so a real finish means the user closed the app:
+    // end the process so Android drops the radio connection.
+    override fun onDestroy() {
+        val closing = isFinishing && !isChangingConfigurations
+        super.onDestroy()
+        if (closing) {
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+    }
+
     private val settingsChannel = "org.meshutility.app/settings"
     private val updateChannel = "org.meshutility.app/updates"
 
@@ -26,6 +48,9 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, settingsChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "moveTaskToBack" -> {
+                        result.success(moveTaskToBack(true))
+                    }
                     "openBluetoothSettings" -> {
                         var opened = false
                         val intents = mutableListOf<Intent>()

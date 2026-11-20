@@ -158,10 +158,11 @@ class _SettingsPageState extends State<SettingsPage>
         builder: (context) => AlertDialog(
           title: const Text('Download entire worldwide pack?'),
           content: const Text(
-            'Cache area is set to Global. This downloads an uncapped worldwide '
-            'coverage dump and can use a lot of data, time, and storage.\n\n'
-            'Sync already refreshes only the tiles you are viewing. Continue '
-            'only if you explicitly want the full worldwide pack.',
+            'Scan cache area is set to Global, so this saves the whole world '
+            'for offline use. It can take a long time and use a lot of data '
+            'and storage.\n\n'
+            'You do not need this to see the map. Continue only if you want '
+            'the whole world offline.',
           ),
           actions: [
             TextButton(
@@ -354,10 +355,10 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               Text(
                 s.forceOffline
-                    ? 'Offline mode is ON. Sync with the online database is paused. '
-                          'Turn Offline Mode off to see scan data from the cloud and contribute.'
-                    : 'Online mode is enabled. You can sync and contribute scan data. '
-                          'Turn Offline Mode on to pause cloud sync.',
+                    ? 'Offline mode is on. Sync is paused. '
+                          'Turn it off to see shared scans and share yours.'
+                    : 'Online mode is on. Your scans are shared when you sync. '
+                          'Turn Offline Mode on to pause sync.',
                 style: noteStyle,
               ),
               if (s.forceOffline) ...[
@@ -512,7 +513,7 @@ class _SettingsPageState extends State<SettingsPage>
                 ],
               ),
               Text(
-                'Download area tiles prefetches map tiles around your current OS location.',
+                'Download area tiles saves the map around you so it works without internet.',
                 style: noteStyle,
               ),
               const _SectionDivider(),
@@ -642,7 +643,7 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               const SizedBox(height: 6),
               Text(
-                'How many days of cloud history load onto the map.',
+                'How many days of scans the map shows.',
                 style: noteStyle,
               ),
               const SizedBox(height: 10),
@@ -673,7 +674,7 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               const SizedBox(height: 6),
               Text(
-                'How far back to fetch dead zones. This does not change successful scan history.',
+                'How many days of dead zones (places with no reply) the map shows.',
                 style: noteStyle,
               ),
               const _SectionDivider(),
@@ -713,8 +714,8 @@ class _SettingsPageState extends State<SettingsPage>
               Text(syncMeta, style: noteStyle),
               const SizedBox(height: 8),
               Text(
-                'Sync uploads your scans and refreshes map tiles for the area you are viewing. '
-                'It does not download the whole cache area. Use Download coverage pack for that.',
+                'Sync shares your scans and refreshes the map. '
+                'Download coverage pack is optional. It saves your scan cache area for offline use.',
                 style: noteStyle,
               ),
               const SizedBox(height: 8),
@@ -761,7 +762,9 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               const SizedBox(height: 8),
               Text(
-                'Connect to a radio to enable signed delete request.',
+                widget.bleConnected
+                    ? 'Deletes scans from your connected radio.'
+                    : 'Connect your radio to delete its data.',
                 style: noteStyle,
               ),
               if ((widget.connectedRadioId ?? '').trim().isNotEmpty)
@@ -855,14 +858,10 @@ class _SettingsPageState extends State<SettingsPage>
                 ),
               if (widget.onCheckForUpdates == null) const SizedBox(height: 6),
               Text(
-                'Mesh Utility keeps radio scans on this device and can download shared history for the cache area above.',
+                'Mesh Utility keeps your scans on this device and shows shared coverage for the scan cache area above.',
                 style: noteStyle,
               ),
-              const SizedBox(height: 6),
-              Text(
-                'The backend endpoint is managed internally and is not a setting.',
-                style: noteStyle,
-              ),
+
             ],
           ),
         ],

@@ -165,24 +165,10 @@ class _NodesPageState extends State<NodesPage> {
                         final valueTextStyle = Theme.of(
                           context,
                         ).textTheme.bodyMedium;
-                        final nodeScans = _scansByNode[node.nodeId] ?? const [];
-                        final nodeHexes = nodeScans
-                            .map((s) => hexKey(s.latitude, s.longitude))
-                            .toSet();
-                        final avgRssi = nodeScans.isEmpty
-                            ? null
-                            : nodeScans
-                                      .map((s) => s.rssi)
-                                      .reduce((a, b) => a + b) /
-                                  nodeScans.length;
-                        final snrValues = nodeScans
-                            .map((s) => s.snr)
-                            .whereType<double>()
-                            .toList(growable: false);
-                        final avgSnr = snrValues.isEmpty
-                            ? null
-                            : snrValues.reduce((a, b) => a + b) /
-                                  snrValues.length;
+                        final stats = _statsForNode(node.nodeId);
+                        final nodeHexCount = stats.hexCount;
+                        final avgRssi = stats.avgRssi;
+                        final avgSnr = stats.avgSnr;
                         final displayRssi = avgRssi ?? latest?.rssi;
                         final displaySnr = avgSnr ?? latest?.snr;
                         final signalClass =
@@ -250,7 +236,7 @@ class _NodesPageState extends State<NodesPage> {
                                       ),
                                       const SizedBox(width: 4),
                                       Text(
-                                        '${nodeScans.length}',
+                                        '${stats.scanCount}',
                                         style: Theme.of(context)
                                             .textTheme
                                             .bodySmall
@@ -265,7 +251,7 @@ class _NodesPageState extends State<NodesPage> {
                                       ),
                                       const SizedBox(width: 4),
                                       Text(
-                                        '${nodeHexes.length}',
+                                        '$nodeHexCount',
                                         style: Theme.of(context)
                                             .textTheme
                                             .bodySmall
@@ -401,7 +387,34 @@ class _NodesPageState extends State<NodesPage> {
     );
   }
 
+  /// Card stats per node, computed once per scan set instead of on every
+  /// grid item build while scrolling.
+  final Map<String, _NodeCardStats> _nodeStats = <String, _NodeCardStats>{};
+
+  _NodeCardStats _statsForNode(String nodeId) {
+    return _nodeStats.putIfAbsent(nodeId, () {
+      final nodeScans = _scansByNode[nodeId] ?? const <ScanResult>[];
+      final hexCount = nodeScans
+          .map((s) => hexKey(s.latitude, s.longitude))
+          .toSet()
+          .length;
+      final avgRssi = nodeScans.isEmpty
+          ? null
+          : nodeScans.map((s) => s.rssi).reduce((a, b) => a + b) /
+                nodeScans.length;
+      final snrValues = nodeScans
+          .map((s) => s.snr)
+          .whereType<double>()
+          .toList(growable: false);
+      final avgSnr = snrValues.isEmpty
+          ? null
+          : snrValues.reduce((a, b) => a + b) / snrValues.length;
+      return _NodeCardStats(nodeScans.length, hexCount, avgRssi, avgSnr);
+    });
+  }
+
   void _processScans() {
+    _nodeStats.clear();
     _latestByNode = {};
     _scansByNode = {};
     final scans = _filterScansByRadius(widget.scanResults);
@@ -440,4 +453,18 @@ class _NodesPageState extends State<NodesPage> {
       return d <= widget.statsRadiusMiles;
     }).toList();
   }
+}
+
+class _NodeCardStats {
+  const _NodeCardStats(
+    this.scanCount,
+    this.hexCount,
+    this.avgRssi,
+    this.avgSnr,
+  );
+
+  final int scanCount;
+  final int hexCount;
+  final double? avgRssi;
+  final double? avgSnr;
 }

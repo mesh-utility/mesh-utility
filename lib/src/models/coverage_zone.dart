@@ -14,6 +14,7 @@ class CoverageZone {
     required this.isDeadZone,
     required this.polygon,
     this.radioId,
+    this.nodeIds = const <String>{},
   });
 
   final String id;
@@ -27,6 +28,10 @@ class CoverageZone {
   final bool isDeadZone;
   final List<LatLng> polygon;
   final String? radioId;
+
+  /// Heard node IDs from the hex index for this cell (observers excluded).
+  /// Empty for locally built zones; the map stats fall back to scans.
+  final Set<String> nodeIds;
 
   factory CoverageZone.fromJson(Map<String, dynamic> json) {
     List<LatLng> parsePolygon(dynamic raw) {

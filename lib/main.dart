@@ -207,6 +207,15 @@ class MeshHomePage extends StatefulWidget {
   State<MeshHomePage> createState() => _MeshHomePageState();
 }
 
+/// True where Back on the first screen should keep the app running in the
+/// background instead of closing it (and releasing the radio).
+bool backKeepsAppRunning({
+  required bool isWeb,
+  required TargetPlatform platform,
+}) {
+  return !isWeb && platform == TargetPlatform.android;
+}
+
 class _MeshHomePageState extends State<MeshHomePage>
     with WidgetsBindingObserver {
   static const int _statusNotificationId = 1001;
@@ -1150,6 +1159,31 @@ class _MeshHomePageState extends State<MeshHomePage>
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      // Android: Back on the first screen sends the app to the background
+      // (like Home) instead of closing it, so the radio stays connected.
+      // Only swiping the app away from recents closes it.
+      canPop: !backKeepsAppRunning(
+        isWeb: kIsWeb,
+        platform: defaultTargetPlatform,
+      ),
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        unawaited(_moveAppToBackground());
+      },
+      child: _buildShell(context),
+    );
+  }
+
+  Future<void> _moveAppToBackground() async {
+    try {
+      await _settingsChannel.invokeMethod<bool>('moveTaskToBack');
+    } catch (e) {
+      _debugLog.warn('app_lifecycle', 'Move to background failed: $e');
+    }
+  }
+
+  Widget _buildShell(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([_appState, AppI18n.instance]),
       builder: (context, _) {

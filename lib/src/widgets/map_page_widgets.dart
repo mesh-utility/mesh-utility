@@ -3,17 +3,59 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+/// Fill opacity of heard coverage hexes on the map (border is solid).
+const double legendSignalFillOpacity = 0.45;
+
+/// Fill opacity of dead-zone hexes on the map (solid 1 px gray border).
+const double legendDeadZoneFillOpacity = 0.12;
+
+/// A legend swatch drawn like a map hex: faint fill with a solid 1 px border
+/// in the same color.
+class LegendHexSwatch extends StatelessWidget {
+  const LegendHexSwatch({
+    super.key,
+    required this.color,
+    this.fillOpacity = legendSignalFillOpacity,
+    this.width = 12,
+    this.height = 10,
+  });
+
+  final Color color;
+  final double fillOpacity;
+  final double width;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: fillOpacity),
+        border: Border.all(color: color, width: 1),
+        borderRadius: BorderRadius.circular(2),
+      ),
+    );
+  }
+}
+
 class LegendRow extends StatelessWidget {
   const LegendRow({
     super.key,
     required this.color,
     required this.text,
     required this.range,
+    this.fillOpacity = legendSignalFillOpacity,
+    this.marker,
   });
 
   final Color color;
   final String text;
   final String range;
+  final double fillOpacity;
+
+  /// Replaces the hex swatch (e.g. the own-location dot).
+  final Widget? marker;
 
   @override
   Widget build(BuildContext context) {
@@ -23,28 +65,45 @@ class LegendRow extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 12,
-            height: 10,
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(2),
+          marker ?? LegendHexSwatch(color: color, fillOpacity: fillOpacity),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(text, style: const TextStyle(fontSize: 12)),
+                Text(
+                  range,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontSize: 10),
+                ),
+              ],
             ),
           ),
-          const SizedBox(width: 6),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(text, style: const TextStyle(fontSize: 12)),
-              Text(
-                range,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(fontSize: 10),
-              ),
-            ],
-          ),
         ],
+      ),
+    );
+  }
+}
+
+/// Small copy of the own-location marker drawn on the map.
+class LegendLocationDot extends StatelessWidget {
+  const LegendLocationDot({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 12,
+      height: 12,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFF3B82F6),
+          border: Border.fromBorderSide(
+            BorderSide(color: Colors.white, width: 1.5),
+          ),
+        ),
       ),
     );
   }
@@ -387,19 +446,22 @@ class _OverflowMarqueePainter extends CustomPainter {
 }
 
 class LegendSwatch extends StatelessWidget {
-  const LegendSwatch({super.key, required this.color});
+  const LegendSwatch({
+    super.key,
+    required this.color,
+    this.fillOpacity = legendSignalFillOpacity,
+  });
 
   final Color color;
+  final double fillOpacity;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return LegendHexSwatch(
+      color: color,
+      fillOpacity: fillOpacity,
       width: 10,
       height: 10,
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.7),
-        borderRadius: BorderRadius.circular(2),
-      ),
     );
   }
 }
@@ -465,7 +527,12 @@ class ScanStatsPanel extends StatelessWidget {
               icon: Icons.settings_input_antenna,
               value: '$nodesCount',
               label: 'Nodes',
-              sub: isConnected ? 'Active' : 'Offline',
+              sub: '',
+              subIcon: isConnected
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_disabled,
+              subIconLabel: isConnected ? 'Radio connected' : 'No radio',
+              subIconColor: isConnected ? Colors.green : null,
               onTap: onTapNodes,
             ),
             _MiniStatCard(
@@ -500,6 +567,9 @@ class _MiniStatCard extends StatelessWidget {
     required this.value,
     required this.label,
     required this.sub,
+    this.subIcon,
+    this.subIconLabel,
+    this.subIconColor,
     this.onTap,
   });
 
@@ -507,6 +577,11 @@ class _MiniStatCard extends StatelessWidget {
   final String value;
   final String label;
   final String sub;
+
+  /// Small status icon shown in place of [sub] text (e.g. radio link).
+  final IconData? subIcon;
+  final String? subIconLabel;
+  final Color? subIconColor;
   final VoidCallback? onTap;
 
   @override
@@ -563,7 +638,21 @@ class _MiniStatCard extends StatelessWidget {
                       height: 1.0,
                     ),
                   ),
-                  if (showSub)
+                  if (showSub && subIcon != null)
+                    Tooltip(
+                      message: subIconLabel ?? '',
+                      child: Semantics(
+                        label: subIconLabel,
+                        child: Icon(
+                          subIcon,
+                          size: subSize + 3,
+                          color:
+                              subIconColor ??
+                              Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  else if (showSub)
                     Text(
                       sub,
                       maxLines: 1,

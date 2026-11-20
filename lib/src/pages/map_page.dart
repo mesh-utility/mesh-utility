@@ -163,6 +163,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   /// apply it again.
   String? _appliedFocusHexId;
 
+  /// Node focus that already moved the camera. A Nodes-tab tap can arrive
+  /// before the viewport index has the node's cells; the focus then waits
+  /// for the zone list instead of being dropped.
+  String? _appliedFocusNodeId;
+
   /// Set when the popup is dismissed, the page pauses, or a modal opens.
   /// Stays set until [MapPage.focusHexId] changes to a new id.
   bool _suppressHexFocus = false;
@@ -186,10 +191,20 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   List<CoverageZone> _datasetZones = const [];
   int _renderSignature = 0;
   List<CoverageBatchHex> _batchHexes = const [];
+
+  /// Drives only the hex layer, so an in-view refresh does not rebuild the
+  /// whole map page (stats, legend, popup) mid-gesture.
+  final ValueNotifier<List<CoverageBatchHex>> _batchHexesView =
+      ValueNotifier<List<CoverageBatchHex>>(const []);
+
+  /// Batch hexes by zone id, reused across in-view refreshes so the layer
+  /// keeps their projected outlines. Cleared with the dataset.
+  final Map<String, _BatchHexMemo> _batchHexMemo = <String, _BatchHexMemo>{};
   List<MapDrawPolygon> _drawnPolygons = const [];
   MapDrawPolygon? _clusterPopup;
   MapRenderViewport? _appliedViewport;
   _MapDataset? _dataset;
+  final _ScopedNodeKeysMemo _scopedNodeKeysMemo = _ScopedNodeKeysMemo();
 
   @override
   void initState() {
@@ -200,9 +215,43 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _focusHexIfRequested();
-      _maybeAutoCenterOnObserver();
+      if (_mapReady) {
+        _runInitialFocus();
+      } else {
+        _initialFocusPending = true;
+      }
     });
+  }
+
+  /// FlutterMap has finished its first layout and the tile layer is listening
+  /// for camera moves.
+  bool _mapReady = false;
+
+  /// Page-open focus (node or hex from another page, or own fix) waits for
+  /// [_mapReady], as flutter_map asks for controller moves.
+  bool _initialFocusPending = false;
+
+  void _runInitialFocus() {
+    // A node or hex focus from another page wins over own-fix auto-center.
+    // Running both moved the camera off the node's coverage to the GPS fix.
+    final focused = _focusHexIfRequested();
+    if (!focused) _maybeAutoCenterOnObserver();
+  }
+
+  void _handleMapReady() {
+    _mapReady = true;
+    _scheduleViewportRender(immediate: true);
+    if (!_initialFocusPending) return;
+    _initialFocusPending = false;
+    // flutter_map sends its first size event one frame after the map is
+    // built, carrying the camera from that build (the initial z10 view).
+    // A page-open jump made before it (node tap on the Nodes page) left the
+    // tile layer loading tiles for that stale camera and pruning the new
+    // ones: blank map until the next pan. Jump on the following frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _runInitialFocus();
+    });
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   @override
@@ -219,7 +268,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
-      _dismissHexPopup();
+      _dismissHexPopup('app paused');
     }
   }
 
@@ -228,7 +277,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     // Page leave (Cell History and the other tabs replace this page).
     // Clear local selection and ask the owner to drop the one-shot focus so
     // the next visit does not open the popup again.
-    _clearHexPopupFields();
+    _clearHexPopupFields('page deactivated');
     final clearFocus = widget.onClearFocusHexId;
     super.deactivate();
     if (clearFocus != null) {
@@ -267,9 +316,16 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     );
     // Zone-list identity changes on sync, upload, and tile refresh. Those
     // rebuilds must not re-select a hex that was already shown or dismissed.
+    if (widget.focusNodeId != oldWidget.focusNodeId) {
+      _appliedFocusNodeId = null;
+    }
+    final nodeFocusPending =
+        (widget.focusNodeId ?? '').isNotEmpty &&
+        _appliedFocusNodeId != widget.focusNodeId;
     if (focusChanged ||
         widget.focusNodeId != oldWidget.focusNodeId ||
-        (widget.zones != oldWidget.zones && focusNeedsApply)) {
+        (widget.zones != oldWidget.zones &&
+            (focusNeedsApply || nodeFocusPending))) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _focusHexIfRequested();
@@ -282,12 +338,16 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _viewportRenderTimer?.cancel();
     _tileProvider.dispose();
+    _batchHexesView.dispose();
     super.dispose();
   }
 
   bool get _hexPopupOpen => _selectedZone != null || _clusterPopup != null;
 
-  void _clearHexPopupFields() {
+  void _clearHexPopupFields([String reason = 'clear']) {
+    if (_hexPopupOpen) {
+      _debugLog.info('popup', 'Hex popup closed reason=$reason');
+    }
     _suppressHexFocus = true;
     _selectedZone = null;
     _clusterPopup = null;
@@ -295,10 +355,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   /// Drops the coverage popup and blocks focus from opening it again.
-  void _dismissHexPopup() {
+  void _dismissHexPopup([String reason = 'dismiss']) {
     _suppressHexFocus = true;
     if (!_hexPopupOpen) return;
-    _clearHexPopupFields();
+    _clearHexPopupFields(reason);
     if (!mounted) return;
     setState(() {});
   }
@@ -325,7 +385,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       if (!mounted) return;
       final current = ModalRoute.of(context);
       if (current != null && !current.isCurrent) {
-        _dismissHexPopup();
+        _dismissHexPopup('covered by modal');
       }
     });
   }
@@ -407,6 +467,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _hexSession.reset(identity);
     _renderReady = false;
     _batchHexes = const [];
+    _batchHexesView.value = _batchHexes;
+    _batchHexMemo.clear();
     _drawnPolygons = const [];
     _clusterPopup = null;
     _appliedViewport = null;
@@ -548,7 +610,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       _renderReady = true;
       _renderSignature = signature;
       _drawnPolygons = plan.polygons;
-      _batchHexes = _batchHexesForDraw(plan.polygons);
+      _batchHexes = _batchHexesForDraw(plan.polygons, _batchHexMemo);
+      _batchHexesView.value = _batchHexes;
     }
     _appliedViewport = viewport;
     final onViewport = widget.onViewportHexes;
@@ -572,7 +635,6 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
           'zoom=${viewport.zoom.toStringAsFixed(2)} '
           'scale=${plan.scale}$heavy',
     );
-    setState(() {});
   }
 
   bool _sameViewport(MapRenderViewport a, MapRenderViewport b) {
@@ -663,7 +725,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   void _focusZone(CoverageZone zone) {
-    const targetZoom = 16.4;
+    final targetZoom = capFocusZoom(16.4);
     final pixelsDown = (_mapViewportHeight * 0.23).clamp(96.0, 190.0);
     final metersPerPixel =
         156543.03392 * cos(zone.centerLat * pi / 180.0) / pow(2.0, targetZoom);
@@ -721,7 +783,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     if (lat == null || lng == null) return;
 
     if (_hexPopupOpen) {
-      _dismissHexPopup();
+      _dismissHexPopup('auto-center on');
     }
     final target = LatLng(lat, lng);
     _lastAutoCenterTarget = target;
@@ -737,15 +799,16 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _mapController.move(target, zoom);
   }
 
-  void _focusHexIfRequested() {
-    if (_focusNodeIfRequested()) return;
+  /// Applies a pending node or hex focus. True when the camera was moved.
+  bool _focusHexIfRequested() {
+    if (_focusNodeIfRequested()) return true;
     final hexId = widget.focusHexId;
     if (!shouldApplyMapHexFocus(
       focusHexId: hexId,
       appliedFocusHexId: _appliedFocusHexId,
       suppressed: _suppressHexFocus,
     )) {
-      return;
+      return false;
     }
     CoverageZone? zone;
     for (final z in widget.zones) {
@@ -754,7 +817,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         break;
       }
     }
-    if (zone == null || !mounted) return;
+    if (zone == null || !mounted) return false;
     _appliedFocusHexId = hexId;
     setState(() {
       _selectedZone = zone;
@@ -764,6 +827,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     });
     _loadHexDetail(zone);
     _focusZone(zone);
+    return true;
   }
 
   bool _focusNodeIfRequested() {
@@ -805,7 +869,12 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       }
     }
     if (target == null || !mounted) return false;
+    if (_appliedFocusNodeId == nodeId) return false;
+    _appliedFocusNodeId = nodeId;
     _disableAutoCenter('node focus');
+    if (_hexPopupOpen) {
+      _debugLog.info('popup', 'Hex popup closed reason=node focus');
+    }
     setState(() {
       // Node-focus mode should not auto-open a zone popup.
       _selectedZone = null;
@@ -835,7 +904,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       CameraFit.coordinates(
         coordinates: coordinates,
         padding: const EdgeInsets.fromLTRB(24, 120, 56, 130),
-        maxZoom: 16.2,
+        maxZoom: capFocusZoom(16.2),
         minZoom: 8,
       ),
     );
@@ -873,7 +942,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       CameraFit.coordinates(
         coordinates: coordinates,
         padding: const EdgeInsets.fromLTRB(24, 120, 56, 130),
-        maxZoom: 16.2,
+        maxZoom: capFocusZoom(16.2),
         minZoom: 8,
       ),
     );
@@ -908,7 +977,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     // Close the hex popup before the route is pushed so the dialog does not
     // stack on top of it.
     _markOverlayInteraction();
-    _dismissHexPopup();
+    _dismissHexPopup('node filter dialog');
     // Respect Stats Radius so only nodes with scans inside the radius appear.
     final radiusScans = _filterScansByRadius(widget.scans);
     final options = _nodeFilterOptions(
@@ -1034,6 +1103,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       }
       scopedNodeIds.add(nodeKey);
     }
+    // Index-fed map: raw scans are often not loaded, so also count the heard
+    // nodes the hex index lists for the shown cells (same data as the map).
+    scopedNodeIds.addAll(
+      _scopedNodeKeysMemo.keysFor(filteredZones, effectiveNodeFilters),
+    );
     if (effectiveNodeFilters.isNotEmpty) {
       final filterLabel = _selectedNodeFilters.isNotEmpty
           ? 'custom(${effectiveNodeFilters.length})'
@@ -1101,6 +1175,45 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     return Object.hashAll(ordered);
   }
 
+  /// Base map tiles. The dark basemap uses the same invert + hue-rotate
+  /// matrix as flutter_map's darkModeTileBuilder, but applied once to the
+  /// whole tile layer instead of once per tile. Per-tile ColorFiltered adds a
+  /// save layer for every tile, and during pinch-zoom two zoom levels of
+  /// tiles are on screen, which was the main raster cost of zooming.
+  int _tileErrorCount = 0;
+
+  void _onTileError(TileImage tile, Object error, StackTrace? stackTrace) {
+    _tileErrorCount++;
+    // Log the first few and then every 25th so a dead network cannot flood.
+    if (_tileErrorCount <= 5 || _tileErrorCount % 25 == 0) {
+      final c = tile.coordinates;
+      _debugLog.warn(
+        'map_tiles',
+        'Tile load failed z=${c.z} x=${c.x} y=${c.y} '
+            'count=$_tileErrorCount: $error',
+      );
+    }
+  }
+
+  Widget _baseTileLayer() {
+    final tiles = TileLayer(
+      urlTemplate: _layerTemplate(_baseLayer),
+      userAgentPackageName: 'mesh_utility',
+      tileProvider: _tileProvider,
+      // Past the servers' native zoom, scale up the z19 tiles. TileLayer
+      // draws nothing at all once the camera zoom rounds above its maxZoom,
+      // which was the blank light-gray map when zoomed in past 19.5.
+      maxNativeZoom: basemapMaxNativeZoom.toInt(),
+      maxZoom: mapMaxZoom,
+      // A tile that failed (timeout, 5xx) is dropped once it leaves the view
+      // so it is fetched again next time instead of staying blank.
+      evictErrorTileStrategy: EvictErrorTileStrategy.notVisibleRespectMargin,
+      errorTileCallback: _onTileError,
+    );
+    if (_baseLayer != BaseLayer.dark) return tiles;
+    return ColorFiltered(colorFilter: darkBasemapTileFilter, child: tiles);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Own fix, or the general US view. Coverage zones must not move this.
@@ -1124,7 +1237,6 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     final deadZonesLength = dataset.dead;
     final avgRssi = dataset.avgRssi;
     final avgSnr = dataset.avgSnr;
-    final batchHexes = <CoverageBatchHex>[..._batchHexes];
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewWidth = constraints.hasBoundedWidth
@@ -1140,7 +1252,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         final statsEstimatedHeight = 96.0;
         // Keep legend clear of bottom stats panel in both collapsed/expanded states.
         final legendBottom = statsBottom + statsEstimatedHeight + 18;
-        final legendExpandedWidth = min(viewWidth - 24, 154.0);
+        final legendExpandedWidth = min(viewWidth - 24, 196.0);
         final legendReservedWidth = 56.0;
         // Cap the hex popup so a 360dp phone keeps margins and long lines wrap
         // inside the card instead of running off the screen.
@@ -1166,6 +1278,12 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                 options: MapOptions(
                   initialCenter: center,
                   initialZoom: camera.zoom,
+                  maxZoom: mapMaxZoom,
+                  // Behind tiles that are still loading. The dark basemap
+                  // keeps a dark backdrop instead of flashing light gray.
+                  backgroundColor: _baseLayer == BaseLayer.dark
+                      ? darkBasemapBackground
+                      : const Color(0xFFE0E0E0),
                   interactionOptions: const InteractionOptions(
                     flags: InteractiveFlag.all,
                   ),
@@ -1174,7 +1292,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                       _disableAutoCenter('map gesture');
                     }
                   },
-                  onMapReady: () => _scheduleViewportRender(immediate: true),
+                  onMapReady: _handleMapReady,
                   onMapEvent: (event) {
                     if (event is MapEventNonRotatedSizeChange) {
                       _scheduleViewportRender(immediate: true);
@@ -1184,13 +1302,17 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   },
                   onTap: (tapPosition, latLng) {
                     _disableAutoCenter('map tap');
-                    final hitId = _hitCoverage(tapPosition, latLng, batchHexes);
+                    final hitId = _hitCoverage(
+                      tapPosition,
+                      latLng,
+                      _batchHexes,
+                    );
                     if (hitId == null) {
                       _debugLog.debug(
                         'ui_click',
                         'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
                       );
-                      _dismissHexPopup();
+                      _dismissHexPopup('empty map tap');
                       return;
                     }
                     // A layer/upload tap can still be delivered here after the
@@ -1200,15 +1322,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   },
                 ),
                 children: [
-                  TileLayer(
-                    urlTemplate: _layerTemplate(_baseLayer),
-                    userAgentPackageName: 'mesh_utility',
-                    tileProvider: _tileProvider,
-                    maxZoom: 19,
-                    tileBuilder: _baseLayer == BaseLayer.dark
-                        ? darkModeTileBuilder
-                        : null,
-                  ),
+                  _baseTileLayer(),
                   if (widget.observerLat != null && widget.observerLng != null)
                     MarkerLayer(
                       markers: [
@@ -1242,8 +1356,14 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                         ),
                       ],
                     ),
-                  if (batchHexes.isNotEmpty)
-                    CoverageHexBatchLayer(hexes: batchHexes),
+                  // [_batchHexes] is only ever replaced, never mutated, so
+                  // the layer can reuse its projected geometry by identity.
+                  ValueListenableBuilder<List<CoverageBatchHex>>(
+                    valueListenable: _batchHexesView,
+                    builder: (context, hexes, _) => hexes.isEmpty
+                        ? const SizedBox.shrink()
+                        : CoverageHexBatchLayer(hexes: hexes),
+                  ),
                 ],
               ),
             ),
@@ -1256,7 +1376,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   behavior: HitTestBehavior.opaque,
                   onTap: () {
                     _debugLog.info('ui_click', 'Popup scrim click close popup');
-                    _dismissHexPopup();
+                    _dismissHexPopup('scrim tap');
                   },
                   child: Container(color: Colors.black.withValues(alpha: 0.42)),
                 ),
@@ -1317,9 +1437,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                               range: 'Weak signal',
                             ),
                             LegendRow(
-                              color: Color(0xFF991B1B),
+                              color: deadZoneMapColor,
                               text: 'Dead Zone',
                               range: 'No response',
+                              fillOpacity: legendDeadZoneFillOpacity,
                             ),
                             LegendRow(
                               color: Color(0xFFA855F7),
@@ -1327,9 +1448,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                               range: 'Good signal, bad SNR',
                             ),
                             LegendRow(
-                              color: Color(0x6622C55E),
-                              text: 'General',
-                              range: 'Before Sync',
+                              color: Color(0xFF3B82F6),
+                              text: 'You',
+                              range: 'This device',
+                              marker: LegendLocationDot(),
                             ),
                           ],
                         ),
@@ -1370,7 +1492,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                             SizedBox(height: 4),
                             LegendSwatch(color: Color(0xFFEF4444)),
                             SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFF991B1B)),
+                            LegendSwatch(
+                              color: deadZoneMapColor,
+                              fillOpacity: legendDeadZoneFillOpacity,
+                            ),
                             SizedBox(height: 4),
                             LegendSwatch(color: Color(0xFFA855F7)),
                             SizedBox(height: 6),
@@ -1578,11 +1703,19 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   constraints: BoxConstraints(maxWidth: popupWidth),
                   child: Builder(
                     builder: (context) {
-                      final latest = _latestScanForZone(
+                      final cachedLatest = _latestScanForZone(
                         _selectedZone!,
                         widget.scans,
                         nodeIdFilters: effectiveNodeFilters,
                       );
+                      // Same observer name and SNR in as Cell History once
+                      // the tapped cell's detail has loaded.
+                      final latest = cachedLatest == null
+                          ? null
+                          : enrichScanWithHexDetail(
+                              cachedLatest,
+                              _hexDetailScans,
+                            );
                       final latestRaw = latest == null
                           ? _latestRawScanForZone(
                               _selectedZone!,
@@ -2621,6 +2754,64 @@ bool _looksLikeObserverId(String value) {
   return hexOnly.length == 8 || hexOnly.length == 12 || hexOnly.length == 16;
 }
 
+/// Node filter keys for the heard nodes the hex index lists in [zones],
+/// limited to [nodeFilters] when any are set.
+Set<String> scopedNodeKeysFromZones(
+  Iterable<CoverageZone> zones,
+  Set<String> nodeFilters,
+) {
+  final out = <String>{};
+  for (final zone in zones) {
+    for (final id in zone.nodeIds) {
+      // Index zones already carry 8-digit keys (no RegExp per pan frame).
+      final key = _isNodeKey(id) ? id : _nodeFilterKey(id);
+      if (key.isEmpty) continue;
+      if (nodeFilters.isNotEmpty && !nodeFilters.contains(key)) continue;
+      out.add(key);
+    }
+  }
+  return out;
+}
+
+/// The dataset is rebuilt about once a second (location fixes, zone list
+/// copies) while the cells stay the same objects. Reuse the last key set
+/// when every cell is identical and the filters match.
+class _ScopedNodeKeysMemo {
+  List<CoverageZone>? _zones;
+  Set<String> _filters = const <String>{};
+  Set<String> _keys = const <String>{};
+
+  Set<String> keysFor(List<CoverageZone> zones, Set<String> filters) {
+    final last = _zones;
+    if (last != null &&
+        last.length == zones.length &&
+        _filters.length == filters.length &&
+        _filters.containsAll(filters)) {
+      var same = true;
+      for (var i = 0; i < zones.length; i++) {
+        if (!identical(last[i], zones[i])) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return _keys;
+    }
+    _zones = zones;
+    _filters = Set<String>.of(filters);
+    _keys = scopedNodeKeysFromZones(zones, filters);
+    return _keys;
+  }
+}
+
+bool _isNodeKey(String id) {
+  if (id.length != 8) return false;
+  for (final c in id.codeUnits) {
+    final ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 70);
+    if (!ok) return false;
+  }
+  return true;
+}
+
 String _nodeFilterKey(String value) {
   final hex = _normalizeHexId(value);
   if (hex.length >= 8) return hex.substring(0, 8);
@@ -2700,30 +2891,107 @@ BaseLayer _defaultBaseLayerForBrightness(Brightness brightness) {
   return brightness == Brightness.dark ? BaseLayer.dark : BaseLayer.standard;
 }
 
-List<CoverageBatchHex> _batchHexesForDraw(List<MapDrawPolygon> drawn) {
+/// Dead-zone hex outline and legend swatch on the map. Gray, because red
+/// already means Poor coverage.
+const Color deadZoneMapColor = Color(0xFF9CA3AF);
+
+/// Map backdrop under the dark basemap while tiles load.
+const Color darkBasemapBackground = Color(0xFF1C1C1E);
+
+/// Highest zoom the basemap tile servers serve (OSM standard and dark).
+const double basemapMaxNativeZoom = 19;
+
+/// Deepest zoom the map allows. Above [basemapMaxNativeZoom] the basemap
+/// shows scaled-up native tiles.
+const double mapMaxZoom = 21;
+
+/// Clamps an automatic camera fit or focus zoom (hex tap, node focus, node
+/// filter) so it never goes past the basemap's native tiles. Manual pinch
+/// zoom is not limited by this.
+double capFocusZoom(double zoom) {
+  if (!zoom.isFinite) return basemapMaxNativeZoom;
+  return zoom > basemapMaxNativeZoom ? basemapMaxNativeZoom : zoom;
+}
+
+/// Invert + 180° hue rotate, identical to flutter_map's darkModeTileBuilder.
+const ColorFilter darkBasemapTileFilter = ColorFilter.matrix(<double>[
+  0.5740000009536743,
+  -1.4299999475479126,
+  -0.14399999380111694,
+  0,
+  255,
+  -0.4259999990463257,
+  -0.429999977350235,
+  -0.14399999380111694,
+  0,
+  255,
+  -0.4259999990463257,
+  -1.4299999475479126,
+  0.8559999465942383,
+  0,
+  255,
+  0,
+  0,
+  0,
+  1,
+  0,
+]);
+
+class _BatchHexMemo {
+  const _BatchHexMemo(this.draw, this.hex);
+
+  final MapDrawPolygon draw;
+  final CoverageBatchHex hex;
+
+  bool matches(MapDrawPolygon other) =>
+      identical(draw.points, other.points) &&
+      draw.isDeadZone == other.isDeadZone &&
+      draw.avgRssi == other.avgRssi &&
+      draw.avgSnr == other.avgSnr;
+}
+
+List<CoverageBatchHex> _batchHexesForDraw(
+  List<MapDrawPolygon> drawn,
+  Map<String, _BatchHexMemo> memo,
+) {
   final hexes = <CoverageBatchHex>[];
   for (final draw in drawn) {
     if (draw.points.length < 3) continue;
-    // Dead Zone color only when nothing was heard. Weak-but-heard cells use
-    // Poor/Noisy/etc. via RSSI/SNR classification.
-    final color = draw.isDeadZone
-        ? signalColorForValues(rssi: null, snr: null)
-        : signalColorForValues(
-            rssi: draw.avgRssi,
-            snr: draw.avgSnr,
-            includeDeadZone: false,
-          );
-    hexes.add(
-      CoverageBatchHex(
-        points: draw.points,
-        hitId: draw.hitZoneId,
-        fill: color.withValues(alpha: draw.isDeadZone ? 0.15 : 0.45),
-        border: draw.isDeadZone ? const Color(0xFFEF4444) : color,
-        dashed: draw.isDeadZone,
-      ),
-    );
+    final cached = memo[draw.hitZoneId];
+    if (cached != null && cached.matches(draw)) {
+      hexes.add(cached.hex);
+      continue;
+    }
+    final hex = _batchHexForDraw(draw);
+    memo[draw.hitZoneId] = _BatchHexMemo(draw, hex);
+    hexes.add(hex);
   }
   return hexes;
+}
+
+CoverageBatchHex _batchHexForDraw(MapDrawPolygon draw) {
+  if (draw.isDeadZone) {
+    // Dead Zone only when nothing was heard: solid gray 1 px border (same
+    // width as every other hex) over a very faint gray fill.
+    return CoverageBatchHex(
+      points: draw.points,
+      hitId: draw.hitZoneId,
+      fill: deadZoneMapColor.withValues(alpha: legendDeadZoneFillOpacity),
+      border: deadZoneMapColor,
+    );
+  }
+  // Weak-but-heard cells use Poor/Noisy/etc. via RSSI/SNR classification.
+  final color = signalColorForValues(
+    rssi: draw.avgRssi,
+    snr: draw.avgSnr,
+    includeDeadZone: false,
+  );
+  return CoverageBatchHex(
+    points: draw.points,
+    hitId: draw.hitZoneId,
+    fill: color.withValues(alpha: legendSignalFillOpacity),
+    border: color,
+  );
 }
 
 List<CoverageZone> _filterZonesByRadius({

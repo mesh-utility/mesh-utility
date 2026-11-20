@@ -67,7 +67,7 @@ Future<String?> installAndroidApk({
   if (!Platform.isAndroid) return 'Android installer only.';
   final url = release.androidApkUrl;
   if (url == null || url.isEmpty) return 'No Android APK on this release.';
-  final asset = androidApkAssetName(release.alphaNumber);
+  final asset = androidApkAssetNameFor(release);
 
   try {
     final can = await _updateChannel.invokeMethod<bool>(
@@ -113,7 +113,7 @@ Future<String?> installLinuxArchive({
   if (!Platform.isLinux) return 'Linux installer only.';
   final url = release.linuxArchiveUrl;
   if (url == null || url.isEmpty) return 'No Linux archive on this release.';
-  final asset = linuxArchiveAssetName(release.alphaNumber);
+  final asset = linuxArchiveAssetNameFor(release);
 
   // Prefer the directory that contains the running binary (install tree).
   final exec = File(Platform.resolvedExecutable);

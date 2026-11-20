@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/retry.dart';
 import 'package:mesh_utility/src/services/tile_cache_stats.dart';
 import 'package:mesh_utility/src/services/tile_cache_stats_stub.dart'
     if (dart.library.io) 'package:mesh_utility/src/services/tile_cache_stats_io.dart'
@@ -14,6 +15,13 @@ class TileCacheService {
 
   static BuiltInMapCachingProvider? _provider;
   static final _sessionProvider = _SessionMapCachingProvider();
+
+  /// One app-wide tile HTTP client. TileLayer.dispose disposes its tile
+  /// provider, and a provider closes a client it created itself. A tile layer
+  /// remount (dark/standard base layer swap, page rebuild) then left the map
+  /// page's provider with a closed client and every later tile failed. A
+  /// client passed in is never closed by the provider.
+  static final http.Client _tileHttpClient = RetryClient(http.Client());
 
   static BuiltInMapCachingProvider _providerInstance() {
     return _provider ??= BuiltInMapCachingProvider.getOrCreateInstance(
@@ -30,7 +38,10 @@ class TileCacheService {
       primary: _sessionProvider,
       secondary: persistentProvider,
     );
-    return NetworkTileProvider(cachingProvider: cacheProvider);
+    return NetworkTileProvider(
+      cachingProvider: cacheProvider,
+      httpClient: _tileHttpClient,
+    );
   }
 
   static Future<void> clearCache() async {
