@@ -1,6 +1,7 @@
 import 'package:mesh_utility/src/config/app_config.dart';
 import 'package:mesh_utility/src/services/reax_database.dart';
 import 'package:mesh_utility/src/services/scan_cache_area.dart';
+import 'package:mesh_utility/src/services/settings_change_bus.dart';
 
 class AppSettings {
   const AppSettings({
@@ -62,7 +63,6 @@ class AppSettings {
   final int scanCacheRadiusMiles;
   final List<String> scanCacheAdmin1Ids;
   final List<String> scanCacheAdmin2Ids;
-
 
   static const defaults = AppSettings(
     workerUrl: AppConfig.deployedWorkerUrl,
@@ -305,7 +305,6 @@ class AppSettings {
     );
   }
 
-
   static List<String> _stringIdList(Object? raw) {
     if (raw is! List) return const <String>[];
     final seen = <String>{};
@@ -333,7 +332,12 @@ class AppSettings {
 }
 
 class SettingsStore {
+  SettingsStore({SettingsChangeBus? changes})
+    : changes = changes ?? SettingsChangeBus();
+
   static const _settingsKey = 'settings:app';
+
+  final SettingsChangeBus changes;
 
   String _normalizeWorkerUrl(String value) {
     final trimmed = value.trim();
@@ -372,6 +376,7 @@ class SettingsStore {
   Future<void> save(AppSettings settings) async {
     final db = await ReaxDatabase.instance();
     await db.put(_settingsKey, settings.toJson());
+    changes.publish();
   }
 
   static const _batteryOptimizationPromptAskedKey =

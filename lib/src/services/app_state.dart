@@ -181,6 +181,9 @@ class AppState extends ChangeNotifier {
       _lastObservedZoneId = zoneId;
       unawaited(_onObserverZoneMaybeChanged());
     };
+    _settingsStore.changes.listen((_) {
+      unawaited(_applyRemoteSettings());
+    });
   }
 
   final SettingsStore _settingsStore;
@@ -196,6 +199,7 @@ class AppState extends ChangeNotifier {
   final AllDaysLoadGuard _allDaysGuard = AllDaysLoadGuard();
   AppSettings settings = AppSettings.defaults;
   bool loading = true;
+  bool _closed = false;
   int _historyLoadToken = 0;
   int _derivedGeneration = 0;
   bool _lastWorkerSyncSucceeded = false;
@@ -1514,7 +1518,7 @@ class AppState extends ChangeNotifier {
     await _settingsStore.save(settings);
   }
 
-  Future<void> updateSettings(AppSettings next) async {
+  Future<void> updateSettings(AppSettings next, {bool persist = true}) async {
     final previous = settings;
     settings = !next.privacyAccepted && !next.forceOffline
         ? next.copyWith(forceOffline: true)
@@ -1538,7 +1542,9 @@ class AppState extends ChangeNotifier {
     if (windowChanged) {
       _historyLoadToken++;
     }
-    await _settingsStore.save(settings);
+    if (persist) {
+      await _settingsStore.save(settings);
+    }
     if (windowChanged &&
         !requestsAllDays(
           historyDays: settings.historyDays,
@@ -4860,8 +4866,50 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  /// Another tab saved settings. Own broadcasts are ignored by the bus.
+  ///
+  /// History and deadzone windows, and the scan-cache area, go through
+  /// [updateSettings] without writing again. Any other change replaces the
+  /// in-memory settings and notifies.
+  Future<void> _applyRemoteSettings() async {
+    if (_closed || loading) return;
+    try {
+      final loaded = await _settingsStore.load();
+      if (_closed || loading) return;
+      if (_sameSettingsJson(loaded, settings)) return;
+      final windowChanged =
+          loaded.historyDays != settings.historyDays ||
+          loaded.deadzoneDays != settings.deadzoneDays;
+      final cacheChanged = !sameScanCacheArea(
+        previousMode: settings.scanCacheMode,
+        nextMode: loaded.scanCacheMode,
+        previousRadiusMiles: settings.scanCacheRadiusMiles,
+        nextRadiusMiles: loaded.scanCacheRadiusMiles,
+        previousAdmin1Ids: settings.scanCacheAdmin1Ids,
+        nextAdmin1Ids: loaded.scanCacheAdmin1Ids,
+        previousAdmin2Ids: settings.scanCacheAdmin2Ids,
+        nextAdmin2Ids: loaded.scanCacheAdmin2Ids,
+      );
+      if (windowChanged || cacheChanged) {
+        await updateSettings(loaded, persist: false);
+        return;
+      }
+      settings = loaded;
+      notifyListeners();
+    } catch (error) {
+      _debugLog.warn('settings', 'Peer settings reload failed: $error');
+    }
+  }
+
+  bool _sameSettingsJson(AppSettings a, AppSettings b) {
+    return jsonEncode(a.toJson()) == jsonEncode(b.toJson());
+  }
+
   @override
   void dispose() {
+    _closed = true;
+    _allDaysGuard.dispose();
+    _settingsStore.changes.close();
     _tileZonesGeneration++;
     _debugLog.info('app_state', 'Disposing app state');
     _scanLoopWanted = false;
