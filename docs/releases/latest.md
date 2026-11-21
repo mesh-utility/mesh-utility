@@ -1,11 +1,12 @@
-# Mesh Utility Alpha-27.1
+# Mesh Utility Alpha-28
 
 ## Fixes
 
-- The map now opens fast when you tap a scan in Scans. It no longer freezes.
-- The phone's back button works. It closes a popup first, then returns to the tab you came from.
+- Tapping hexes is more reliable, even while the map is loading.
 
 ## Enhancements
+
+- Filter the map by signal strength (Weak, OK, Strong or your own range).
 
 ## Other
 

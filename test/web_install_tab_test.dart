@@ -239,14 +239,14 @@ void main() {
 
     expect(find.byKey(whatsNewLoadingKey), findsNothing);
     expect(find.byKey(whatsNewFallbackKey), findsOneWidget);
-    expect(find.text("What's new in Alpha-27.1"), findsOneWidget);
+    expect(find.text("What's new in Alpha-28"), findsOneWidget);
     expect(find.text('Other changes'), findsOneWidget);
     expect(
-      find.textContaining('The map now opens fast when you tap a scan in Scans'),
+      find.textContaining('Filter the map by signal strength'),
       findsOneWidget,
     );
     expect(find.text('Fixes'), findsOneWidget);
-    expect(find.text('Enhancements'), findsNothing);
+    expect(find.text('Enhancements'), findsOneWidget);
     expect(find.text('See release notes on GitHub'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
