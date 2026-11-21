@@ -270,8 +270,8 @@ AppSettings fallbackInterruptedAllDays(AppSettings settings) {
 String _newOwnerId() {
   final random = Random();
   final time = DateTime.now().microsecondsSinceEpoch.toRadixString(16);
-  final noise = random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-  final extra = random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
+  final noise = random.nextInt(0x100000000).toRadixString(16).padLeft(8, '0');
+  final extra = random.nextInt(0x100000000).toRadixString(16).padLeft(8, '0');
   return '$time-$noise$extra';
 }
 
