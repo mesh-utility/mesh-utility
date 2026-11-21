@@ -18,6 +18,17 @@ Guidance for coding agents and contributors working in this repository.
 - Do not commit build artifacts (e.g., anything in `build/`, `.dart_tool/`, or platform `ephemeral/` directories).
 - After editing any file, run `dart format .` before continuing.
 
+## Architecture notes (current)
+
+- **Chunked map build:** `lib/src/pages/map_page.dart` builds zones in slices of about 1500 and yields to the browser between slices. A generation counter cancels outdated builds. A "Loading map..." pill shows after 300 ms and never blocks taps.
+- **Viewport render:** only hexes in view are drawn (`_batchHexes`). A pan schedules a debounced render. The previous hexes stay drawn and tappable until the new render lands.
+- **Settle-debounced fetch:** hex data is fetched about 400 ms after the map settles. Overlapping requests are queued and identical ones are deduplicated. A fetch that returns the same cells must not change dataset identity.
+- **Taps:** exact hit test first, then the nearest hex centre (`lib/src/services/hex_tap_target.dart`). An empty tap during a pending render does not close the popup, and the open popup survives a zone-list swap when its cell still exists.
+- **SNR filter:** `lib/src/services/snr_filter.dart`. Presets are Weak (-7 dB and below), OK (-7 to 0), Strong (above 0), plus a custom range. The filter is stored in settings and shown as a chip on the map. Dead zones are hidden while it is on.
+- **Back button:** a popup closes first, then back returns to the tab you came from, and on the main map it sends the app to the background (the app keeps running).
+- **Scan-to-map:** opening the map from Scans uses the same chunked load and a point-id lookup instead of scanning every hex.
+- Hexes are never resized, merged or moved. See `docs/flutter-best-practices.md` for speed rules.
+
 ## Localization Rules
 
 - If new localization keys are added/renamed in `lib/l10n/app_en.arb`, run `python3 tool/translate.py --in lib/l10n/app_en.arb --l10n-dir lib/l10n --missing-only` before `flutter gen-l10n`, `flutter pub get`, or any command that regenerates localization files.

@@ -68,12 +68,12 @@ Protect `main`:
 
 `deploy.yml` triggers on:
 
-- push to `main`, `master`, or `mesh-utility`
+- a published release
 - manual `workflow_dispatch`
 
 Steps:
 
-1. Deploy the Worker from `worker/` with Wrangler (`npm run deploy`).
+1. (Disabled) Deploy the Worker from `worker/` with Wrangler. Deploy it by hand when a release needs it.
 2. Build Flutter web with `tool/build_web_cloudflare.sh` and `WORKER_URL=https://mesh-utility.org/api`.
 3. Deploy `build/web` to the Cloudflare Pages project `mesh-utility-tracker`.
 
@@ -117,7 +117,19 @@ macOS and iOS are not built here.
 - Rotate a secret immediately if it leaks.
 - Do not put contact names or channel message text in docs, issues, or logs.
 
-## 8) Quick validation
+## 8) Release checklist
+
+Every release commit (the one the tag points at) must include:
+
+- [ ] `pubspec.yaml` version and `lib/src/app_version.dart` bumped (`1.0.0-alpha.N+B`)
+- [ ] `docs/releases/alpha-N.md` added and copied to `docs/releases/latest.md`
+- [ ] README **Current release** line and the **Release notes** list updated (new file added, "(current)" moved)
+- [ ] Version strings in tests updated (`app_version_test`, `widget_test`, `web_install_tab_test`)
+- [ ] `flutter analyze` and `flutter test` pass
+
+Then push `main`, tag `Alpha-N`, and publish the release. Do not post to Discord by hand.
+
+## 9) Quick validation
 
 After a deploy:
 

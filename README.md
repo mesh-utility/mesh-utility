@@ -1,12 +1,12 @@
-# Mesh Utility (Flutter)
+# Mesh Utility
 
 [![Obtainium](https://img.shields.io/badge/Obtainium-Compatible-3DDC84?logo=android&logoColor=white)](https://obtainium.imranr.dev/) [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/Just_Stuff_TM)
 
 Flutter client for MeshCore coverage mapping. It scans over BLE, keeps scans on the device, and syncs coverage to a Cloudflare Worker.
 
-**Current release: Alpha-19** (`pubspec.yaml` version `1.0.0-alpha.19+19`).
+**Current release: Alpha-28** (`pubspec.yaml` version `1.0.0-alpha.28+32`). Built with Flutter 3.50.1 (see `.flutter-version`).
 
-Releases are full GitHub releases (not prereleases) tagged `Alpha-N`. The app version in pubspec is `1.0.0-alpha.N+N`. The side nav footer reads **Mesh Utility Alpha-N**, taken from the installed app version.
+Releases are full GitHub releases (not prereleases) tagged `Alpha-N`. The app version in pubspec is `1.0.0-alpha.N+B` (N is the release, B is the build number). The side nav footer reads **Mesh Utility Alpha-N**, taken from the installed app version.
 
 ## Downloads
 
@@ -15,11 +15,11 @@ Releases are full GitHub releases (not prereleases) tagged `Alpha-N`. The app ve
 | Android | `mesh-utility-Alpha-N-android.apk` on the GitHub release |
 | Linux | `mesh-utility-Alpha-N-linux-x64.tar.gz` on the GitHub release |
 | Web | https://mesh-utility.org |
-| Windows | Not currently available |
+| Windows | Not currently available (the build fails) |
 
 Each release also includes `SHA256SUMS.txt`.
 
-Published Android APKs have used a stable signing key since **Alpha-12**. An install older than Alpha-12 must be uninstalled once before Alpha-12 or newer will install. Updates from Alpha-12 onward replace the existing app.
+Android APKs are signed with a stable key, so a new release installs over the old one.
 
 Source: https://github.com/mesh-utility/mesh-utility
 
@@ -36,7 +36,7 @@ Add that repo (or open the link on a device with Obtainium). Obtainium tracks fu
 On Android and Linux, open **Settings → App updates**.
 
 - **Check for updates** looks up the latest full GitHub release. On startup the app checks again when the last check was at least 12 hours ago.
-- **Android:** the update downloads the APK, verifies it against `SHA256SUMS.txt`, and opens the system installer. Alpha-17 and Alpha-18 cannot open that installer; install Alpha-19 once from the GitHub release or Obtainium.
+- **Android:** the update downloads the APK, verifies it against `SHA256SUMS.txt`, and opens the system installer. Alpha-17 and Alpha-18 cannot open that installer; install a newer release once by hand or with Obtainium.
 - **Linux:** **Install update** downloads the `tar.gz`, verifies the checksum, swaps the install directory while keeping the previous tree as a `.bak`, and restarts the app.
 
 Web, Windows, iOS, and macOS do not offer this updater.
@@ -63,6 +63,10 @@ A name that arrived on a radio advert, and that is not a saved companion contact
 ## Map
 
 The map uses [OpenStreetMap](https://www.openstreetmap.org/copyright) tiles (`tile.openstreetmap.org`) for the Standard and Dark layers. Dark mode is those same OSM tiles rendered dark. The app does not use Carto tiles. The Satellite layer is Esri World Imagery.
+
+**Signal filter:** the signal button next to the repeater filter shows only hexes in a signal (SNR) band: Weak (−7 dB and below), OK (−7 to 0), Strong (above 0), or a custom range. A chip on the map shows the active filter; tap its x to clear it. Dead zones are hidden while a filter is on.
+
+**Taps:** tapping a hex opens its popup, even while the map is still loading. Back closes a popup first, then returns to the tab you came from; on the main map it sends the app to the background.
 
 A **Dead Zone** is a location with no response. A weak or noisy hearing is not a dead zone.
 
@@ -125,6 +129,8 @@ flutter pub get
 flutter run
 ```
 
+Use Flutter 3.50.1 (`.flutter-version`). Setup details are in [CONTRIBUTING.md](./CONTRIBUTING.md).
+
 Worker (see [worker/README.md](./worker/README.md)):
 
 ```bash
@@ -146,7 +152,7 @@ chmod +x install_mesh_utility.sh
 To install a specific release:
 
 ```bash
-./install_mesh_utility.sh Alpha-19
+./install_mesh_utility.sh Alpha-28
 ```
 
 ## Coverage hex grid
@@ -173,7 +179,7 @@ Dead zones and live zones share that key. A zone is a dead zone when that cell h
 
 ## Deploy
 
-Publishing a full release runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which deploys the Cloudflare Worker and the Flutter web app to Cloudflare Pages.
+Publishing a full release runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which deploys the Flutter web app to Cloudflare Pages. The Worker deploy step is switched off; the Worker is deployed by hand when a release needs it. A push to `main` does not deploy.
 
 Publishing a GitHub release runs [`.github/workflows/release-artifacts.yml`](.github/workflows/release-artifacts.yml), which builds release artifacts and attaches them to that release.
 
@@ -181,16 +187,33 @@ Details, secrets, and the branch list are in [docs/ci-cd.md](./docs/ci-cd.md).
 
 ## Release notes
 
-- [Alpha 19](./docs/releases/alpha-19.md) (current)
+- [Alpha 28](./docs/releases/alpha-28.md) (current)
+- [Alpha 27.1](./docs/releases/alpha-27.1.md)
+- [Alpha 27](./docs/releases/alpha-27.md)
+- [Alpha 26.1](./docs/releases/alpha-26.1.md)
+- [Alpha 26](./docs/releases/alpha-26.md)
+- [Alpha 25.2](./docs/releases/alpha-25.2.md)
+- [Alpha 25.1](./docs/releases/alpha-25.1.md)
+- [Alpha 25](./docs/releases/alpha-25.md)
+- [Alpha 24](./docs/releases/alpha-24.md)
+- [Alpha 23](./docs/releases/alpha-23.md)
+- [Alpha 22](./docs/releases/alpha-22.md)
+- [Alpha 21](./docs/releases/alpha-21.md)
+- [Alpha 20](./docs/releases/alpha-20.md)
+- [Alpha 19](./docs/releases/alpha-19.md)
 - [Alpha 18](./docs/releases/alpha-18.md)
 - [Alpha 8](./docs/releases/alpha-8.md)
 - [Alpha 7](./docs/releases/alpha-7.md)
 - [Alpha 6](./docs/releases/alpha-6.md)
 - [Alpha 5](./docs/releases/alpha-5.md)
 
+## License
+
+Mesh Utility is free software under the **GNU General Public License v3.0 only** (GPL-3.0-only). See [LICENSE](./LICENSE).
+
 ## Contributing
 
-- [CONTRIBUTING.md](./CONTRIBUTING.md)
+- [CONTRIBUTING.md](./CONTRIBUTING.md) (contributions are under GPL-3.0)
 - [AGENTS.md](./AGENTS.md)
 - [docs/ci-cd.md](./docs/ci-cd.md)
 - [docs/flutter-best-practices.md](./docs/flutter-best-practices.md)
