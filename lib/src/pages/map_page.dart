@@ -15,6 +15,7 @@ import 'package:mesh_utility/src/services/hex_detail.dart';
 import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/map_viewport_render.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
+import 'package:mesh_utility/src/services/settle_debouncer.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
@@ -31,6 +32,9 @@ enum BaseLayer { dark, standard, satellite }
 /// flutter_map confirms a tap after its double-tap window (250ms). A layer
 /// or upload tap in that window must not select a hex.
 const Duration mapOverlayHitSuppressWindow = Duration(milliseconds: 350);
+
+/// Quiet period after the last applied viewport before a hex-index fetch.
+const Duration viewportHexSettleDelay = Duration(milliseconds: 400);
 
 /// True when [focusHexId] should open the coverage popup.
 ///
@@ -219,12 +223,18 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   List<MapDrawPolygon> _drawnPolygons = const [];
   MapDrawPolygon? _clusterPopup;
   MapRenderViewport? _appliedViewport;
+  late final SettleDebouncer<MapRenderViewport> _viewportHexes;
   _MapDataset? _dataset;
   final _ScopedNodeKeysMemo _scopedNodeKeysMemo = _ScopedNodeKeysMemo();
 
   @override
   void initState() {
     super.initState();
+    _viewportHexes = SettleDebouncer<MapRenderViewport>(
+      delay: viewportHexSettleDelay,
+      isSame: _sameViewport,
+      onSettled: _emitSettledViewportHexes,
+    );
     WidgetsBinding.instance.addObserver(this);
     _tileProvider = TileCacheService.createTileProvider(
       enabled: widget.tileCachingEnabled,
@@ -353,6 +363,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   void dispose() {
     _mapClosed = true;
     WidgetsBinding.instance.removeObserver(this);
+    _viewportHexes.cancel();
     _viewportRenderTimer?.cancel();
     _tileProvider.dispose();
     _batchHexesView.dispose();
@@ -608,18 +619,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       _batchHexesView.value = _batchHexes;
     }
     _appliedViewport = viewport;
-    final onViewport = widget.onViewportHexes;
-    if (onViewport != null) {
-      unawaited(
-        onViewport(
-          south: viewport.south,
-          north: viewport.north,
-          west: viewport.west,
-          east: viewport.east,
-          force: false,
-        ),
-      );
-    }
+    // Dragging restarts this timer. Coverage is fetched for the settled view.
+    _viewportHexes.schedule(viewport);
     final heavy = plan.polygons.length >= mapHeavyTrueSizeDrawCount
         ? ' heavy=true'
         : '';
@@ -628,6 +629,22 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       'polygons=${_batchHexes.length} dataset=${_datasetZones.length} '
           'zoom=${viewport.zoom.toStringAsFixed(2)} '
           'scale=${plan.scale}$heavy',
+    );
+  }
+
+  void _emitSettledViewportHexes(MapRenderViewport viewport) {
+    if (!mounted || _mapClosed) return;
+    final onViewport = widget.onViewportHexes;
+    if (onViewport == null) return;
+    final latest = _appliedViewport ?? viewport;
+    unawaited(
+      onViewport(
+        south: latest.south,
+        north: latest.north,
+        west: latest.west,
+        east: latest.east,
+        force: false,
+      ),
     );
   }
 
@@ -1389,75 +1406,77 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
               Positioned(
                 right: 12,
                 bottom: legendBottom,
-                child: Card(
-                  elevation: 1,
-                  child: InkWell(
-                    onTap: () {
-                      _markOverlayInteraction();
-                      _debugLog.info('ui_click', 'Legend collapse click');
-                      setState(() => _legendExpanded = false);
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 8,
-                      ),
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxWidth: legendExpandedWidth,
+                child: RepaintBoundary(
+                  child: Card(
+                    elevation: 1,
+                    child: InkWell(
+                      onTap: () {
+                        _markOverlayInteraction();
+                        _debugLog.info('ui_click', 'Legend collapse click');
+                        setState(() => _legendExpanded = false);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
                         ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: const [
-                            Align(
-                              alignment: Alignment.center,
-                              child: Icon(Icons.chevron_right, size: 16),
-                            ),
-                            SizedBox(height: 4),
-                            LegendRow(
-                              color: Color(0xFF22C55E),
-                              text: 'Excellent',
-                              range: 'RSSI > -90, SNR > 10',
-                            ),
-                            LegendRow(
-                              color: Color(0xFF4ADE80),
-                              text: 'Good',
-                              range: 'RSSI > -100, SNR > 0',
-                            ),
-                            LegendRow(
-                              color: Color(0xFFFACC15),
-                              text: 'Fair',
-                              range: 'RSSI > -110, SNR > -7',
-                            ),
-                            LegendRow(
-                              color: Color(0xFFF97316),
-                              text: 'Marginal',
-                              range: 'RSSI > -115, SNR > -13',
-                            ),
-                            LegendRow(
-                              color: Color(0xFFEF4444),
-                              text: 'Poor',
-                              range: 'Weak signal',
-                            ),
-                            LegendRow(
-                              color: deadZoneMapColor,
-                              text: 'Dead Zone',
-                              range: 'No response',
-                              fillOpacity: legendDeadZoneFillOpacity,
-                            ),
-                            LegendRow(
-                              color: Color(0xFFA855F7),
-                              text: 'Noisy',
-                              range: 'Good signal, bad SNR',
-                            ),
-                            LegendRow(
-                              color: Color(0xFF3B82F6),
-                              text: 'You',
-                              range: 'This device',
-                              marker: LegendLocationDot(),
-                            ),
-                          ],
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: legendExpandedWidth,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Align(
+                                alignment: Alignment.center,
+                                child: Icon(Icons.chevron_right, size: 16),
+                              ),
+                              SizedBox(height: 4),
+                              LegendRow(
+                                color: Color(0xFF22C55E),
+                                text: 'Excellent',
+                                range: 'RSSI > -90, SNR > 10',
+                              ),
+                              LegendRow(
+                                color: Color(0xFF4ADE80),
+                                text: 'Good',
+                                range: 'RSSI > -100, SNR > 0',
+                              ),
+                              LegendRow(
+                                color: Color(0xFFFACC15),
+                                text: 'Fair',
+                                range: 'RSSI > -110, SNR > -7',
+                              ),
+                              LegendRow(
+                                color: Color(0xFFF97316),
+                                text: 'Marginal',
+                                range: 'RSSI > -115, SNR > -13',
+                              ),
+                              LegendRow(
+                                color: Color(0xFFEF4444),
+                                text: 'Poor',
+                                range: 'Weak signal',
+                              ),
+                              LegendRow(
+                                color: deadZoneMapColor,
+                                text: 'Dead Zone',
+                                range: 'No response',
+                                fillOpacity: legendDeadZoneFillOpacity,
+                              ),
+                              LegendRow(
+                                color: Color(0xFFA855F7),
+                                text: 'Noisy',
+                                range: 'Good signal, bad SNR',
+                              ),
+                              LegendRow(
+                                color: Color(0xFF3B82F6),
+                                text: 'You',
+                                range: 'This device',
+                                marker: LegendLocationDot(),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -1468,43 +1487,45 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
               Positioned(
                 right: 12,
                 bottom: legendBottom,
-                child: Card(
-                  elevation: 1,
-                  child: InkWell(
-                    onTap: () {
-                      _markOverlayInteraction();
-                      _debugLog.info('ui_click', 'Legend expand click');
-                      setState(() => _legendExpanded = true);
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 8,
-                      ),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 220),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: const [
-                            LegendSwatch(color: Color(0xFF22C55E)),
-                            SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFF4ADE80)),
-                            SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFFFACC15)),
-                            SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFFF97316)),
-                            SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFFEF4444)),
-                            SizedBox(height: 4),
-                            LegendSwatch(
-                              color: deadZoneMapColor,
-                              fillOpacity: legendDeadZoneFillOpacity,
-                            ),
-                            SizedBox(height: 4),
-                            LegendSwatch(color: Color(0xFFA855F7)),
-                            SizedBox(height: 6),
-                            Icon(Icons.chevron_left, size: 16),
-                          ],
+                child: RepaintBoundary(
+                  child: Card(
+                    elevation: 1,
+                    child: InkWell(
+                      onTap: () {
+                        _markOverlayInteraction();
+                        _debugLog.info('ui_click', 'Legend expand click');
+                        setState(() => _legendExpanded = true);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 220),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: const [
+                              LegendSwatch(color: Color(0xFF22C55E)),
+                              SizedBox(height: 4),
+                              LegendSwatch(color: Color(0xFF4ADE80)),
+                              SizedBox(height: 4),
+                              LegendSwatch(color: Color(0xFFFACC15)),
+                              SizedBox(height: 4),
+                              LegendSwatch(color: Color(0xFFF97316)),
+                              SizedBox(height: 4),
+                              LegendSwatch(color: Color(0xFFEF4444)),
+                              SizedBox(height: 4),
+                              LegendSwatch(
+                                color: deadZoneMapColor,
+                                fillOpacity: legendDeadZoneFillOpacity,
+                              ),
+                              SizedBox(height: 4),
+                              LegendSwatch(color: Color(0xFFA855F7)),
+                              SizedBox(height: 6),
+                              Icon(Icons.chevron_left, size: 16),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -1683,31 +1704,33 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             Positioned(
               left: 12,
               bottom: statsBottom,
-              child: Builder(
-                builder: (context) {
-                  final screenWidth = MediaQuery.of(context).size.width;
-                  final statsWidth = screenWidth < 520
-                      ? screenWidth - 24
-                      : 420.0;
-                  return SizedBox(
-                    width: statsWidth,
-                    child: ScanStatsPanel(
-                      nodesCount: scopedNodesCount,
-                      isConnected: widget.bleConnected,
-                      activeZones: activeZonesLength,
-                      deadZones: deadZonesLength,
-                      avgRssi: avgRssi,
-                      avgSnr: avgSnr,
-                      statsRadiusMiles: widget.statsRadiusMiles,
-                      unitSystem: widget.unitSystem,
-                      hasObserver:
-                          widget.observerLat != null &&
-                          widget.observerLng != null,
-                      onTapNodes: widget.onTapNodes,
-                      onTapScans: widget.onTapScans,
-                    ),
-                  );
-                },
+              child: RepaintBoundary(
+                child: Builder(
+                  builder: (context) {
+                    final screenWidth = MediaQuery.of(context).size.width;
+                    final statsWidth = screenWidth < 520
+                        ? screenWidth - 24
+                        : 420.0;
+                    return SizedBox(
+                      width: statsWidth,
+                      child: ScanStatsPanel(
+                        nodesCount: scopedNodesCount,
+                        isConnected: widget.bleConnected,
+                        activeZones: activeZonesLength,
+                        deadZones: deadZonesLength,
+                        avgRssi: avgRssi,
+                        avgSnr: avgSnr,
+                        statsRadiusMiles: widget.statsRadiusMiles,
+                        unitSystem: widget.unitSystem,
+                        hasObserver:
+                            widget.observerLat != null &&
+                            widget.observerLng != null,
+                        onTapNodes: widget.onTapNodes,
+                        onTapScans: widget.onTapScans,
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
             if (_selectedZone != null)

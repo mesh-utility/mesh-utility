@@ -924,8 +924,31 @@ class AppState extends ChangeNotifier {
   Future<void> get tileZonesSettled => _tileZonesSettled;
 
   bool _hexFetchRunning = false;
+
+  /// Latest viewport requested while [_hexFetchRunning] is true. Run once
+  /// when the current fetch finishes. [force] is OR-ed across those requests.
+  bool _pendingHexFetch = false;
+  bool _pendingHexForce = false;
+  bool _pendingHexHasViewport = false;
+  double? _pendingSouth;
+  double? _pendingNorth;
+  double? _pendingWest;
+  double? _pendingEast;
+
   List<HexDetail> _hexIndex = const <HexDetail>[];
   String? _hexIndexKey;
+  final Map<String, Future<List<HexDetail>>> _hexIndexInflight =
+      <String, Future<List<HexDetail>>>{};
+
+  /// Test stand-in for the hex-index HTTP fetch. Null in production.
+  @visibleForTesting
+  Future<List<HexDetail>> Function({
+    required bool world,
+    required int days,
+    required bool includeNodes,
+    ({double south, double north, double west, double east})? bounds,
+  })?
+  debugHexIndexFetch;
   List<MeshNode> nodes = const [];
   List<ScanResult> scanResults = const [];
   List<MeshNode>? _advertisedNodes;
@@ -1353,6 +1376,21 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  @visibleForTesting
+  Future<List<HexDetail>?> debugLoadHexIndex({
+    required int days,
+    required bool includeNodes,
+    bool forCacheArea = false,
+    ({double south, double north, double west, double east})? viewport,
+  }) {
+    return _loadHexIndex(
+      days: days,
+      includeNodes: includeNodes,
+      forCacheArea: forCacheArea,
+      viewport: viewport,
+    );
+  }
+
   Future<List<HexDetail>?> _loadHexIndex({
     required int days,
     required bool includeNodes,
@@ -1398,29 +1436,63 @@ class AppState extends ChangeNotifier {
     final key =
         '${useWorld ? "world" : "vp"}:$days:$includeNodes:${isGlobal ? "global" : bounds}';
     if (key == _hexIndexKey && _hexIndex.isNotEmpty) return _hexIndex;
+    final existing = _hexIndexInflight[key];
+    if (existing != null) return existing;
+
+    final future = _fetchHexIndex(
+      world: useWorld,
+      days: days,
+      includeNodes: includeNodes,
+      bounds: bounds,
+    );
+    _hexIndexInflight[key] = future;
+    try {
+      final details = await future;
+      // A force reset removes this entry so the stale body does not refill
+      // the index that the fresh request is about to replace.
+      if (identical(_hexIndexInflight[key], future)) {
+        _hexIndex = details;
+        _hexIndexKey = key;
+      }
+      return details;
+    } finally {
+      if (identical(_hexIndexInflight[key], future)) {
+        _hexIndexInflight.remove(key);
+      }
+    }
+  }
+
+  Future<List<HexDetail>> _fetchHexIndex({
+    required bool world,
+    required int days,
+    required bool includeNodes,
+    required ({double south, double north, double west, double east})? bounds,
+  }) {
+    final debugFetch = debugHexIndexFetch;
+    if (debugFetch != null) {
+      return debugFetch(
+        world: world,
+        days: days,
+        includeNodes: includeNodes,
+        bounds: bounds,
+      );
+    }
     final api = WorkerApi(
       AppConfig.deployedWorkerUrl,
       fallbackBaseUrl: AppConfig.fallbackWorkerUrl,
       staticDataBaseUrl: AppConfig.staticDataUrl,
     );
-    List<HexDetail> details;
-    if (useWorld) {
-      details = await api.fetchHexWorld(days: days, includeNodes: includeNodes);
-    } else if (bounds != null) {
-      details = await api.fetchHexViewport(
-        minLatitude: bounds.south,
-        maxLatitude: bounds.north,
-        minLongitude: bounds.west,
-        maxLongitude: bounds.east,
-        days: days,
-        includeNodes: includeNodes,
-      );
-    } else {
-      details = await api.fetchHexWorld(days: days, includeNodes: includeNodes);
+    if (world || bounds == null) {
+      return api.fetchHexWorld(days: days, includeNodes: includeNodes);
     }
-    _hexIndex = details;
-    _hexIndexKey = key;
-    return details;
+    return api.fetchHexViewport(
+      minLatitude: bounds.south,
+      maxLatitude: bounds.north,
+      minLongitude: bounds.west,
+      maxLongitude: bounds.east,
+      days: days,
+      includeNodes: includeNodes,
+    );
   }
 
   Future<void> _loadCachedHistory() async {
@@ -1634,8 +1706,7 @@ class AppState extends ChangeNotifier {
     if ((previous.historyDays != settings.historyDays ||
             previous.forceOffline != settings.forceOffline) &&
         !settings.forceOffline) {
-      _hexIndex = const <HexDetail>[];
-      _hexIndexKey = null;
+      _discardHexIndex();
       _viewportDetailKey = null;
       unawaited(refreshVisibleHexDetail(force: true));
     }
@@ -1812,6 +1883,9 @@ class AppState extends ChangeNotifier {
   }
 
   /// Fetch indexed hex coverage for the current map viewport or Global world.
+  ///
+  /// A request that arrives while a fetch is running is kept — the latest
+  /// viewport, with [force] OR-ed — and run once that fetch finishes.
   Future<void> refreshVisibleHexDetail({
     double? south,
     double? north,
@@ -1820,22 +1894,112 @@ class AppState extends ChangeNotifier {
     bool force = false,
   }) async {
     if (settings.forceOffline) return;
-    if (_hexFetchRunning) return;
+    if (_hexFetchRunning) {
+      if (_hexViewportGiven(south, north, west, east) || force) {
+        _rememberPendingHexFetch(
+          south: south,
+          north: north,
+          west: west,
+          east: east,
+          force: force,
+        );
+      }
+      return;
+    }
+    if (!_hexViewportGiven(south, north, west, east) && !force) return;
+
+    var fetchSouth = south;
+    var fetchNorth = north;
+    var fetchWest = west;
+    var fetchEast = east;
+    var fetchForce = force;
+
+    _hexFetchRunning = true;
+    mapLoading.value = true;
+    try {
+      while (true) {
+        await _fetchVisibleHexes(
+          south: fetchSouth,
+          north: fetchNorth,
+          west: fetchWest,
+          east: fetchEast,
+          force: fetchForce,
+        );
+        final pending = _takePendingHexFetch();
+        if (pending == null) break;
+        fetchSouth = pending.south;
+        fetchNorth = pending.north;
+        fetchWest = pending.west;
+        fetchEast = pending.east;
+        fetchForce = pending.force;
+      }
+    } finally {
+      _hexFetchRunning = false;
+      if (!_tileZonesBuilding) mapLoading.value = false;
+    }
+  }
+
+  bool _hexViewportGiven(
+    double? south,
+    double? north,
+    double? west,
+    double? east,
+  ) {
+    return south != null && north != null && west != null && east != null;
+  }
+
+  void _rememberPendingHexFetch({
+    double? south,
+    double? north,
+    double? west,
+    double? east,
+    required bool force,
+  }) {
+    if (_hexViewportGiven(south, north, west, east)) {
+      _pendingSouth = south;
+      _pendingNorth = north;
+      _pendingWest = west;
+      _pendingEast = east;
+      _pendingHexHasViewport = true;
+    }
+    _pendingHexForce = _pendingHexForce || force;
+    _pendingHexFetch = true;
+  }
+
+  ({double? south, double? north, double? west, double? east, bool force})?
+  _takePendingHexFetch() {
+    if (!_pendingHexFetch) return null;
+    final pending = (
+      south: _pendingHexHasViewport ? _pendingSouth : null,
+      north: _pendingHexHasViewport ? _pendingNorth : null,
+      west: _pendingHexHasViewport ? _pendingWest : null,
+      east: _pendingHexHasViewport ? _pendingEast : null,
+      force: _pendingHexForce,
+    );
+    _pendingHexFetch = false;
+    _pendingHexForce = false;
+    _pendingHexHasViewport = false;
+    _pendingSouth = null;
+    _pendingNorth = null;
+    _pendingWest = null;
+    _pendingEast = null;
+    return pending;
+  }
+
+  Future<void> _fetchVisibleHexes({
+    double? south,
+    double? north,
+    double? west,
+    double? east,
+    required bool force,
+  }) async {
     final s = south, n = north, w = west, e = east;
     if (s != null && n != null && w != null && e != null) {
       _lastViewport = (south: s, north: n, west: w, east: e);
     }
-    if (s == null || n == null || w == null || e == null) {
-      // No camera yet: keep prior tiles.
-      if (!force) return;
-    }
-    _hexFetchRunning = true;
-    mapLoading.value = true;
+    if ((s == null || n == null || w == null || e == null) && !force) return;
     try {
-      if (force) {
-        _hexIndex = const <HexDetail>[];
-        _hexIndexKey = null;
-      }
+      if (force) _discardHexIndex();
       final details = await _loadHexIndex(
         days: settings.historyDays,
         includeNodes: false,
@@ -1847,10 +2011,14 @@ class AppState extends ChangeNotifier {
       applyHexIndexToTiles(details);
     } catch (error) {
       _debugLog.warn('hex_detail', 'Hex index refresh failed: $error');
-    } finally {
-      _hexFetchRunning = false;
-      if (!_tileZonesBuilding) mapLoading.value = false;
     }
+  }
+
+  /// Drops the cached index and any fetch still publishing into it.
+  void _discardHexIndex() {
+    _hexIndex = const <HexDetail>[];
+    _hexIndexKey = null;
+    _hexIndexInflight.clear();
   }
 
   /// Rebuilds [tileCoverageZones] from [details] and notifies listeners.

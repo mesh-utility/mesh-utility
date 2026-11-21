@@ -479,4 +479,62 @@ void main() {
       expect(selected.points, zones[10].polygon);
     });
   });
+
+  group('mapDrawSignature', () {
+    test('same ids and styles match; a style change does not', () {
+      List<MapDrawPolygon> polygons({
+        required double rssi,
+        required double latShift,
+      }) {
+        return <MapDrawPolygon>[
+          MapDrawPolygon(
+            hitZoneId: 'hex-a',
+            points: <LatLng>[
+              LatLng(1 + latShift, 2),
+              LatLng(1 + latShift, 3),
+              LatLng(2 + latShift, 2.5),
+            ],
+            isDeadZone: false,
+            avgRssi: rssi,
+            avgSnr: 4,
+            childCount: 2,
+            coveredCount: 1,
+            scale: mapTrueSizeScale,
+          ),
+          MapDrawPolygon(
+            hitZoneId: 'hex-b',
+            points: <LatLng>[
+              LatLng(4 + latShift, 5),
+              LatLng(4 + latShift, 6),
+              LatLng(5 + latShift, 5.5),
+              LatLng(4.5 + latShift, 5.2),
+            ],
+            isDeadZone: true,
+            avgRssi: null,
+            avgSnr: null,
+            childCount: 1,
+            coveredCount: 0,
+            scale: mapTrueSizeScale,
+          ),
+        ];
+      }
+
+      final first = MapRenderPlan(polygons: polygons(rssi: -80, latShift: 0));
+      final sameStyle = MapRenderPlan(
+        polygons: polygons(rssi: -80, latShift: 3),
+      );
+      final restyled = MapRenderPlan(
+        polygons: polygons(rssi: -70, latShift: 0),
+      );
+
+      expect(
+        mapDrawSignature(first.polygons),
+        mapDrawSignature(sameStyle.polygons),
+      );
+      expect(
+        mapDrawSignature(first.polygons),
+        isNot(mapDrawSignature(restyled.polygons)),
+      );
+    });
+  });
 }

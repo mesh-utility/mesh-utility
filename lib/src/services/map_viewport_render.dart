@@ -391,6 +391,8 @@ Future<List<HexCoverageCluster>> _aggregateCoverageOffUi(
   return aggregateCoverageHexesOffUi(zones, scale: scale);
 }
 
+/// Identity of one draw. Outlines come from the cell id on a fixed grid,
+/// so vertex positions are not hashed.
 int mapDrawSignature(List<MapDrawPolygon> drawn) {
   var hash = drawn.length.hashCode;
   for (final polygon in drawn) {
@@ -405,9 +407,6 @@ int mapDrawSignature(List<MapDrawPolygon> drawn) {
       polygon.scale,
       polygon.points.length,
     );
-    for (final point in polygon.points) {
-      hash = Object.hash(hash, point.latitude, point.longitude);
-    }
   }
   return hash;
 }
