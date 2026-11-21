@@ -226,7 +226,10 @@ List<CoverageZone> dedupeCoverageZonesByCell(
 ]) {
   final seen = <String>{};
   final out = <CoverageZone>[];
-  for (final zone in <CoverageZone>[...preferred, ...extra]) {
+  for (final zone in preferred) {
+    if (seen.add(coverageZoneCellId(zone))) out.add(zone);
+  }
+  for (final zone in extra) {
     if (seen.add(coverageZoneCellId(zone))) out.add(zone);
   }
   return out;

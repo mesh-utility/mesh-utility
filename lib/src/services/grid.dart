@@ -25,9 +25,16 @@ const double colSpacing = hexSize * 1.7320508075688772 * lngScale;
   final rowSpace = rowSpacing * safeScale;
   final colSpace = colSpacing * safeScale;
   final row = (lat / rowSpace).round();
-  final col = ((lng - _rowOffset(row, colSpace)) / colSpace).round();
-  final center = hexCellCenter(row, col, scale: safeScale);
-  return (row: row, col: col, lat: center.lat, lng: center.lng);
+  // Same offset hexCellCenter would use. Computed once so the center does
+  // not repeat the scale multiply.
+  final colOffset = _rowOffset(row, colSpace);
+  final col = ((lng - colOffset) / colSpace).round();
+  return (
+    row: row,
+    col: col,
+    lat: row * rowSpace,
+    lng: col * colSpace + colOffset,
+  );
 }
 
 double _rowOffset(int row, double colSpace) {
@@ -98,8 +105,8 @@ List<LatLng> hexVertices(double centerLat, double centerLng, {int scale = 1}) {
 }
 
 String hexKey(double lat, double lng) {
-  final snapped = snapToHexGrid(lat, lng);
-  return '${snapped.snapLat.toStringAsFixed(6)}:${snapped.snapLng.toStringAsFixed(6)}';
+  final cell = hexCellAt(lat, lng);
+  return '${cell.lat.toStringAsFixed(6)}:${cell.lng.toStringAsFixed(6)}';
 }
 
 /// Index id used by [coverageZonesFromHexDetails] (`hex:row:col`).

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
 
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart' show ValueGetter, ValueListenable;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:intl/intl.dart';
@@ -96,6 +96,7 @@ class MapPage extends StatefulWidget {
     this.onClearFocusNodeId,
     this.onClearFocusHexId,
     this.mapLoading,
+    this.onBackHandler,
   });
 
   final List<CoverageZone> zones;
@@ -157,6 +158,10 @@ class MapPage extends StatefulWidget {
   /// Without this, creating the page again selects the hex and the popup
   /// is still there when the user comes back.
   final VoidCallback? onClearFocusHexId;
+
+  /// Registered from [State.initState] and cleared from [State.dispose].
+  /// The hook closes an open hex or cluster popup and returns true when it did.
+  final void Function(ValueGetter<bool>? handleBack)? onBackHandler;
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -225,11 +230,23 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   MapRenderViewport? _appliedViewport;
   late final SettleDebouncer<MapRenderViewport> _viewportHexes;
   _MapDataset? _dataset;
+
+  /// Zone list last used for [_dataset]. A new list with the same
+  /// [coverageFilterIdentity] must not redo the scoped-node walk.
+  List<CoverageZone>? _datasetZoneRef;
+  _ScopedScanNodesMemo? _scopedScanNodesMemo;
   final _ScopedNodeKeysMemo _scopedNodeKeysMemo = _ScopedNodeKeysMemo();
+  List<ScanResult>? _nodeHexScans;
+  String? _nodeHexFilter;
+  Set<String>? _nodeHexes;
+  List<ScanResult>? _filterHexScans;
+  int? _filterHexHash;
+  Set<String>? _filterHexes;
 
   @override
   void initState() {
     super.initState();
+    widget.onBackHandler?.call(_handleSystemBack);
     _viewportHexes = SettleDebouncer<MapRenderViewport>(
       delay: viewportHexSettleDelay,
       isSame: _sameViewport,
@@ -334,6 +351,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     if (focusChanged && (widget.focusHexId ?? '').isNotEmpty) {
       _suppressHexFocus = false;
       _appliedFocusHexId = null;
+      _unloadedFocusJumpedId = null;
     }
     final focusNeedsApply = shouldApplyMapHexFocus(
       focusHexId: widget.focusHexId,
@@ -361,6 +379,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    widget.onBackHandler?.call(null);
     _mapClosed = true;
     WidgetsBinding.instance.removeObserver(this);
     _viewportHexes.cancel();
@@ -372,6 +391,14 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   bool get _hexPopupOpen => _selectedZone != null || _clusterPopup != null;
+
+  /// System back. Closes the hex popup, the cluster popup, or that same
+  /// overlay card, and reports that the event was consumed.
+  bool _handleSystemBack() {
+    if (!mounted || !_hexPopupOpen) return false;
+    _dismissHexPopup('system back');
+    return true;
+  }
 
   void _clearHexPopupFields([String reason = 'clear']) {
     if (_hexPopupOpen) {
@@ -674,6 +701,14 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   String? _hexDetailZoneId;
   bool _hexDetailLoading = false;
 
+  /// Latest scan shown in the selected-zone popup. Rebuilt only when the
+  /// zone, the scan lists, or the node filter changes. Camera moves rebuild
+  /// this page many times; repeating the raw-scan walk was the history-focus lag.
+  _ZoneScanMemo? _zoneScanMemo;
+
+  /// Focus id whose camera already moved while its zone was still absent.
+  String? _unloadedFocusJumpedId;
+
   void _loadHexDetail(CoverageZone zone) {
     final fetch = widget.onFetchHexDetail;
     if (fetch == null || parseHexDetailId(zone.id) == null) {
@@ -687,15 +722,24 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _hexDetailZoneId = zone.id;
     _hexDetailLoading = true;
     _hexDetailLoaded = false;
-    fetch(zone.id).then((scans) {
-      if (!mounted || _hexDetailZoneId != zone.id) return;
-      setState(() {
-        _hexDetailScans = scans;
-        _hexDetailLoading = false;
-        _hexDetailLoaded = true;
-        _lastPopupDebugSignature = null;
-      });
-    });
+    fetch(zone.id)
+        .then((scans) {
+          if (!mounted || _mapClosed || _hexDetailZoneId != zone.id) return;
+          setState(() {
+            _hexDetailScans = scans;
+            _hexDetailLoading = false;
+            _hexDetailLoaded = true;
+            _lastPopupDebugSignature = null;
+          });
+        })
+        .catchError((Object error) {
+          if (!mounted || _mapClosed || _hexDetailZoneId != zone.id) return;
+          _debugLog.warn('popup', 'Hex detail fetch failed: $error');
+          setState(() {
+            _hexDetailLoading = false;
+            _hexDetailLoaded = false;
+          });
+        });
   }
 
   void _handleBatchHit(String zoneId) {
@@ -736,16 +780,18 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   void _focusZone(CoverageZone zone) {
+    final lat = zone.centerLat;
+    final lng = zone.centerLng;
+    if (!lat.isFinite || !lng.isFinite) return;
     final targetZoom = capFocusZoom(16.4);
     final pixelsDown = (_mapViewportHeight * 0.23).clamp(96.0, 190.0);
     final metersPerPixel =
-        156543.03392 * cos(zone.centerLat * pi / 180.0) / pow(2.0, targetZoom);
+        156543.03392 * cos(lat * pi / 180.0) / pow(2.0, targetZoom);
+    if (!metersPerPixel.isFinite) return;
     final metersDown = pixelsDown * metersPerPixel;
-    final latOffset = metersDown / 111320.0;
-    _mapController.move(
-      LatLng(zone.centerLat + latOffset, zone.centerLng),
-      targetZoom,
-    );
+    final shifted = lat + metersDown / 111320.0;
+    if (!shifted.isFinite) return;
+    _mapController.move(LatLng(shifted, lng), targetZoom);
   }
 
   void _maybeAutoCenterOnObserver() {
@@ -821,6 +867,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     )) {
       return false;
     }
+    if (!mounted || hexId == null) return false;
     CoverageZone? zone;
     for (final z in widget.zones) {
       if (z.id == hexId) {
@@ -828,7 +875,13 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         break;
       }
     }
-    if (zone == null || !mounted) return false;
+    if (zone == null) {
+      // The cell is not in the loaded set yet. Move anyway so the viewport
+      // fetch asks for it, and select it when that zone arrives. Do not mark
+      // the focus applied until then.
+      if (!_mapReady) return false;
+      return _jumpToUnloadedFocusHex(hexId);
+    }
     _appliedFocusHexId = hexId;
     setState(() {
       _selectedZone = zone;
@@ -841,20 +894,66 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     return true;
   }
 
+  /// Centers the camera on [hexId] before its [CoverageZone] exists.
+  ///
+  /// Index ids use [parseHexDetailId] and the [hexCellBounds] center. History
+  /// passes a [hexKey] (`lat:lng`); that is snapped to the same cell and uses
+  /// the same center. Returns false when the id has no cell.
+  bool _jumpToUnloadedFocusHex(String hexId) {
+    if (_unloadedFocusJumpedId == hexId) return true;
+    final center = _focusHexCenter(hexId);
+    if (center == null) return false;
+    _mapController.move(LatLng(center.lat, center.lng), capFocusZoom(16.4));
+    _unloadedFocusJumpedId = hexId;
+    return true;
+  }
+
+  ({ScanResult? latest, RawScan? latestRaw}) _memoizedSelectedZoneScans(
+    CoverageZone zone,
+    Set<String> nodeFilters,
+  ) {
+    final filterKey = _nodeFilterMemoKey(nodeFilters);
+    final cached = _zoneScanMemo;
+    if (cached != null &&
+        cached.zoneId == zone.id &&
+        identical(cached.scans, widget.scans) &&
+        identical(cached.rawScans, widget.rawScans) &&
+        identical(cached.hexDetailScans, _hexDetailScans) &&
+        cached.filterKey == filterKey) {
+      return (latest: cached.latest, latestRaw: cached.latestRaw);
+    }
+    final latest = _latestScanForZone(
+      zone,
+      widget.scans,
+      nodeIdFilters: nodeFilters,
+    );
+    final latestRaw = latest == null
+        ? _latestRawFromSources(
+            zone,
+            widget.rawScans,
+            _hexDetailScans,
+            nodeIdFilters: nodeFilters,
+          )
+        : null;
+    _zoneScanMemo = _ZoneScanMemo(
+      zoneId: zone.id,
+      scans: widget.scans,
+      rawScans: widget.rawScans,
+      hexDetailScans: _hexDetailScans,
+      filterKey: filterKey,
+      latest: latest,
+      latestRaw: latestRaw,
+    );
+    return (latest: latest, latestRaw: latestRaw);
+  }
+
   bool _focusNodeIfRequested() {
     if (_selectedNodeFilters.isNotEmpty) return false;
     final nodeId = widget.focusNodeId;
     if (nodeId == null || nodeId.isEmpty) return false;
     final nodeKey = _nodeFilterKey(nodeId);
     if (nodeKey.isEmpty) return false;
-    final nodeHexes = <String>{};
-    for (final scan in widget.scans) {
-      if (_nodeFilterKey(scan.nodeId) == nodeKey) {
-        nodeHexes.addAll(
-          coverageZoneIdsForPoint(scan.latitude, scan.longitude),
-        );
-      }
-    }
+    final nodeHexes = _hexesForNodeKey(nodeKey);
     if (nodeHexes.isEmpty) {
       _debugLog.warn(
         'map_filter',
@@ -1045,48 +1144,101 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     });
   }
 
+  /// Point ids for [filters]. Reused when the scan list and filters are stable
+  /// and only the zone list object changed.
+  Set<String> _hexesForFilters(Set<String> filters, int filterHash) {
+    if (identical(_filterHexScans, widget.scans) &&
+        _filterHexHash == filterHash &&
+        _filterHexes != null) {
+      return _filterHexes!;
+    }
+    final nodeHexes = <String>{};
+    for (final scan in widget.scans) {
+      final key = _nodeFilterKey(scan.nodeId);
+      if (key.isNotEmpty && filters.contains(key)) {
+        nodeHexes.addAll(
+          coverageZoneIdsForPoint(scan.latitude, scan.longitude),
+        );
+      }
+    }
+    _filterHexScans = widget.scans;
+    _filterHexHash = filterHash;
+    _filterHexes = nodeHexes;
+    return nodeHexes;
+  }
+
+  /// Point ids for one node. Zone-list rebuilds during focus reuse this.
+  Set<String> _hexesForNodeKey(String nodeKey) {
+    if (identical(_nodeHexScans, widget.scans) &&
+        _nodeHexFilter == nodeKey &&
+        _nodeHexes != null) {
+      return _nodeHexes!;
+    }
+    final nodeHexes = <String>{};
+    for (final scan in widget.scans) {
+      if (_nodeFilterKey(scan.nodeId) == nodeKey) {
+        nodeHexes.addAll(
+          coverageZoneIdsForPoint(scan.latitude, scan.longitude),
+        );
+      }
+    }
+    _nodeHexScans = widget.scans;
+    _nodeHexFilter = nodeKey;
+    _nodeHexes = nodeHexes;
+    return nodeHexes;
+  }
+
   _MapDataset _datasetFor({
     required String? focusNodeId,
     required Set<String> effectiveNodeFilters,
   }) {
     final cached = _dataset;
     final filterHash = _filterHash(effectiveNodeFilters);
-    if (cached != null &&
-        identical(cached.zones, widget.zones) &&
-        identical(cached.scans, widget.scans) &&
-        cached.radius == widget.statsRadiusMiles &&
-        cached.lat == widget.observerLat &&
-        cached.lng == widget.observerLng &&
-        cached.focusNodeId == focusNodeId &&
-        cached.selectedCount == _selectedNodeFilters.length &&
-        cached.filterHash == filterHash) {
-      _noteDataset(cached.filtered, cached.identity);
-      return cached;
-    }
-
-    final watch = Stopwatch()..start();
-    final baseZones = effectiveNodeFilters.isEmpty
-        ? widget.zones
-        : () {
-            final nodeHexes = <String>{};
-            for (final scan in widget.scans) {
-              final key = _nodeFilterKey(scan.nodeId);
-              if (key.isNotEmpty && effectiveNodeFilters.contains(key)) {
-                nodeHexes.addAll(
-                  coverageZoneIdsForPoint(scan.latitude, scan.longitude),
-                );
-              }
-            }
-            return widget.zones
-                .where((zone) => nodeHexes.contains(zone.id))
-                .toList(growable: false);
-          }();
-
     final bypassRadiusForNodeFocus =
         focusNodeId != null &&
         focusNodeId.isNotEmpty &&
         _selectedNodeFilters.isEmpty &&
         effectiveNodeFilters.isNotEmpty;
+    // Radius 0 (and node-focus bypass) does not use the observer fix, so a
+    // GPS tick must not rebuild the dataset.
+    final observerStable =
+        bypassRadiusForNodeFocus ||
+        widget.statsRadiusMiles == 0 ||
+        (cached != null &&
+            cached.lat == widget.observerLat &&
+            cached.lng == widget.observerLng);
+    int? inputIdentity;
+    if (cached != null &&
+        identical(cached.scans, widget.scans) &&
+        cached.radius == widget.statsRadiusMiles &&
+        cached.focusNodeId == focusNodeId &&
+        cached.selectedCount == _selectedNodeFilters.length &&
+        cached.filterHash == filterHash &&
+        observerStable) {
+      if (identical(_datasetZoneRef, widget.zones)) {
+        _noteDataset(cached.filtered, cached.identity);
+        return cached;
+      }
+      // New list, same cells. Keep the previous scoped-node result.
+      inputIdentity = coverageFilterIdentity(widget.zones);
+      if (cached.inputIdentity == inputIdentity) {
+        _datasetZoneRef = widget.zones;
+        _noteDataset(cached.filtered, cached.identity);
+        return cached;
+      }
+    }
+
+    final watch = Stopwatch()..start();
+    final List<CoverageZone> baseZones;
+    if (effectiveNodeFilters.isEmpty) {
+      baseZones = widget.zones;
+    } else {
+      final nodeHexes = _hexesForFilters(effectiveNodeFilters, filterHash);
+      baseZones = widget.zones
+          .where((zone) => nodeHexes.contains(zone.id))
+          .toList(growable: false);
+    }
+
     final filteredZones = bypassRadiusForNodeFocus
         ? baseZones
         : _filterZonesByRadius(
@@ -1095,30 +1247,30 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             observerLng: widget.observerLng,
             radiusMiles: widget.statsRadiusMiles,
           );
-    final identity = coverageFilterIdentity(filteredZones);
+    final resolvedInputIdentity =
+        inputIdentity ?? coverageFilterIdentity(widget.zones);
+    final identity = identical(filteredZones, widget.zones)
+        ? resolvedInputIdentity
+        : coverageFilterIdentity(filteredZones);
     // Filters already ran. Aggregation and the polygon cache see only this list.
     _noteDataset(filteredZones, identity);
-    final filteredZoneIds = filteredZones.map((z) => z.id).toSet();
-    final scopedNodeIds = <String>{};
-    for (final scan in widget.scans) {
-      final nodeKey = _nodeFilterKey(scan.nodeId);
-      if (nodeKey.isEmpty) continue;
-      if (effectiveNodeFilters.isNotEmpty &&
-          !effectiveNodeFilters.contains(nodeKey)) {
-        continue;
-      }
-      if (filteredZoneIds
-          .intersection(coverageZoneIdsForPoint(scan.latitude, scan.longitude))
-          .isEmpty) {
-        continue;
-      }
-      scopedNodeIds.add(nodeKey);
-    }
+    final scanNodeIds = _scopedScanNodeIds(
+      filteredZones: filteredZones,
+      zoneIdentity: identity,
+      filterHash: filterHash,
+      nodeFilters: effectiveNodeFilters,
+    );
     // Index-fed map: raw scans are often not loaded, so also count the heard
     // nodes the hex index lists for the shown cells (same data as the map).
-    scopedNodeIds.addAll(
-      _scopedNodeKeysMemo.keysFor(filteredZones, effectiveNodeFilters),
+    final zoneNodeKeys = _scopedNodeKeysMemo.keysFor(
+      filteredZones,
+      effectiveNodeFilters,
+      identity,
     );
+    var scopedCount = scanNodeIds.length;
+    for (final key in zoneNodeKeys) {
+      if (!scanNodeIds.contains(key)) scopedCount++;
+    }
     if (effectiveNodeFilters.isNotEmpty) {
       final filterLabel = _selectedNodeFilters.isNotEmpty
           ? 'custom(${effectiveNodeFilters.length})'
@@ -1135,18 +1287,33 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     } else {
       _lastNodeFilterDebugSignature = null;
     }
-    var active = 0;
-    var dead = 0;
-    var rssiSum = 0.0;
-    var snrSum = 0.0;
-    for (final zone in filteredZones) {
-      if (zone.isDeadZone) {
-        dead += 1;
-        continue;
+    final int active;
+    final int dead;
+    final double avgRssi;
+    final double avgSnr;
+    if (cached != null && cached.identity == identity) {
+      active = cached.active;
+      dead = cached.dead;
+      avgRssi = cached.avgRssi;
+      avgSnr = cached.avgSnr;
+    } else {
+      var activeCount = 0;
+      var deadCount = 0;
+      var rssiSum = 0.0;
+      var snrSum = 0.0;
+      for (final zone in filteredZones) {
+        if (zone.isDeadZone) {
+          deadCount += 1;
+          continue;
+        }
+        activeCount += 1;
+        rssiSum += zone.avgRssi ?? 0;
+        snrSum += zone.avgSnr ?? 0;
       }
-      active += 1;
-      rssiSum += zone.avgRssi ?? 0;
-      snrSum += zone.avgSnr ?? 0;
+      active = activeCount;
+      dead = deadCount;
+      avgRssi = activeCount == 0 ? 0 : rssiSum / activeCount;
+      avgSnr = activeCount == 0 ? 0 : snrSum / activeCount;
     }
     final next = _MapDataset(
       zones: widget.zones,
@@ -1159,13 +1326,15 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       filterHash: filterHash,
       filtered: filteredZones,
       identity: identity,
-      scopedNodes: scopedNodeIds.length,
+      inputIdentity: resolvedInputIdentity,
+      scopedNodes: scopedCount,
       active: active,
       dead: dead,
-      avgRssi: active == 0 ? 0 : rssiSum / active,
-      avgSnr: active == 0 ? 0 : snrSum / active,
+      avgRssi: avgRssi,
+      avgSnr: avgSnr,
     );
     _dataset = next;
+    _datasetZoneRef = widget.zones;
     final elapsed = watch.elapsedMilliseconds;
     if (widget.zones.length >= 250 ||
         widget.scans.length >= 250 ||
@@ -1178,6 +1347,33 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       );
     }
     return next;
+  }
+
+  Set<String> _scopedScanNodeIds({
+    required List<CoverageZone> filteredZones,
+    required int zoneIdentity,
+    required int filterHash,
+    required Set<String> nodeFilters,
+  }) {
+    final memo = _scopedScanNodesMemo;
+    if (memo != null &&
+        identical(memo.scans, widget.scans) &&
+        memo.filterHash == filterHash &&
+        memo.zoneIdentity == zoneIdentity) {
+      return memo.ids;
+    }
+    final ids = scopedNodeIdsFromScans(
+      scans: widget.scans,
+      filteredZoneIds: filteredZones.map((zone) => zone.id).toSet(),
+      nodeFilters: nodeFilters,
+    );
+    _scopedScanNodesMemo = _ScopedScanNodesMemo(
+      scans: widget.scans,
+      filterHash: filterHash,
+      zoneIdentity: zoneIdentity,
+      ids: ids,
+    );
+    return ids;
   }
 
   int _filterHash(Set<String> filters) {
@@ -1741,31 +1937,19 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                   constraints: BoxConstraints(maxWidth: popupWidth),
                   child: Builder(
                     builder: (context) {
-                      final cachedLatest = _latestScanForZone(
+                      final lookedUp = _memoizedSelectedZoneScans(
                         _selectedZone!,
-                        widget.scans,
-                        nodeIdFilters: effectiveNodeFilters,
+                        effectiveNodeFilters,
                       );
                       // Same observer name and SNR in as Cell History once
                       // the tapped cell's detail has loaded.
-                      final latest = cachedLatest == null
+                      final latest = lookedUp.latest == null
                           ? null
                           : enrichScanWithHexDetail(
-                              cachedLatest,
+                              lookedUp.latest!,
                               _hexDetailScans,
                             );
-                      final latestRaw = latest == null
-                          ? _latestRawScanForZone(
-                              _selectedZone!,
-                              _hexDetailScans.isEmpty
-                                  ? widget.rawScans
-                                  : <RawScan>[
-                                      ...widget.rawScans,
-                                      ..._hexDetailScans,
-                                    ],
-                              nodeIdFilters: effectiveNodeFilters,
-                            )
-                          : null;
+                      final latestRaw = lookedUp.latestRaw;
                       final hasSuccessfulScan =
                           latest != null && latest.rssi.isFinite;
                       final hasSuccessfulRaw =
@@ -2533,30 +2717,36 @@ ScanResult? _latestScanForZone(
   List<ScanResult> scans, {
   Set<String> nodeIdFilters = const <String>{},
 }) {
+  if (scans.isEmpty) return null;
   final zoneIdCenter = _parseHexKey(zone.id);
+  // Only hex:row:col is a cell id here. A bare "12:34" parses as a cell and
+  // as lat/lng; scan results keep the coordinate match.
+  final indexCell = zone.id.startsWith('hex:')
+      ? parseHexDetailId(zone.id)
+      : null;
+  final bounds = _matchBounds(
+    indexCell: indexCell,
+    zoneIdCenter: indexCell == null ? zoneIdCenter : null,
+  );
   ScanResult? latest;
   for (final scan in scans) {
     if (nodeIdFilters.isNotEmpty) {
       final key = _nodeFilterKey(scan.nodeId);
       if (key.isEmpty || !nodeIdFilters.contains(key)) continue;
     }
-    bool matches = false;
-    if (coverageZoneIdMatchesPoint(zone.id, scan.latitude, scan.longitude)) {
-      matches = true;
-    } else {
-      final snapped = snapToHexGrid(scan.latitude, scan.longitude);
-      if (zoneIdCenter != null) {
-        final zoneIdLat = zoneIdCenter.$1;
-        final zoneIdLng = zoneIdCenter.$2;
-        final bySnappedCenter =
-            (snapped.snapLat - zoneIdLat).abs() < 1e-6 &&
-            (snapped.snapLng - zoneIdLng).abs() < 1e-6;
-        if (bySnappedCenter) {
-          matches = true;
-        }
-      }
+    final lat = scan.latitude;
+    final lng = scan.longitude;
+    if (bounds != null && _outsideBounds(lat, lng, bounds)) continue;
+    if (!_pointMatchesZone(
+      zoneId: zone.id,
+      lat: lat,
+      lng: lng,
+      indexCell: indexCell,
+      zoneIdCenter: zoneIdCenter,
+      cellOnly: false,
+    )) {
+      continue;
     }
-    if (!matches) continue;
     if (latest == null || scan.timestamp.isAfter(latest.timestamp)) {
       latest = scan;
     }
@@ -2569,13 +2759,43 @@ String _zoneLocationLabel(CoverageZone zone) {
   return '${zone.centerLat.toStringAsFixed(5)}, ${zone.centerLng.toStringAsFixed(5)}';
 }
 
+/// Latest raw row in [primary], then [extra], without copying them together.
+/// Equal timestamps keep the [primary] row, matching the old concatenated walk.
+RawScan? _latestRawFromSources(
+  CoverageZone zone,
+  List<RawScan> primary,
+  List<RawScan> extra, {
+  Set<String> nodeIdFilters = const <String>{},
+}) {
+  final first = primary.isEmpty
+      ? null
+      : _latestRawScanForZone(zone, primary, nodeIdFilters: nodeIdFilters);
+  if (extra.isEmpty) return first;
+  final second = _latestRawScanForZone(
+    zone,
+    extra,
+    nodeIdFilters: nodeIdFilters,
+  );
+  if (first == null) return second;
+  if (second == null) return first;
+  if (second.effectiveTimestamp.isAfter(first.effectiveTimestamp)) {
+    return second;
+  }
+  return first;
+}
+
 RawScan? _latestRawScanForZone(
   CoverageZone zone,
   List<RawScan> scans, {
   Set<String> nodeIdFilters = const <String>{},
 }) {
+  if (scans.isEmpty) return null;
   final zoneIdCenter = _parseHexKey(zone.id);
   final tileCell = parseHexDetailId(zone.id);
+  final bounds = _matchBounds(
+    indexCell: tileCell,
+    zoneIdCenter: tileCell == null ? zoneIdCenter : null,
+  );
   RawScan? latest;
   for (final scan in scans) {
     if (nodeIdFilters.isNotEmpty) {
@@ -2585,33 +2805,122 @@ RawScan? _latestRawScanForZone(
         continue;
       }
     }
-    bool matches = false;
-    final scanHex = hexKey(scan.latitude, scan.longitude);
-    if (tileCell != null) {
-      final c = hexCellAt(scan.latitude, scan.longitude);
-      matches = c.row == tileCell.row && c.col == tileCell.col;
-    } else if (zone.id == scanHex) {
-      matches = true;
-    } else {
-      final snapped = snapToHexGrid(scan.latitude, scan.longitude);
-      if (zoneIdCenter != null) {
-        final zoneIdLat = zoneIdCenter.$1;
-        final zoneIdLng = zoneIdCenter.$2;
-        final bySnappedCenter =
-            (snapped.snapLat - zoneIdLat).abs() < 1e-6 &&
-            (snapped.snapLng - zoneIdLng).abs() < 1e-6;
-        if (bySnappedCenter) {
-          matches = true;
-        }
-      }
+    final lat = scan.latitude;
+    final lng = scan.longitude;
+    if (bounds != null && _outsideBounds(lat, lng, bounds)) continue;
+    if (!_pointMatchesZone(
+      zoneId: zone.id,
+      lat: lat,
+      lng: lng,
+      indexCell: tileCell,
+      zoneIdCenter: zoneIdCenter,
+      cellOnly: tileCell != null,
+    )) {
+      continue;
     }
-    if (!matches) continue;
     if (latest == null ||
         scan.effectiveTimestamp.isAfter(latest.effectiveTimestamp)) {
       latest = scan;
     }
   }
   return latest;
+}
+
+/// One [hexCellAt] per point. [cellOnly] is the raw-scan rule for a parsed
+/// cell id: row and column, with no lat/lng fallback.
+bool _pointMatchesZone({
+  required String zoneId,
+  required double lat,
+  required double lng,
+  required ({int row, int col})? indexCell,
+  required (double, double)? zoneIdCenter,
+  required bool cellOnly,
+}) {
+  final cell = hexCellAt(lat, lng);
+  if (indexCell != null &&
+      cell.row == indexCell.row &&
+      cell.col == indexCell.col) {
+    if (cellOnly) return true;
+    // Scan results match the hex index string, not a bare "row:col" that
+    // parseHexDetailId also accepts.
+    if (zoneId == 'hex:${cell.row}:${cell.col}') return true;
+  }
+  if (cellOnly) return false;
+  if (zoneIdCenter != null) {
+    return (cell.lat - zoneIdCenter.$1).abs() < 1e-6 &&
+        (cell.lng - zoneIdCenter.$2).abs() < 1e-6;
+  }
+  return zoneId ==
+      '${cell.lat.toStringAsFixed(6)}:${cell.lng.toStringAsFixed(6)}';
+}
+
+({double south, double north, double west, double east})? _matchBounds({
+  required ({int row, int col})? indexCell,
+  required (double, double)? zoneIdCenter,
+}) {
+  if (indexCell != null) {
+    return hexCellBounds(indexCell.row, indexCell.col);
+  }
+  if (zoneIdCenter == null) return null;
+  final lat = zoneIdCenter.$1;
+  final lng = zoneIdCenter.$2;
+  if (!lat.isFinite || !lng.isFinite) return null;
+  final cell = hexCellAt(lat, lng);
+  return hexCellBounds(cell.row, cell.col);
+}
+
+bool _outsideBounds(
+  double lat,
+  double lng,
+  ({double south, double north, double west, double east}) bounds,
+) {
+  return lat < bounds.south ||
+      lat > bounds.north ||
+      lng < bounds.west ||
+      lng > bounds.east;
+}
+
+/// Center of a focus id that is not in the zone list yet.
+({double lat, double lng})? _focusHexCenter(String hexId) {
+  var cell = parseHexDetailId(hexId);
+  if (cell == null) {
+    final key = _parseHexKey(hexId);
+    if (key == null || !key.$1.isFinite || !key.$2.isFinite) return null;
+    final at = hexCellAt(key.$1, key.$2);
+    cell = (row: at.row, col: at.col);
+  }
+  final bounds = hexCellBounds(cell.row, cell.col);
+  final lat = (bounds.south + bounds.north) / 2;
+  final lng = (bounds.west + bounds.east) / 2;
+  if (!lat.isFinite || !lng.isFinite) return null;
+  return (lat: lat, lng: lng);
+}
+
+String _nodeFilterMemoKey(Set<String> filters) {
+  if (filters.isEmpty) return '';
+  if (filters.length == 1) return filters.first;
+  final ordered = filters.toList()..sort();
+  return ordered.join(',');
+}
+
+class _ZoneScanMemo {
+  const _ZoneScanMemo({
+    required this.zoneId,
+    required this.scans,
+    required this.rawScans,
+    required this.hexDetailScans,
+    required this.filterKey,
+    required this.latest,
+    required this.latestRaw,
+  });
+
+  final String zoneId;
+  final List<ScanResult> scans;
+  final List<RawScan> rawScans;
+  final List<RawScan> hexDetailScans;
+  final String filterKey;
+  final ScanResult? latest;
+  final RawScan? latestRaw;
 }
 
 (double, double)? _parseHexKey(String value) {
@@ -2792,6 +3101,46 @@ bool _looksLikeObserverId(String value) {
   return hexOnly.length == 8 || hexOnly.length == 12 || hexOnly.length == 16;
 }
 
+/// Heard node keys for scans whose point lies in [filteredZoneIds].
+///
+/// Checks the two ids from [coverageZoneIdsForPoint] with [Set.contains].
+/// [Set.intersection] on the zone-id set walks every zone once per scan.
+Set<String> scopedNodeIdsFromScans({
+  required Iterable<ScanResult> scans,
+  required Set<String> filteredZoneIds,
+  Set<String> nodeFilters = const <String>{},
+}) {
+  if (scans.isEmpty || filteredZoneIds.isEmpty) return const <String>{};
+  final scoped = <String>{};
+  for (final scan in scans) {
+    final nodeKey = _nodeFilterKey(scan.nodeId);
+    if (nodeKey.isEmpty) continue;
+    if (nodeFilters.isNotEmpty && !nodeFilters.contains(nodeKey)) continue;
+    if (!coverageZoneIdsForPoint(
+      scan.latitude,
+      scan.longitude,
+    ).any(filteredZoneIds.contains)) {
+      continue;
+    }
+    scoped.add(nodeKey);
+  }
+  return scoped;
+}
+
+class _ScopedScanNodesMemo {
+  const _ScopedScanNodesMemo({
+    required this.scans,
+    required this.filterHash,
+    required this.zoneIdentity,
+    required this.ids,
+  });
+
+  final List<ScanResult> scans;
+  final int filterHash;
+  final int zoneIdentity;
+  final Set<String> ids;
+}
+
 /// Node filter keys for the heard nodes the hex index lists in [zones],
 /// limited to [nodeFilters] when any are set.
 Set<String> scopedNodeKeysFromZones(
@@ -2818,13 +3167,18 @@ class _ScopedNodeKeysMemo {
   List<CoverageZone>? _zones;
   Set<String> _filters = const <String>{};
   Set<String> _keys = const <String>{};
+  int? _identity;
 
-  Set<String> keysFor(List<CoverageZone> zones, Set<String> filters) {
+  Set<String> keysFor(
+    List<CoverageZone> zones,
+    Set<String> filters,
+    int identity,
+  ) {
+    final filtersMatch =
+        _filters.length == filters.length && _filters.containsAll(filters);
+    if (filtersMatch && _identity == identity) return _keys;
     final last = _zones;
-    if (last != null &&
-        last.length == zones.length &&
-        _filters.length == filters.length &&
-        _filters.containsAll(filters)) {
+    if (filtersMatch && last != null && last.length == zones.length) {
       var same = true;
       for (var i = 0; i < zones.length; i++) {
         if (!identical(last[i], zones[i])) {
@@ -2832,10 +3186,14 @@ class _ScopedNodeKeysMemo {
           break;
         }
       }
-      if (same) return _keys;
+      if (same) {
+        _identity = identity;
+        return _keys;
+      }
     }
     _zones = zones;
     _filters = Set<String>.of(filters);
+    _identity = identity;
     _keys = scopedNodeKeysFromZones(zones, filters);
     return _keys;
   }
@@ -3068,6 +3426,7 @@ class _MapDataset {
     required this.filterHash,
     required this.filtered,
     required this.identity,
+    required this.inputIdentity,
     required this.scopedNodes,
     required this.active,
     required this.dead,
@@ -3085,6 +3444,7 @@ class _MapDataset {
   final int filterHash;
   final List<CoverageZone> filtered;
   final int identity;
+  final int inputIdentity;
   final int scopedNodes;
   final int active;
   final int dead;

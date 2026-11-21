@@ -77,6 +77,52 @@ void main() {
     });
   });
 
+  test('points that snap to a cell lie inside its bounds', () {
+    const samples = <(double, double)>[
+      (0.0, 0.0),
+      (40.89015, -77.47827),
+      (39.5296, -119.8138),
+      (-33.8688, 151.2093),
+      (64.1, -21.9),
+    ];
+    for (final sample in samples) {
+      final cell = hexCellAt(sample.$1, sample.$2);
+      final bounds = hexCellBounds(cell.row, cell.col);
+      expect(cell.lat, inInclusiveRange(bounds.south, bounds.north));
+      expect(cell.lng, inInclusiveRange(bounds.west, bounds.east));
+      for (var latStep = -8; latStep <= 8; latStep++) {
+        for (var lngStep = -8; lngStep <= 8; lngStep++) {
+          final lat = cell.lat + latStep * rowSpacing / 8;
+          final lng = cell.lng + lngStep * colSpacing / 8;
+          final at = hexCellAt(lat, lng);
+          if (at.row != cell.row || at.col != cell.col) continue;
+          expect(lat, inInclusiveRange(bounds.south, bounds.north));
+          expect(lng, inInclusiveRange(bounds.west, bounds.east));
+        }
+      }
+    }
+  });
+
+  test('hexKey round-trips within the popup center tolerance', () {
+    const samples = <(double, double)>[
+      (0.0, 0.0),
+      (40.79, -77.86),
+      (39.5296, -119.8138),
+      (-33.8688, 151.2093),
+    ];
+    for (final sample in samples) {
+      final cell = hexCellAt(sample.$1, sample.$2);
+      final key = hexKey(sample.$1, sample.$2);
+      final parts = key.split(':');
+      final lat = double.parse(parts[0]);
+      final lng = double.parse(parts[1]);
+      expect((cell.lat - lat).abs(), lessThan(1e-6));
+      expect((cell.lng - lng).abs(), lessThan(1e-6));
+      expect(hexCellAt(lat, lng).row, cell.row);
+      expect(hexCellAt(lat, lng).col, cell.col);
+    }
+  });
+
   test('hexCellBounds contains only that cell center', () {
     const lat = 40.89015;
     const lng = -77.47827;

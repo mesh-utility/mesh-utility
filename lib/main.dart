@@ -216,6 +216,55 @@ bool backKeepsAppRunning({
   return !isWeb && platform == TargetPlatform.android;
 }
 
+/// Coverage map tab.
+const int mapTabIndex = 0;
+
+/// Nodes tab. Opening the map from here is restored by Back.
+const int nodesTabIndex = 2;
+
+/// Scan history tab. Opening the map from here is restored by Back.
+const int historyTabIndex = 3;
+
+enum AppBackAction { handledByPage, showTab, moveToBackground }
+
+class AppBackDecision {
+  const AppBackDecision.handledByPage()
+    : action = AppBackAction.handledByPage,
+      tab = null;
+
+  const AppBackDecision.showTab(this.tab) : action = AppBackAction.showTab;
+
+  const AppBackDecision.moveToBackground()
+    : action = AppBackAction.moveToBackground,
+      tab = null;
+
+  final AppBackAction action;
+  final int? tab;
+}
+
+/// Android back, in order:
+/// 1. An open map popup consumes the event.
+/// 2. The tab that opened the map (History or Nodes) is shown again.
+/// 3. Any other tab returns to the map.
+/// 4. The map sends the app to the background. The route is not popped.
+AppBackDecision decideAppBack({
+  required bool mapHandled,
+  required int? backTarget,
+  required int index,
+}) {
+  if (mapHandled) return const AppBackDecision.handledByPage();
+  final target = backTarget;
+  if (target != null) return AppBackDecision.showTab(target);
+  if (index != mapTabIndex) return const AppBackDecision.showTab(mapTabIndex);
+  return const AppBackDecision.moveToBackground();
+}
+
+/// History stays mounted while the map opened from it is showing, so Back
+/// restores the list scroll and filters.
+bool keepHistoryListMounted({required int index, required int? backTarget}) {
+  return backTarget == historyTabIndex && index != historyTabIndex;
+}
+
 class _MeshHomePageState extends State<MeshHomePage>
     with WidgetsBindingObserver {
   static const int _statusNotificationId = 1001;
@@ -240,6 +289,18 @@ class _MeshHomePageState extends State<MeshHomePage>
   String? _historyHexFilter;
   String? _mapFocusHexId;
   String? _mapFocusNodeId;
+
+  /// Tab to restore when Back leaves the map. Set only by History and Nodes.
+  int? _backTarget;
+
+  /// Map page hook. Null when the map is not mounted.
+  ValueGetter<bool>? _mapBackHandler;
+  final GlobalKey _historyPageKey = GlobalKey();
+  Object? _nameScanRef;
+  Object? _nameRawRef;
+  Object? _nameNodeRef;
+  int _nameContactHash = 0;
+  Map<String, String>? _nameCache;
   bool _resumeScanAfterResume = false;
   bool _enteredBackground = false;
   bool _notificationsReady = false;
@@ -265,6 +326,7 @@ class _MeshHomePageState extends State<MeshHomePage>
   void _navigateTo(int index) {
     setState(() {
       _index = index;
+      _backTarget = null;
       // Leaving the map drops the one-shot hex focus so the coverage popup
       // is not waiting when the user comes back.
       if (index != 0) _mapFocusHexId = null;
@@ -1160,16 +1222,29 @@ class _MeshHomePageState extends State<MeshHomePage>
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      // Android: Back on the first screen sends the app to the background
-      // (like Home) instead of closing it, so the radio stays connected.
-      // Only swiping the app away from recents closes it.
+      // Android: Back never pops this route. Popping finishes the activity
+      // and drops the radio. Only swiping the app away from recents closes it.
       canPop: !backKeepsAppRunning(
         isWeb: kIsWeb,
         platform: defaultTargetPlatform,
       ),
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        unawaited(_moveAppToBackground());
+        final decision = decideAppBack(
+          mapHandled: _mapBackHandler?.call() ?? false,
+          backTarget: _backTarget,
+          index: _index,
+        );
+        switch (decision.action) {
+          case AppBackAction.handledByPage:
+            return;
+          case AppBackAction.showTab:
+            _navigateTo(decision.tab!);
+            return;
+          case AppBackAction.moveToBackground:
+            unawaited(_moveAppToBackground());
+            return;
+        }
       },
       child: _buildShell(context),
     );
@@ -1188,7 +1263,7 @@ class _MeshHomePageState extends State<MeshHomePage>
       animation: Listenable.merge([_appState, AppI18n.instance]),
       builder: (context, _) {
         _maybeShowInitialPrivacyDialog();
-        final body = _buildPage(_index);
+        final body = _buildShellBody();
         return LayoutBuilder(
           builder: (context, constraints) {
             final desktop = constraints.maxWidth >= 860;
@@ -1522,6 +1597,25 @@ class _MeshHomePageState extends State<MeshHomePage>
     );
   }
 
+  Widget _buildShellBody() {
+    final keepHistory =
+        keepHistoryListMounted(index: _index, backTarget: _backTarget) &&
+        !_appState.loading &&
+        _index != webInstallPageIndex;
+    if (!keepHistory) return _buildPage(_index);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(offstage: true, child: _buildPage(historyTabIndex)),
+        _buildPage(_index),
+      ],
+    );
+  }
+
+  void _setMapBackHandler(ValueGetter<bool>? handler) {
+    _mapBackHandler = handler;
+  }
+
   Widget _buildPage(int index) {
     // Install instructions do not depend on local history, so they stay
     // available while startup is still loading.
@@ -1613,8 +1707,9 @@ class _MeshHomePageState extends State<MeshHomePage>
           onTapScans: () {
             _debugLog.info('ui_click', 'Stats bar -> History tab');
             _clearHistoryHexPin();
-            _navigateTo(3);
+            _navigateTo(historyTabIndex);
           },
+          onBackHandler: _setMapBackHandler,
         );
       case 1:
         return ConnectionsPage(
@@ -1646,18 +1741,21 @@ class _MeshHomePageState extends State<MeshHomePage>
             setState(() {
               _mapFocusNodeId = nodeId;
               _mapFocusHexId = null;
-              _index = 0;
+              _backTarget = nodesTabIndex;
+              _index = mapTabIndex;
             });
           },
         );
       case 3:
         return HistoryPage(
-          key: const ValueKey<String>('history-page'),
-          scans: _historyHexFilter != null &&
+          key: _historyPageKey,
+          scans:
+              _historyHexFilter != null &&
                   _appState.pinnedHexDetailScans.isNotEmpty
               ? scanResultsForHexHistory(_appState.pinnedHexDetailScans)
               : _appState.scanResults,
-          pinnedHexList: _historyHexFilter != null &&
+          pinnedHexList:
+              _historyHexFilter != null &&
               _appState.pinnedHexDetailScans.isNotEmpty,
           initialHexId: _historyHexFilter,
           onClearHexFilter: _clearHistoryHexPin,
@@ -1673,7 +1771,8 @@ class _MeshHomePageState extends State<MeshHomePage>
             setState(() {
               _mapFocusHexId = hexId;
               _mapFocusNodeId = null;
-              _index = 0;
+              _backTarget = historyTabIndex;
+              _index = mapTabIndex;
             });
           },
         );
@@ -1759,11 +1858,29 @@ class _MeshHomePageState extends State<MeshHomePage>
     return _appState.currentObserverPosition;
   }
 
+  int _contactNameHash() {
+    final contacts = _appState.currentRadioContacts;
+    var hash = contacts.length;
+    for (final entry in contacts.entries) {
+      hash = Object.hash(hash, entry.key, entry.value);
+    }
+    return hash;
+  }
+
   Map<String, String> _buildResolvedNodeNames() {
-    final rows =
-        _appState.scanResults.length +
-        _appState.rawScans.length +
-        _appState.nodes.length;
+    final scans = _appState.scanResults;
+    final raw = _appState.rawScans;
+    final nodes = _appState.nodes;
+    final contactHash = _contactNameHash();
+    final cached = _nameCache;
+    if (cached != null &&
+        identical(_nameScanRef, scans) &&
+        identical(_nameRawRef, raw) &&
+        identical(_nameNodeRef, nodes) &&
+        _nameContactHash == contactHash) {
+      return cached;
+    }
+    final rows = scans.length + raw.length + nodes.length;
     final watch = Stopwatch()..start();
     final announce = rows != _loggedNameRows;
     if (announce) meshStageStart('name_labels', count: rows);
@@ -1787,17 +1904,17 @@ class _MeshHomePageState extends State<MeshHomePage>
       putResolvedNodeLabel(labels, trimmed, label);
     }
 
-    for (final scan in _appState.scanResults) {
+    for (final scan in scans) {
       put(scan.nodeId, advertisedName: scan.senderName);
       put(scan.observerId, advertisedName: scan.receiverName);
       put(scan.radioId, advertisedName: scan.receiverName);
     }
-    for (final scan in _appState.rawScans) {
+    for (final scan in raw) {
       put(scan.nodeId, advertisedName: scan.senderName);
       put(scan.observerId, advertisedName: scan.receiverName);
       put(scan.radioId, advertisedName: scan.receiverName);
     }
-    for (final node in _appState.nodes) {
+    for (final node in nodes) {
       put(node.nodeId, advertisedName: node.name);
     }
     final elapsed = watch.elapsedMilliseconds;
@@ -1805,6 +1922,11 @@ class _MeshHomePageState extends State<MeshHomePage>
       meshStageEnd('name_labels', count: rows, ms: elapsed, n2: labels.length);
       _loggedNameRows = rows;
     }
+    _nameScanRef = scans;
+    _nameRawRef = raw;
+    _nameNodeRef = nodes;
+    _nameContactHash = contactHash;
+    _nameCache = labels;
     return labels;
   }
 }
