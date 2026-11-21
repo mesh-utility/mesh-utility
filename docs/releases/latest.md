@@ -1,11 +1,9 @@
-# Mesh Utility Alpha-27
+# Mesh Utility Alpha-27.1
 
 ## Fixes
 
-- Tapping a hex now works when the map is zoomed out. It picks the nearest hex and zooms in on it.
-- The web map no longer freezes while it loads. A small "Loading map…" message shows if it takes a moment.
-- Cloud History keeps All days when Mesh Utility is open in more than one tab.
-- Panning and zooming are smoother, and the map waits until you stop moving before it loads more coverage.
+- The map now opens fast when you tap a scan in Scans. It no longer freezes.
+- The phone's back button works. It closes a popup first, then returns to the tab you came from.
 
 ## Enhancements
 
