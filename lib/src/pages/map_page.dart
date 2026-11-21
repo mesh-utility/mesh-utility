@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
 
-import 'package:flutter/foundation.dart' show ValueGetter, ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueGetter, ValueListenable, visibleForTesting;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:intl/intl.dart';
@@ -12,12 +13,14 @@ import 'package:mesh_utility/src/models/scan_result.dart';
 import 'package:mesh_utility/src/services/app_debug_log_service.dart';
 import 'package:mesh_utility/src/services/grid.dart';
 import 'package:mesh_utility/src/services/hex_detail.dart';
+import 'package:mesh_utility/src/services/hex_tap_target.dart';
 import 'package:mesh_utility/src/services/map_camera.dart';
 import 'package:mesh_utility/src/services/map_viewport_render.dart';
 import 'package:mesh_utility/src/services/mesh_stage_log.dart';
 import 'package:mesh_utility/src/services/settle_debouncer.dart';
 import 'package:mesh_utility/src/services/radio_id_utils.dart';
 import 'package:mesh_utility/src/services/signal_class.dart';
+import 'package:mesh_utility/src/services/snr_filter.dart';
 import 'package:mesh_utility/src/services/tile_cache_service.dart';
 import 'package:mesh_utility/src/widgets/map_page_widgets.dart';
 import 'package:mesh_utility/src/widgets/coverage_hex_batch_layer.dart';
@@ -29,9 +32,18 @@ enum BaseLayer { dark, standard, satellite }
 
 /// How long an overlay-button tap can still be delivered to the map.
 ///
-/// flutter_map confirms a tap after its double-tap window (250ms). A layer
-/// or upload tap in that window must not select a hex.
-const Duration mapOverlayHitSuppressWindow = Duration(milliseconds: 350);
+/// flutter_map confirms a tap after its double-tap window (250ms). Only that
+/// leaked tap is suppressed. A later hex tap must not be swallowed.
+const Duration mapOverlayHitSuppressWindow = Duration(milliseconds: 250);
+
+/// True when a map tap at [now] must not select a hex.
+///
+/// [until] is inclusive so a tap confirmed on the double-tap deadline is
+/// still treated as the overlay press that armed it.
+bool hexSelectBlockedAt(DateTime? until, DateTime now) {
+  if (until == null) return false;
+  return !now.isAfter(until);
+}
 
 /// Quiet period after the last applied viewport before a hex-index fetch.
 const Duration viewportHexSettleDelay = Duration(milliseconds: 400);
@@ -52,6 +64,10 @@ bool shouldApplyMapHexFocus({
 }
 
 class MapPage extends StatefulWidget {
+  /// Test hook. Viewport render awaits this before swapping the drawn hexes.
+  @visibleForTesting
+  static Future<void> Function()? debugHoldViewportApply;
+
   const MapPage({
     super.key,
     required this.zones,
@@ -86,6 +102,8 @@ class MapPage extends StatefulWidget {
     required this.statsRadiusMiles,
     required this.unitSystem,
     required this.tileCachingEnabled,
+    this.initialSnrFilter = 'all',
+    this.onSnrFilterChanged,
     required this.bleUiEnabled,
     this.observerLat,
     this.observerLng,
@@ -145,6 +163,8 @@ class MapPage extends StatefulWidget {
   final int statsRadiusMiles;
   final String unitSystem;
   final bool tileCachingEnabled;
+  final String initialSnrFilter;
+  final ValueChanged<String>? onSnrFilterChanged;
   final bool bleUiEnabled;
   final double? observerLat;
   final double? observerLng;
@@ -201,6 +221,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   LatLng? _lastAutoCenterTarget;
   DateTime? _lastAutoCenterDisableAt;
   Set<String> _selectedNodeFilters = <String>{};
+  late SnrFilter _snrFilter;
   late TileProvider _tileProvider;
   Timer? _viewportRenderTimer;
   DateTime? _viewportBurstStart;
@@ -208,8 +229,14 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   bool _renderReady = false;
   int? _filterIdentity;
   int _renderRequest = 0;
+
+  /// True from the start of a viewport render until that render finishes.
+  bool _viewportRenderBusy = false;
   final HexRenderSession _hexSession = HexRenderSession();
   List<CoverageZone> _datasetZones = const [];
+
+  /// Centres for [_filterIdentity], used when the drawn hexes miss a tap.
+  List<CoverageHexCentre> _zoneCentres = const [];
   int _renderSignature = 0;
   List<CoverageBatchHex> _batchHexes = const [];
 
@@ -223,7 +250,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   bool _mapClosed = false;
 
   /// Batch hexes by zone id, reused across in-view refreshes so the layer
-  /// keeps their projected outlines. Cleared with the dataset.
+  /// keeps their projected outlines. A filter that blanks the draw clears
+  /// this. A zone-list swap keeps it until [_applyPlan] replaces the list.
   final Map<String, _BatchHexMemo> _batchHexMemo = <String, _BatchHexMemo>{};
   List<MapDrawPolygon> _drawnPolygons = const [];
   MapDrawPolygon? _clusterPopup;
@@ -246,6 +274,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _snrFilter = SnrFilter.decode(widget.initialSnrFilter);
     widget.onBackHandler?.call(_handleSystemBack);
     _viewportHexes = SettleDebouncer<MapRenderViewport>(
       delay: viewportHexSettleDelay,
@@ -336,6 +365,17 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         enabled: widget.tileCachingEnabled,
       );
     }
+    if (widget.initialSnrFilter != oldWidget.initialSnrFilter) {
+      final next = SnrFilter.decode(widget.initialSnrFilter);
+      if (next != _snrFilter) {
+        _snrFilter = next;
+        if (_selectedZone != null && !next.matches(_selectedZone!)) {
+          _selectedZone = null;
+          _clusterPopup = null;
+          _lastPopupDebugSignature = null;
+        }
+      }
+    }
     if (widget.autoCenter) {
       final observerMoved =
           widget.observerLat != oldWidget.observerLat ||
@@ -423,10 +463,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _blockHexSelectUntil = DateTime.now().add(mapOverlayHitSuppressWindow);
   }
 
-  bool get _blockHexSelect {
-    final until = _blockHexSelectUntil;
-    return until != null && DateTime.now().isBefore(until);
-  }
+  bool get _blockHexSelect =>
+      hexSelectBlockedAt(_blockHexSelectUntil, DateTime.now());
 
   void _dismissHexPopupIfCoveredByModal() {
     final route = ModalRoute.of(context);
@@ -446,6 +484,17 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     });
   }
 
+  double _hexTapRadius() {
+    return switch (_hexTapKind) {
+      PointerDeviceKind.touch ||
+      PointerDeviceKind.unknown => kHexTapRadiusTouch,
+      PointerDeviceKind.mouse ||
+      PointerDeviceKind.stylus ||
+      PointerDeviceKind.invertedStylus ||
+      PointerDeviceKind.trackpad => kHexTapRadiusMouse,
+    };
+  }
+
   /// Prefer the painted hex under the finger, then the nearest center
   /// within the pointer's tap radius.
   ///
@@ -463,19 +512,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         final camera = _mapController.camera;
         Offset project(LatLng point) => coverageHexLayerOffset(camera, point);
         final layerPoint = coverageHexScreenToLayer(camera, relative);
-        final radius = switch (_hexTapKind) {
-          PointerDeviceKind.touch ||
-          PointerDeviceKind.unknown => kHexTapRadiusTouch,
-          PointerDeviceKind.mouse ||
-          PointerDeviceKind.stylus ||
-          PointerDeviceKind.invertedStylus ||
-          PointerDeviceKind.trackpad => kHexTapRadiusMouse,
-        };
         return hitTestCoverageBatchHexesNearest(
           layerPoint,
           hexes,
           project,
-          radius: radius,
+          radius: _hexTapRadius(),
         );
       } catch (_) {
         // Camera is not ready yet. Fall through to the geographic test.
@@ -484,19 +525,136 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     return hitTestCoverageBatchHexes(latLng, hexes);
   }
 
-  void _noteDataset(List<CoverageZone> zones, int identity) {
+  /// Drawn hexes first. A miss, or a stale id that the current filter hid,
+  /// falls back to cached centres inside the visible bounds.
+  String? _resolveHexTap(TapPosition tapPosition, LatLng latLng) {
+    final drawn = _batchHexes;
+    var hit = drawn.isEmpty ? null : _hitCoverage(tapPosition, latLng, drawn);
+    if (hit != null && _zoneInDataset(hit) == null) hit = null;
+    if (hit != null) return hit;
+    return _hitDatasetCentres(tapPosition);
+  }
+
+  CoverageZone? _zoneInDataset(String zoneId) {
+    for (final zone in _datasetZones) {
+      if (zone.id == zoneId) return zone;
+    }
+    return null;
+  }
+
+  String? _hitDatasetCentres(TapPosition tapPosition) {
+    final centres = _zoneCentres;
+    if (centres.isEmpty) return null;
+    final relative = tapPosition.relative;
+    if (relative == null) return null;
+    final MapCamera camera;
+    try {
+      camera = _mapController.camera;
+    } catch (_) {
+      return null;
+    }
+    final viewport = _readViewport();
+    if (viewport == null) return null;
+    return nearestCoverageHexCentre(
+      layerPoint: coverageHexScreenToLayer(camera, relative),
+      centres: centres,
+      inView: viewport.containsLatLng,
+      project: (point) => coverageHexLayerOffset(camera, point),
+      radius: _hexTapRadius(),
+    );
+  }
+
+  /// True while a viewport rebuild has not landed. An empty tap in this
+  /// window is a miss against a stale or empty draw, not a dismiss.
+  bool get _hexRenderPending =>
+      !_renderReady ||
+      _viewportRenderBusy ||
+      _renderPosted ||
+      _viewportRenderTimer != null ||
+      _mapRenderLoading.value;
+
+  void _dropSelectedZone() {
+    _selectedZone = null;
+    _clusterPopup = null;
+    _lastPopupDebugSignature = null;
+  }
+
+  /// Keeps the open popup when [allowed] still contains its id, and points
+  /// [_selectedZone] at the new instance. Clears it when the cell is gone.
+  void _adoptSelectedZone(
+    List<CoverageZone> allowed, {
+    List<CoverageZone>? prefer,
+  }) {
+    final selected = _selectedZone;
+    if (selected == null) return;
+    var stillThere = false;
+    for (final zone in allowed) {
+      if (zone.id == selected.id) {
+        stillThere = true;
+        break;
+      }
+    }
+    if (!stillThere) {
+      _dropSelectedZone();
+      return;
+    }
+    CoverageZone? next;
+    for (final zone in prefer ?? allowed) {
+      if (zone.id == selected.id) {
+        next = zone;
+        break;
+      }
+    }
+    next ??= selected;
+    if (!identical(next, selected)) {
+      _selectedZone = next;
+      _lastPopupDebugSignature = null;
+    }
+  }
+
+  bool _filterChangedSince(
+    _MapDataset cached, {
+    required String? focusNodeId,
+    required int filterHash,
+  }) {
+    if (cached.snrKey != _snrFilter.encode()) return true;
+    if (cached.filterHash != filterHash) return true;
+    if (cached.selectedCount != _selectedNodeFilters.length) return true;
+    if (cached.focusNodeId != focusNodeId) return true;
+    if (cached.radius != widget.statsRadiusMiles) return true;
+    if (widget.statsRadiusMiles != 0 &&
+        (cached.lat != widget.observerLat ||
+            cached.lng != widget.observerLng)) {
+      return true;
+    }
+    return false;
+  }
+
+  /// [blankDrawn] is for an SNR, node, or radius filter change, which must
+  /// not keep showing hexes the filter just hid. A plain zone-list swap
+  /// keeps the previous draw until [_applyPlan] swaps it.
+  void _noteDataset(
+    List<CoverageZone> zones,
+    int identity, {
+    bool blankDrawn = false,
+  }) {
     if (identity == _filterIdentity) return;
     _filterIdentity = identity;
     _datasetZones = zones;
+    _zoneCentres = coverageHexCentres(zones);
+    _adoptSelectedZone(zones);
     _renderRequest++;
+    _viewportRenderBusy = true;
     _hexSession.reset(identity);
     _renderReady = false;
-    _batchHexes = const [];
-    _batchHexesView.value = _batchHexes;
-    _batchHexMemo.clear();
-    _drawnPolygons = const [];
-    _clusterPopup = null;
     _appliedViewport = null;
+    if (blankDrawn) {
+      _batchHexes = const [];
+      _batchHexesView.value = _batchHexes;
+      _batchHexMemo.clear();
+      _drawnPolygons = const [];
+      _clusterPopup = null;
+    }
     _scheduleViewportRender(immediate: true);
   }
 
@@ -579,6 +737,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     }
     final request = ++_renderRequest;
     final identity = _filterIdentity!;
+    _viewportRenderBusy = true;
     if (!_renderReady) _mapRenderLoading.value = true;
     unawaited(_finishViewportRender(request: request, identity: identity));
   }
@@ -613,6 +772,18 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         final latest = _readViewport();
         if (latest == null) return;
         if (_sameViewport(latest, viewport)) {
+          final hold = MapPage.debugHoldViewportApply;
+          if (hold != null) await hold();
+          if (!mounted ||
+              request != _renderRequest ||
+              identity != _filterIdentity) {
+            return;
+          }
+          final afterHold = _readViewport();
+          if (afterHold == null || !_sameViewport(afterHold, viewport)) {
+            pending = afterHold;
+            continue;
+          }
           drawn = plan.polygons.length;
           _applyPlan(plan, viewport);
           applied = true;
@@ -621,6 +792,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         pending = latest;
       }
     } finally {
+      if (request == _renderRequest) _viewportRenderBusy = false;
       if (!applied && !_mapClosed && mounted && request == _renderRequest) {
         _mapRenderLoading.value = false;
       }
@@ -660,6 +832,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   void _emitSettledViewportHexes(MapRenderViewport viewport) {
+    // The parent may hand back a new list. Same cells share
+    // [coverageFilterIdentity], so [_datasetFor] does not reset the draw
+    // or drop a popup whose zone is still in the filtered list.
     if (!mounted || _mapClosed) return;
     final onViewport = widget.onViewportHexes;
     if (onViewport == null) return;
@@ -744,13 +919,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   void _handleBatchHit(String zoneId) {
     _debugLog.info('ui_click', 'Map hex click zone=$zoneId');
-    CoverageZone? zone;
-    for (final z in widget.zones) {
-      if (z.id == zoneId) {
-        zone = z;
-        break;
-      }
-    }
+    final zone = _zoneInDataset(zoneId);
     if (zone != null) {
       _suppressHexFocus = true;
       _disableAutoCenter('popup open');
@@ -1085,8 +1254,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
 
   Future<void> _openNodeFilterDialog() async {
     // Close the hex popup before the route is pushed so the dialog does not
-    // stack on top of it.
-    _markOverlayInteraction();
+    // stack on top of it. The button press already armed the short suppress
+    // window; arming it again here would still be active if the dialog
+    // closed immediately.
     _dismissHexPopup('node filter dialog');
     // Respect Stats Radius so only nodes with scans inside the radius appear.
     final radiusScans = _filterScansByRadius(widget.scans);
@@ -1142,6 +1312,31 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       if (!mounted) return;
       _focusCoverageForNodeFilters(result);
     });
+  }
+
+  Future<void> _openSnrFilterDialog() async {
+    _dismissHexPopup('snr filter dialog');
+    if (!mounted) return;
+    final result = await showDialog<SnrFilter>(
+      context: context,
+      builder: (context) => _SnrFilterDialog(initial: _snrFilter),
+    );
+    if (!mounted || result == null) return;
+    _applySnrFilter(result);
+  }
+
+  void _applySnrFilter(SnrFilter next) {
+    if (next == _snrFilter) return;
+    _debugLog.info('map_filter', 'SNR filter updated: ${next.encode()}');
+    setState(() {
+      _snrFilter = next;
+      if (_selectedZone != null && !next.matches(_selectedZone!)) {
+        _selectedZone = null;
+        _clusterPopup = null;
+        _lastPopupDebugSignature = null;
+      }
+    });
+    widget.onSnrFilterChanged?.call(next.encode());
   }
 
   /// Point ids for [filters]. Reused when the scan list and filters are stable
@@ -1214,6 +1409,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         cached.focusNodeId == focusNodeId &&
         cached.selectedCount == _selectedNodeFilters.length &&
         cached.filterHash == filterHash &&
+        cached.snrKey == _snrFilter.encode() &&
         observerStable) {
       if (identical(_datasetZoneRef, widget.zones)) {
         _noteDataset(cached.filtered, cached.identity);
@@ -1224,6 +1420,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       if (cached.inputIdentity == inputIdentity) {
         _datasetZoneRef = widget.zones;
         _noteDataset(cached.filtered, cached.identity);
+        _adoptSelectedZone(cached.filtered, prefer: widget.zones);
         return cached;
       }
     }
@@ -1239,7 +1436,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
           .toList(growable: false);
     }
 
-    final filteredZones = bypassRadiusForNodeFocus
+    final radiusFiltered = bypassRadiusForNodeFocus
         ? baseZones
         : _filterZonesByRadius(
             zones: baseZones,
@@ -1247,13 +1444,26 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             observerLng: widget.observerLng,
             radiusMiles: widget.statsRadiusMiles,
           );
+    final filteredZones = applySnrFilter(_snrFilter, radiusFiltered);
     final resolvedInputIdentity =
         inputIdentity ?? coverageFilterIdentity(widget.zones);
     final identity = identical(filteredZones, widget.zones)
         ? resolvedInputIdentity
         : coverageFilterIdentity(filteredZones);
     // Filters already ran. Aggregation and the polygon cache see only this list.
-    _noteDataset(filteredZones, identity);
+    // A zone-list swap keeps the previous hexes for hit-testing. An SNR,
+    // node, or radius change blanks them so hidden cells do not stay up.
+    _noteDataset(
+      filteredZones,
+      identity,
+      blankDrawn:
+          cached != null &&
+          _filterChangedSince(
+            cached,
+            focusNodeId: focusNodeId,
+            filterHash: filterHash,
+          ),
+    );
     final scanNodeIds = _scopedScanNodeIds(
       filteredZones: filteredZones,
       zoneIdentity: identity,
@@ -1324,6 +1534,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       focusNodeId: focusNodeId,
       selectedCount: _selectedNodeFilters.length,
       filterHash: filterHash,
+      snrKey: _snrFilter.encode(),
       filtered: filteredZones,
       identity: identity,
       inputIdentity: resolvedInputIdentity,
@@ -1514,12 +1725,9 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
                     },
                     onTap: (tapPosition, latLng) {
                       _disableAutoCenter('map tap');
-                      final hitId = _hitCoverage(
-                        tapPosition,
-                        latLng,
-                        _batchHexes,
-                      );
+                      final hitId = _resolveHexTap(tapPosition, latLng);
                       if (hitId == null) {
+                        if (_hexRenderPending) return;
                         _debugLog.debug(
                           'ui_click',
                           'Map background click clear popup at lat=${latLng.latitude.toStringAsFixed(6)} lng=${latLng.longitude.toStringAsFixed(6)}',
@@ -1731,122 +1939,197 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             Positioned(
               top: overlayTop,
               right: 12,
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Card(
-                    elevation: 1,
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () {
-                            _debugLog.info(
-                              'ui_click',
-                              'Map filter button click',
-                            );
-                            _markOverlayInteraction();
-                            _openNodeFilterDialog();
-                          },
-                          icon: const Icon(Icons.filter_alt),
-                          tooltip: 'Filter repeater hits',
-                        ),
-                        if (effectiveNodeFilters.isNotEmpty)
-                          Positioned(
-                            right: 6,
-                            top: 6,
-                            child: Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.primary,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Card(
-                    elevation: 1,
-                    child: _layerSelectorExpanded
-                        ? Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 4,
-                              vertical: 4,
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Card(
+                        elevation: 1,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Stack(
+                              clipBehavior: Clip.none,
                               children: [
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
                                   onPressed: () {
+                                    _debugLog.info(
+                                      'ui_click',
+                                      'Map filter button click',
+                                    );
                                     _markOverlayInteraction();
-                                    setState(() {
-                                      _baseLayer = BaseLayer.dark;
-                                      _layerSelectorExpanded = false;
-                                    });
+                                    _openNodeFilterDialog();
                                   },
-                                  icon: Icon(
-                                    Icons.dark_mode,
-                                    color: _baseLayer == BaseLayer.dark
-                                        ? Theme.of(context).colorScheme.primary
-                                        : null,
-                                  ),
-                                  tooltip: 'Dark map',
+                                  icon: const Icon(Icons.filter_alt),
+                                  tooltip: 'Filter repeater hits',
                                 ),
-                                IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  onPressed: () {
-                                    _markOverlayInteraction();
-                                    setState(() {
-                                      _baseLayer = BaseLayer.standard;
-                                      _layerSelectorExpanded = false;
-                                    });
-                                  },
-                                  icon: Icon(
-                                    Icons.public,
-                                    color: _baseLayer == BaseLayer.standard
-                                        ? Theme.of(context).colorScheme.primary
-                                        : null,
+                                if (effectiveNodeFilters.isNotEmpty)
+                                  Positioned(
+                                    right: 6,
+                                    top: 6,
+                                    child: Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.primary,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
                                   ),
-                                  tooltip: 'Standard map',
-                                ),
-                                IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  onPressed: () {
-                                    _markOverlayInteraction();
-                                    setState(() {
-                                      _baseLayer = BaseLayer.satellite;
-                                      _layerSelectorExpanded = false;
-                                    });
-                                  },
-                                  icon: Icon(
-                                    Icons.satellite_alt,
-                                    color: _baseLayer == BaseLayer.satellite
-                                        ? Theme.of(context).colorScheme.primary
-                                        : null,
-                                  ),
-                                  tooltip: 'Satellite map',
-                                ),
                               ],
                             ),
-                          )
-                        : IconButton(
-                            visualDensity: VisualDensity.compact,
-                            onPressed: () {
-                              _markOverlayInteraction();
-                              setState(() => _layerSelectorExpanded = true);
-                            },
-                            icon: Icon(switch (_baseLayer) {
-                              BaseLayer.dark => Icons.dark_mode,
-                              BaseLayer.standard => Icons.public,
-                              BaseLayer.satellite => Icons.satellite_alt,
-                            }),
-                            tooltip: 'Map layers',
-                          ),
+                            Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () {
+                                    _debugLog.info(
+                                      'ui_click',
+                                      'Map SNR filter button click',
+                                    );
+                                    _markOverlayInteraction();
+                                    _openSnrFilterDialog();
+                                  },
+                                  icon: const Icon(Icons.signal_cellular_alt),
+                                  tooltip: 'Filter by signal',
+                                ),
+                                if (_snrFilter.active)
+                                  Positioned(
+                                    right: 6,
+                                    top: 6,
+                                    child: Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.primary,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Card(
+                        elevation: 1,
+                        child: _layerSelectorExpanded
+                            ? Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                  vertical: 4,
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () {
+                                        _markOverlayInteraction();
+                                        setState(() {
+                                          _baseLayer = BaseLayer.dark;
+                                          _layerSelectorExpanded = false;
+                                        });
+                                      },
+                                      icon: Icon(
+                                        Icons.dark_mode,
+                                        color: _baseLayer == BaseLayer.dark
+                                            ? Theme.of(
+                                                context,
+                                              ).colorScheme.primary
+                                            : null,
+                                      ),
+                                      tooltip: 'Dark map',
+                                    ),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () {
+                                        _markOverlayInteraction();
+                                        setState(() {
+                                          _baseLayer = BaseLayer.standard;
+                                          _layerSelectorExpanded = false;
+                                        });
+                                      },
+                                      icon: Icon(
+                                        Icons.public,
+                                        color: _baseLayer == BaseLayer.standard
+                                            ? Theme.of(
+                                                context,
+                                              ).colorScheme.primary
+                                            : null,
+                                      ),
+                                      tooltip: 'Standard map',
+                                    ),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () {
+                                        _markOverlayInteraction();
+                                        setState(() {
+                                          _baseLayer = BaseLayer.satellite;
+                                          _layerSelectorExpanded = false;
+                                        });
+                                      },
+                                      icon: Icon(
+                                        Icons.satellite_alt,
+                                        color: _baseLayer == BaseLayer.satellite
+                                            ? Theme.of(
+                                                context,
+                                              ).colorScheme.primary
+                                            : null,
+                                      ),
+                                      tooltip: 'Satellite map',
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : IconButton(
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () {
+                                  _markOverlayInteraction();
+                                  setState(() => _layerSelectorExpanded = true);
+                                },
+                                icon: Icon(switch (_baseLayer) {
+                                  BaseLayer.dark => Icons.dark_mode,
+                                  BaseLayer.standard => Icons.public,
+                                  BaseLayer.satellite => Icons.satellite_alt,
+                                }),
+                                tooltip: 'Map layers',
+                              ),
+                      ),
+                    ],
                   ),
+                  if (_snrFilter.active)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Material(
+                        type: MaterialType.transparency,
+                        child: InputChip(
+                          key: const Key('map-snr-filter-chip'),
+                          visualDensity: VisualDensity.compact,
+                          label: Text(_snrFilter.label),
+                          onPressed: () {
+                            _markOverlayInteraction();
+                            _openSnrFilterDialog();
+                          },
+                          onDeleted: () {
+                            _markOverlayInteraction();
+                            _applySnrFilter(SnrFilter.all);
+                          },
+                          deleteIcon: const Icon(Icons.close, size: 16),
+                          deleteButtonTooltipMessage: 'Clear signal filter',
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -2712,6 +2995,236 @@ class _NodeFilterDialogState extends State<_NodeFilterDialog> {
   }
 }
 
+class _SnrFilterDialog extends StatefulWidget {
+  const _SnrFilterDialog({required this.initial});
+
+  final SnrFilter initial;
+
+  @override
+  State<_SnrFilterDialog> createState() => _SnrFilterDialogState();
+}
+
+class _SnrFilterDialogState extends State<_SnrFilterDialog> {
+  late SnrFilterPreset _preset;
+  late double _min;
+  late double _max;
+  late bool _minClear;
+  late bool _maxClear;
+  late final TextEditingController _minCtrl;
+  late final TextEditingController _maxCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _preset = widget.initial.preset;
+    final custom = widget.initial.preset == SnrFilterPreset.custom;
+    _minClear = custom && widget.initial.min == null;
+    _maxClear = custom && widget.initial.max == null;
+    _min = widget.initial.min ?? kSnrFilterMinDb;
+    _max = widget.initial.max ?? kSnrFilterMaxDb;
+    if (_min > _max) {
+      final swap = _min;
+      _min = _max;
+      _max = swap;
+    }
+    _minCtrl = TextEditingController(
+      text: _minClear ? '' : _formatSnrBound(_min),
+    );
+    _maxCtrl = TextEditingController(
+      text: _maxClear ? '' : _formatSnrBound(_max),
+    );
+  }
+
+  @override
+  void dispose() {
+    _minCtrl.dispose();
+    _maxCtrl.dispose();
+    super.dispose();
+  }
+
+  void _reset() {
+    setState(() {
+      _preset = SnrFilterPreset.all;
+      _min = kSnrFilterMinDb;
+      _max = kSnrFilterMaxDb;
+      _minClear = false;
+      _maxClear = false;
+      _minCtrl.text = _formatSnrBound(_min);
+      _maxCtrl.text = _formatSnrBound(_max);
+    });
+  }
+
+  void _onMinField(String raw) {
+    if (raw.trim().isEmpty) {
+      setState(() => _minClear = true);
+      return;
+    }
+    final parsed = double.tryParse(raw.trim());
+    if (parsed == null) return;
+    setState(() {
+      _minClear = false;
+      _min = clampSnrFilterBound(parsed) ?? kSnrFilterMinDb;
+      if (_min > _max) {
+        _max = _min;
+        _maxCtrl.text = _formatSnrBound(_max);
+      }
+    });
+  }
+
+  void _onMaxField(String raw) {
+    if (raw.trim().isEmpty) {
+      setState(() => _maxClear = true);
+      return;
+    }
+    final parsed = double.tryParse(raw.trim());
+    if (parsed == null) return;
+    setState(() {
+      _maxClear = false;
+      _max = clampSnrFilterBound(parsed) ?? kSnrFilterMaxDb;
+      if (_max < _min) {
+        _min = _max;
+        _minCtrl.text = _formatSnrBound(_min);
+      }
+    });
+  }
+
+  SnrFilter _result() {
+    if (_preset != SnrFilterPreset.custom) {
+      return SnrFilter(preset: _preset);
+    }
+    return SnrFilter.custom(
+      min: _minClear ? null : _min,
+      max: _maxClear ? null : _max,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Filter by signal'),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final preset in SnrFilterPreset.values)
+                    ChoiceChip(
+                      label: Text(_snrPresetChipLabel(preset)),
+                      selected: _preset == preset,
+                      onSelected: (_) => setState(() => _preset = preset),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Show only hexes with a certain signal clarity (SNR). Weak is -7 dB or lower. OK is -7 to 0. Strong is above 0.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              if (_preset == SnrFilterPreset.custom) ...[
+                const SizedBox(height: 12),
+                RangeSlider(
+                  min: kSnrFilterMinDb,
+                  max: kSnrFilterMaxDb,
+                  divisions: (kSnrFilterMaxDb - kSnrFilterMinDb).round(),
+                  values: RangeValues(_min, _max),
+                  labels: RangeLabels(
+                    '${_min.round()} dB',
+                    '${_max.round()} dB',
+                  ),
+                  onChanged: (values) {
+                    setState(() {
+                      _min = values.start.roundToDouble();
+                      _max = values.end.roundToDouble();
+                      _minClear = false;
+                      _maxClear = false;
+                      _minCtrl.text = _formatSnrBound(_min);
+                      _maxCtrl.text = _formatSnrBound(_max);
+                    });
+                  },
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _minCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          signed: true,
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          labelText: 'Min',
+                          suffixText: 'dB',
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: _onMinField,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _maxCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          signed: true,
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          labelText: 'Max',
+                          suffixText: 'dB',
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: _onMaxField,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: _reset, child: const Text('Reset')),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_result()),
+          child: const Text('Apply'),
+        ),
+      ],
+    );
+  }
+}
+
+String _snrPresetChipLabel(SnrFilterPreset preset) {
+  switch (preset) {
+    case SnrFilterPreset.all:
+      return 'All';
+    case SnrFilterPreset.weak:
+      return 'Weak';
+    case SnrFilterPreset.ok:
+      return 'OK';
+    case SnrFilterPreset.strong:
+      return 'Strong';
+    case SnrFilterPreset.custom:
+      return 'Custom';
+  }
+}
+
+String _formatSnrBound(double value) {
+  if (value == value.roundToDouble()) return value.toInt().toString();
+  return value.toString();
+}
+
 ScanResult? _latestScanForZone(
   CoverageZone zone,
   List<ScanResult> scans, {
@@ -3424,6 +3937,7 @@ class _MapDataset {
     required this.focusNodeId,
     required this.selectedCount,
     required this.filterHash,
+    required this.snrKey,
     required this.filtered,
     required this.identity,
     required this.inputIdentity,
@@ -3442,6 +3956,7 @@ class _MapDataset {
   final String? focusNodeId;
   final int selectedCount;
   final int filterHash;
+  final String snrKey;
   final List<CoverageZone> filtered;
   final int identity;
   final int inputIdentity;

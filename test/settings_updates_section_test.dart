@@ -141,6 +141,19 @@ void main() {
     expect(find.textContaining('Stats Radius'), findsWidgets);
   });
 
+  test('mapSnrFilter defaults to all and round-trips', () {
+    expect(AppSettings.defaults.mapSnrFilter, 'all');
+    final settings = AppSettings.defaults.copyWith(mapSnrFilter: 'weak');
+    final restored = AppSettings.fromJson(settings.toJson());
+    expect(restored.mapSnrFilter, 'weak');
+    expect(AppSettings.fromJson(<String, dynamic>{}).mapSnrFilter, 'all');
+    final custom = AppSettings.defaults.copyWith(mapSnrFilter: 'custom:-5:0');
+    expect(
+      AppSettings.fromJson(custom.toJson()).mapSnrFilter,
+      'custom:-5:0',
+    );
+  });
+
   test('stored maxHexScale is ignored and not written back', () {
     final raw = AppSettings.defaults.toJson()..['maxHexScale'] = 8;
     final restored = AppSettings.fromJson(raw);

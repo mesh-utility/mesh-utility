@@ -19,6 +19,7 @@ class AppSettings {
     required this.privacyForceOfflineMigrated,
     required this.updateRadioPosition,
     required this.tileCachingEnabled,
+    required this.mapSnrFilter,
     required this.unitSystem,
     required this.language,
     required this.statsRadiusMiles,
@@ -47,6 +48,9 @@ class AppSettings {
   final bool privacyForceOfflineMigrated;
   final bool updateRadioPosition;
   final bool tileCachingEnabled;
+
+  /// Coverage-map SNR filter. Compact encoded string; default `all`.
+  final String mapSnrFilter;
   final String unitSystem;
   final String language;
   final int statsRadiusMiles;
@@ -79,6 +83,7 @@ class AppSettings {
     privacyForceOfflineMigrated: false,
     updateRadioPosition: false,
     tileCachingEnabled: false,
+    mapSnrFilter: 'all',
     unitSystem: 'imperial',
     language: 'en',
     statsRadiusMiles: 0,
@@ -107,6 +112,7 @@ class AppSettings {
     bool? privacyForceOfflineMigrated,
     bool? updateRadioPosition,
     bool? tileCachingEnabled,
+    String? mapSnrFilter,
     String? unitSystem,
     String? language,
     int? statsRadiusMiles,
@@ -143,6 +149,7 @@ class AppSettings {
           privacyForceOfflineMigrated ?? this.privacyForceOfflineMigrated,
       updateRadioPosition: updateRadioPosition ?? this.updateRadioPosition,
       tileCachingEnabled: tileCachingEnabled ?? this.tileCachingEnabled,
+      mapSnrFilter: mapSnrFilter ?? this.mapSnrFilter,
       unitSystem: unitSystem ?? this.unitSystem,
       language: language ?? this.language,
       statsRadiusMiles: statsRadiusMiles ?? this.statsRadiusMiles,
@@ -179,6 +186,7 @@ class AppSettings {
       'privacyForceOfflineMigrated': privacyForceOfflineMigrated,
       'updateRadioPosition': updateRadioPosition,
       'tileCachingEnabled': tileCachingEnabled,
+      'mapSnrFilter': mapSnrFilter,
       'unitSystem': unitSystem,
       'language': language,
       'statsRadiusMiles': statsRadiusMiles,
@@ -231,6 +239,8 @@ class AppSettings {
           defaults.updateRadioPosition,
       tileCachingEnabled:
           (json['tileCachingEnabled'] as bool?) ?? defaults.tileCachingEnabled,
+      mapSnrFilter:
+          (json['mapSnrFilter'] as String?) ?? defaults.mapSnrFilter,
       unitSystem: (json['unitSystem'] as String?) ?? defaults.unitSystem,
       language: (json['language'] as String?) ?? defaults.language,
       statsRadiusMiles:

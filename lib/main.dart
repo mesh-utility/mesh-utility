@@ -1683,6 +1683,14 @@ class _MeshHomePageState extends State<MeshHomePage>
           statsRadiusMiles: _appState.settings.statsRadiusMiles,
           unitSystem: _appState.settings.unitSystem,
           tileCachingEnabled: _appState.settings.tileCachingEnabled,
+          initialSnrFilter: _appState.settings.mapSnrFilter,
+          onSnrFilterChanged: (value) {
+            unawaited(
+              _appState.updateSettings(
+                _appState.settings.copyWith(mapSnrFilter: value),
+              ),
+            );
+          },
           observerLat: observer?.$1,
           observerLng: observer?.$2,
           connectedRadioName: _appState.connectedRadioDisplayName,

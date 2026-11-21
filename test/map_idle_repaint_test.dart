@@ -342,11 +342,22 @@ void main() {
                     children: [
                       Card(
                         elevation: 1,
-                        child: IconButton(
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () {},
-                          icon: const Icon(Icons.filter_alt),
-                          tooltip: 'Filter repeater hits',
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () {},
+                              icon: const Icon(Icons.filter_alt),
+                              tooltip: 'Filter repeater hits',
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () {},
+                              icon: const Icon(Icons.signal_cellular_alt),
+                              tooltip: 'Filter by signal',
+                            ),
+                          ],
                         ),
                       ),
                       const SizedBox(width: 8),
