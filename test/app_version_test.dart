@@ -13,10 +13,10 @@ void main() {
     ).firstMatch(pubspec);
     expect(match, isNotNull);
     expect(kGeneratedAppVersion, match!.group(1));
-    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-26.1');
+    expect(alphaReleaseLabel(kGeneratedAppVersion), 'Alpha-27');
     expect(
       meshUtilityFooterLabel(kGeneratedAppVersion),
-      'Mesh Utility Alpha-26.1',
+      'Mesh Utility Alpha-27',
     );
   });
 

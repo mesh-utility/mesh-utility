@@ -239,10 +239,10 @@ void main() {
 
     expect(find.byKey(whatsNewLoadingKey), findsNothing);
     expect(find.byKey(whatsNewFallbackKey), findsOneWidget);
-    expect(find.text("What's new in Alpha-26.1"), findsOneWidget);
+    expect(find.text("What's new in Alpha-27"), findsOneWidget);
     expect(find.text('Other changes'), findsOneWidget);
     expect(
-      find.textContaining('Coverage hexes stay on the fixed grid'),
+      find.textContaining('Tapping a hex now works when the map is zoomed out'),
       findsOneWidget,
     );
     expect(find.text('Fixes'), findsOneWidget);
