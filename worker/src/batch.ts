@@ -13,6 +13,14 @@ import {
   recomputeHexFromScans,
   usableNodeName,
 } from './hex_detail';
+import {
+  radioIdsNeedingCaseFix,
+  SQL_NODE_NAMES_LOOKUP,
+  SQL_NODE_NAMES_UPSERT,
+  SQL_SCANS_NODES_LIKE,
+  SQL_SCANS_NODES_LIKE_BOUNDED,
+  SQL_UPDATE_RADIO_ID_CASE,
+} from './upload_queries';
 
 interface ScanPayload {
   radioId: string;
@@ -678,8 +686,14 @@ export class ScanBatcher {
    */
   private async backfillNodeNamesInD1(db: D1Database, scans: ScanPayload[]): Promise<void> {
     const nameUpdates = new Map<string, string>();
+    let minTs = Number.POSITIVE_INFINITY;
+    let maxTs = Number.NEGATIVE_INFINITY;
 
     for (const scan of scans) {
+      if (Number.isFinite(scan.timestamp)) {
+        if (scan.timestamp < minTs) minTs = scan.timestamp;
+        if (scan.timestamp > maxTs) maxTs = scan.timestamp;
+      }
       for (const node of scan.nodes) {
         const nodeId = this.normalizeHexId(node.nodeId);
         const name = usableNodeName(typeof node.name === 'string' ? node.name : '', nodeId);
@@ -694,18 +708,27 @@ export class ScanBatcher {
       return;
     }
 
+    const windowOk = Number.isFinite(minTs) && Number.isFinite(maxTs);
+
     for (const [nodeId, latestName] of nameUpdates.entries()) {
       const prefix8 = nodeId.length >= 8 ? nodeId.slice(0, 8) : nodeId;
       const likeNodeId = this.escapeLikePattern(prefix8);
-      const rows = await db.prepare(
-        `
-          SELECT id, nodes
-          FROM scans
-          WHERE nodes LIKE ? ESCAPE '\\'
-        `
-      )
-        .bind(`%"nodeId":"${likeNodeId}%`)
-        .all();
+      const likePattern = `%"nodeId":"${likeNodeId}%`;
+
+      let nameChanged = true;
+      try {
+        const stored = await db.prepare(SQL_NODE_NAMES_LOOKUP).bind(prefix8).first<{ name: string }>();
+        if (stored && stored.name === latestName) {
+          nameChanged = false;
+        }
+      } catch {
+        nameChanged = true;
+      }
+
+      const rows =
+        !nameChanged && windowOk
+          ? await db.prepare(SQL_SCANS_NODES_LIKE_BOUNDED).bind(likePattern, minTs, maxTs).all()
+          : await db.prepare(SQL_SCANS_NODES_LIKE).bind(likePattern).all();
 
       for (const row of rows.results as Array<{ id: number; nodes: string }>) {
         let parsedNodes: StoredNode[];
@@ -755,6 +778,14 @@ export class ScanBatcher {
           .bind(JSON.stringify(parsedNodes), row.id)
           .run();
       }
+
+      if (nameChanged) {
+        try {
+          await db.prepare(SQL_NODE_NAMES_UPSERT).bind(prefix8, latestName, Date.now()).run();
+        } catch {
+          // node_names may not exist until migration 0007 is applied.
+        }
+      }
     }
   }
 
@@ -782,18 +813,9 @@ export class ScanBatcher {
       return;
     }
 
-    // Ensure canonical uppercase radioId across all rows.
-    for (const normalizedRadioId of normalizedRadioIds) {
-      await db.prepare(
-        `
-          UPDATE scans
-          SET radioId = ?
-          WHERE UPPER(radioId) = ?
-            AND radioId != ?
-        `
-      )
-        .bind(normalizedRadioId, normalizedRadioId, normalizedRadioId)
-        .run();
+    // Ensure canonical uppercase radioId across legacy mixed-case rows.
+    for (const normalizedRadioId of radioIdsNeedingCaseFix(scans)) {
+      await db.prepare(SQL_UPDATE_RADIO_ID_CASE).bind(normalizedRadioId).run();
     }
 
     if (observerNameUpdates.size === 0) {

@@ -487,11 +487,16 @@ function assertBinds(binds: number[]): void {
   }
 }
 
-function historyBranchSql(hasCursor: boolean): string {
+function historyBranchSql(hasCursor: boolean, range: GeoBounds): string {
   const cursor = hasCursor ? 'AND (timestamp > ? OR (timestamp = ? AND id > ?))' : '';
+  // Unary plus blocks idx_timestamp so the planner uses idx_scans_lat_lng_ts.
+  const timePred =
+    range.maxLat - range.minLat <= 1.0
+      ? '+timestamp >= ? AND +timestamp <= ?'
+      : 'timestamp >= ? AND timestamp <= ?';
   return `SELECT ${HISTORY_COLUMNS}
 FROM scans
-WHERE timestamp >= ? AND timestamp <= ?
+WHERE ${timePred}
   AND latitude BETWEEN ? AND ?
   AND longitude BETWEEN ? AND ?
   ${cursor}
@@ -554,7 +559,7 @@ export function buildHistoryQueries(args: {
     if (hasCursor) binds.push(cursorTs, cursorTs, cursorId);
     binds.push(limit);
     assertBinds(binds);
-    return [{ sql: historyBranchSql(hasCursor), binds }];
+    return [{ sql: historyBranchSql(hasCursor, range), binds }];
   }
   const perBranch = hasCursor ? 10 : 7;
   const perStatement = Math.floor(D1_MAX_BOUND_PARAMETERS / perBranch);
@@ -563,7 +568,7 @@ export function buildHistoryQueries(args: {
     const parts: string[] = [];
     const binds: number[] = [];
     for (const range of group) {
-      parts.push(`SELECT * FROM (${historyBranchSql(hasCursor)})`);
+      parts.push(`SELECT * FROM (${historyBranchSql(hasCursor, range)})`);
       binds.push(args.dayStart, args.dayEnd, range.minLat, range.maxLat, range.minLng, range.maxLng);
       if (hasCursor) binds.push(cursorTs, cursorTs, cursorId);
       binds.push(limit);

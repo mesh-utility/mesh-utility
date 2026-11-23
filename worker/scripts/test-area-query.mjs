@@ -211,6 +211,8 @@ test('history and coverage SQL stay within the D1 bind cap', () => {
   assert.deepEqual(one[0].binds, [10, 20, 1, 2, 3, 4, 1001]);
   assert.equal(one[0].sql.includes('UNION ALL'), false);
   assert.match(one[0].sql, /latitude BETWEEN/);
+  // lat span == 1.0 uses unary plus so the planner prefers idx_scans_lat_lng_ts
+  assert.match(one[0].sql, /\+timestamp >= \? AND \+timestamp <= \?/);
 
   const cursor = buildHistoryQueries({
     ranges: [{ minLat: 1, maxLat: 2, minLng: 3, maxLng: 4 }],
@@ -281,6 +283,56 @@ test('merge keeps timestamp,id order and drops duplicate ids', () => {
     merged.rows.map((row) => row.id),
     [1, 2],
   );
+});
+
+test("small-bbox history SQL uses +timestamp; larger boxes keep binds and today's SQL", () => {
+  const small = buildHistoryQueries({
+    ranges: [{ minLat: 40, maxLat: 40.5, minLng: -77, maxLng: -76 }],
+    dayStart: 10,
+    dayEnd: 20,
+    pageSize: 1000,
+  });
+  assert.match(small[0].sql, /\+timestamp >= \? AND \+timestamp <= \?/);
+  assert.deepEqual(small[0].binds, [10, 20, 40, 40.5, -77, -76, 1001]);
+
+  const smallCursor = buildHistoryQueries({
+    ranges: [{ minLat: 40, maxLat: 41, minLng: -77, maxLng: -76 }],
+    dayStart: 10,
+    dayEnd: 20,
+    pageSize: 1000,
+    cursorTimestamp: 15,
+    cursorId: 7,
+  });
+  assert.match(smallCursor[0].sql, /\+timestamp >= \? AND \+timestamp <= \?/);
+  assert.match(smallCursor[0].sql, /timestamp > \? OR \(timestamp = \? AND id > \?\)/);
+  assert.deepEqual(smallCursor[0].binds, [10, 20, 40, 41, -77, -76, 15, 15, 7, 1001]);
+
+  const large = buildHistoryQueries({
+    ranges: [{ minLat: 40, maxLat: 42, minLng: -77, maxLng: -76 }],
+    dayStart: 10,
+    dayEnd: 20,
+    pageSize: 1000,
+  });
+  assert.equal(large[0].sql.includes('+timestamp'), false);
+  assert.match(large[0].sql, /WHERE timestamp >= \? AND timestamp <= \?/);
+  assert.deepEqual(large[0].binds, [10, 20, 40, 42, -77, -76, 1001]);
+
+  const mixed = buildHistoryQueries({
+    ranges: [
+      { minLat: 40, maxLat: 40.5, minLng: -77, maxLng: -76 },
+      { minLat: 30, maxLat: 42, minLng: -80, maxLng: -70 },
+    ],
+    dayStart: 1,
+    dayEnd: 2,
+    pageSize: 10,
+  });
+  assert.match(mixed[0].sql, /UNION ALL/);
+  assert.match(mixed[0].sql, /\+timestamp >= \? AND \+timestamp <= \?/);
+  assert.match(mixed[0].sql, /WHERE timestamp >= \? AND timestamp <= \?/);
+  assert.deepEqual(mixed[0].binds, [
+    1, 2, 40, 40.5, -77, -76, 11,
+    1, 2, 30, 42, -80, -70, 11,
+  ]);
 });
 
 test('shipped division table resolves a state and a county', () => {
